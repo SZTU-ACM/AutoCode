@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<problem revision="1" short-name="tower_construction" url="https://polygon.codeforces.com/p/user/tower_construction">
+    <names>
+        <name language="chinese" value="积木高塔"/>
+    </names>
+    <statements>
+        <statement charset="UTF-8" language="chinese" mathjax="true" path="statements/README.md" type="application/x-tex"/>
+    </statements>
+    <judging cpu-name="Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz" cpu-speed="3600" os="Windows">
+        <testset name="tests">
+            <time-limit>1000</time-limit>
+            <memory-limit>268435456</memory-limit>
+            <test-count>20</test-count>
+            <input-path-pattern>tests/%02d.in</input-path-pattern>
+            <answer-path-pattern>tests/%02d.ans</answer-path-pattern>
+            <tests/>
+        </testset>
+    </judging>
+    <files>
+        <resources>
+            <file path="files/testlib.h"/>
+        </resources>
+        <executables>
+            <executable>
+                <source path="files/gen.cpp"/>
+            </executable>
+            <executable>
+                <source path="files/val.cpp"/>
+            </executable>
+        </executables>
+    </files>
+    <assets>
+        <solutions>
+            <solution tag="main">
+                <source path="solutions/sol.cpp"/>
+            </solution>
+            <solution tag="rejected">
+                <source path="solutions/brute.cpp"/>
+            </solution>
+        </solutions>
+    </assets>
+</problem>
