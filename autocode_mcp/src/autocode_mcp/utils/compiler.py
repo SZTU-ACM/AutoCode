@@ -15,6 +15,8 @@ import shutil
 from dataclasses import dataclass
 from typing import Optional
 
+from .. import TEMPLATES_DIR
+
 
 @dataclass
 class CompileResult:
@@ -68,6 +70,7 @@ async def compile_cpp(
     compiler: str = "g++",
     std: str = "c++2c",
     opt_level: str = "O2",
+    include_dirs: Optional[list[str]] = None,
 ) -> CompileResult:
     """
     编译 C++ 文件，带超时控制。
@@ -79,6 +82,7 @@ async def compile_cpp(
         compiler: 编译器名称
         std: C++ 标准
         opt_level: 优化级别
+        include_dirs: 额外的 include 目录列表
 
     Returns:
         CompileResult: 编译结果
@@ -94,10 +98,23 @@ async def compile_cpp(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
+    # 获取 templates 目录路径（用于 testlib.h）
+    templates_dir = TEMPLATES_DIR
+
+    # 构建 include 参数
+    include_flags = []
+    if include_dirs:
+        for inc_dir in include_dirs:
+            include_flags.extend(["-I", inc_dir])
+    # 添加 templates 目录
+    if os.path.exists(templates_dir):
+        include_flags.extend(["-I", templates_dir])
+
     cmd = [
         compiler,
         f"-std={std}",
         f"-{opt_level}",
+        *include_flags,
         source_path,
         "-o",
         binary_path,

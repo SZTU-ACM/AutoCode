@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Optional
 from .base import Tool, ToolResult
-from ..utils.compiler import compile_cpp, run_binary
+from ..utils.compiler import compile_cpp, run_binary_with_args
 
 
 class CheckerBuildTool(Tool):
@@ -130,18 +130,18 @@ class CheckerBuildTool(Tool):
                 output_file = os.path.join(temp_dir, f"output_{i}.txt")
                 answer_file = os.path.join(temp_dir, f"answer_{i}.txt")
 
-                with open(input_file, "w") as f:
+                with open(input_file, "w", encoding="utf-8") as f:
                     f.write(input_data)
-                with open(output_file, "w") as f:
+                with open(output_file, "w", encoding="utf-8") as f:
                     f.write(contestant_output)
-                with open(answer_file, "w") as f:
+                with open(answer_file, "w", encoding="utf-8") as f:
                     f.write(reference_output)
 
                 # 运行 checker
                 # checker.exe input.txt output.txt answer.txt
-                run_result = await run_binary(
+                run_result = await run_binary_with_args(
                     binary_path,
-                    "",
+                    [input_file, output_file, answer_file],
                     timeout=5,
                 )
 

@@ -198,10 +198,10 @@ class GeneratorRunTool(Tool):
                 timeout=10,
             )
 
-            if not gen_result.success:
-                continue
-
+            # 只要有输出就接受（某些 generator 可能返回非零退出码但仍产生有效输出）
             input_data = gen_result.stdout
+            if not input_data or not input_data.strip():
+                continue
 
             # 计算 signature 用于去重
             sig = hashlib.md5(input_data.encode()).hexdigest()
