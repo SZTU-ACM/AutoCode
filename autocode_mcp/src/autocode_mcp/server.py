@@ -9,7 +9,7 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, Resource, Prompt
 
 from .tools.base import Tool as BaseTool, ToolResult
 from .tools.file_ops import FileReadTool, FileSaveTool
@@ -20,6 +20,8 @@ from .tools.validator import ValidatorBuildTool, ValidatorSelectTool
 from .tools.generator import GeneratorBuildTool, GeneratorRunTool
 from .tools.checker import CheckerBuildTool
 from .tools.interactor import InteractorBuildTool
+from . import resources
+from . import prompts
 
 
 # 创建 MCP Server 实例
@@ -117,6 +119,55 @@ def main() -> None:
             )
 
     asyncio.run(run())
+
+
+@app.list_resources()
+async def list_resources() -> list[Resource]:
+    """返回所有可用资源。"""
+    resource_list = []
+    # 模板资源
+    for template_name in resources.list_templates():
+        resource_list.append(Resource(
+            uri=f"template://{template_name}",
+            name=template_name,
+            description=f"Template file: {template_name}",
+            mimeType="text/plain",
+        ))
+    return resource_list
+
+
+@app.read_resource()
+async def read_resource(uri: str) -> str:
+    """读取资源内容。"""
+    if uri.startswith("template://"):
+        template_name = uri[11:]
+        path = resources.get_template_path(template_name)
+        if path:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        return f"Template not found: {template_name}"
+    return f"Unknown resource: {uri}"
+
+
+@app.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    """返回所有可用提示词。"""
+    return [
+        Prompt(
+            name=name,
+            description=f"Prompt template: {name}",
+        )
+        for name in prompts.list_prompts()
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict[str, str] | None = None) -> str:
+    """获取提示词内容。"""
+    content = prompts.get_prompt(name)
+    if not content:
+        return f"Prompt not found: {name}"
+    return content
 
 
 if __name__ == "__main__":
