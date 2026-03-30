@@ -1,23 +1,59 @@
 # Python
 __pycache__/
-*.pyc
-.venv/
-.env
-*.egg-info/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# C++ Build Products
-*.exe
-*.o
-*.out
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
 
-# Development stage files (these are moved when packing)
-# But keep tests/ in Polygon format problems
-temp/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
 
-# IDE & OS
-.vscode/
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# IDE
 .idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project specific
+*.exe
+*.out
+*.o
+.tmp/
+
+# OS
 .DS_Store
-.claude/
+Thumbs.db
