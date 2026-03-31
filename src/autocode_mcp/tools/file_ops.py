@@ -1,6 +1,7 @@
 """
 文件操作工具。
 """
+
 import os
 
 from .base import Tool, ToolResult
@@ -46,6 +47,15 @@ class FileReadTool(Tool):
             full_path = os.path.join(problem_dir, path)
         else:
             full_path = path
+
+        # 规范化路径并防止路径遍历攻击
+        full_path = os.path.normpath(os.path.abspath(full_path))
+
+        # 如果指定了 problem_dir，确保文件在该目录内
+        if problem_dir:
+            problem_dir = os.path.normpath(os.path.abspath(problem_dir))
+            if not full_path.startswith(problem_dir + os.sep) and full_path != problem_dir:
+                return ToolResult.fail("Access denied: path outside problem directory")
 
         if not os.path.exists(full_path):
             return ToolResult.fail(f"File not found: {path}")
@@ -116,8 +126,19 @@ class FileSaveTool(Tool):
         else:
             full_path = path
 
-        # 确保目录存在
+        # 规范化路径并防止路径遍历攻击
         dir_path = os.path.dirname(full_path)
+        if dir_path:
+            dir_path = os.path.normpath(os.path.abspath(dir_path))
+
+        # 如果指定了 problem_dir，确保文件在该目录内
+        if problem_dir:
+            problem_dir = os.path.normpath(os.path.abspath(problem_dir))
+            full_path = os.path.normpath(os.path.abspath(full_path))
+            if not full_path.startswith(problem_dir + os.sep) and full_path != problem_dir:
+                return ToolResult.fail("Access denied: path outside problem directory")
+
+        # 确保目录存在
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 

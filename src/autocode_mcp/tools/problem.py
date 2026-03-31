@@ -1,6 +1,7 @@
 """
 Problem 工具组 - 题目管理。
 """
+
 import os
 import shutil
 
@@ -76,10 +77,11 @@ class ProblemCreateTool(Tool):
             dest_testlib = os.path.join(problem_dir, "files", "testlib.h")
             shutil.copy2(template_testlib, dest_testlib)
         else:
-            # 如果模板不存在，创建一个占位符
-            dest_testlib = os.path.join(problem_dir, "files", "testlib.h")
-            with open(dest_testlib, "w") as f:
-                f.write("// testlib.h - Please download from https://github.com/MikeMirzayanov/testlib\n")
+            return ToolResult.fail(
+                f"testlib.h template not found at {template_testlib}. "
+                "Please download from https://github.com/MikeMirzayanov/testlib "
+                "and place it in the templates/ directory."
+            )
 
         # 创建基础 README.md
         readme_path = os.path.join(problem_dir, "statements", "README.md")
@@ -178,23 +180,29 @@ class ProblemGenerateTestsTool(Tool):
         test_configs.extend([("1", "1", "1", "10", "1", "3")] * 3)
 
         # 随机数据
-        test_configs.extend([
-            ("2", "2", "10", "100", "1", "3"),
-            ("2", "2", "100", "1000", "1", "3"),
-            ("2", "2", "1000", "5000", "1", "3"),
-            ("2", "2", "5000", "10000", "1", "3"),
-        ])
+        test_configs.extend(
+            [
+                ("2", "2", "10", "100", "1", "3"),
+                ("2", "2", "100", "1000", "1", "3"),
+                ("2", "2", "1000", "5000", "1", "3"),
+                ("2", "2", "5000", "10000", "1", "3"),
+            ]
+        )
 
         # 大数据
-        test_configs.extend([
-            ("3", "3", "100000", "200000", "1", "1"),
-            ("3", "3", "150000", "200000", "1", "1"),
-        ])
+        test_configs.extend(
+            [
+                ("3", "3", "100000", "200000", "1", "1"),
+                ("3", "3", "150000", "200000", "1", "1"),
+            ]
+        )
 
         # 边界数据
-        test_configs.extend([
-            ("4", "4", "10", "50", "1", "3"),
-        ])
+        test_configs.extend(
+            [
+                ("4", "4", "10", "50", "1", "3"),
+            ]
+        )
 
         for i, _config in enumerate(test_configs[:test_count], 1):
             test_file = os.path.join(tests_dir, f"{i:02d}.in")

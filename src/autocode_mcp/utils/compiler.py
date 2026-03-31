@@ -6,6 +6,7 @@
 - 资源限制
 - 临时目录隔离
 """
+
 import asyncio
 import os
 import shutil
@@ -20,6 +21,7 @@ from .platform import get_exe_extension
 @dataclass
 class CompileResult:
     """编译结果。"""
+
     success: bool
     binary_path: str | None = None
     error: str | None = None
@@ -30,6 +32,7 @@ class CompileResult:
 @dataclass
 class RunResult:
     """执行结果。"""
+
     success: bool
     return_code: int = -1
     stdout: str = ""
@@ -127,10 +130,7 @@ async def compile_cpp(
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except TimeoutError:
             process.kill()
             await process.wait()
@@ -166,49 +166,32 @@ async def compile_cpp(
         )
 
 
-async def run_binary(
-    binary_path: str,
+async def _run_process(
+    cmd: list[str],
     stdin: str = "",
     timeout: int = 5,
     memory_mb: int = 256,
 ) -> RunResult:
-    """
-    运行二进制文件，带超时和内存限制。
-
-    Args:
-        binary_path: 二进制文件路径
-        stdin: 标准输入
-        timeout: 超时时间（秒）
-        memory_mb: 内存限制（MB），仅 Linux 有效
-
-    Returns:
-        RunResult: 执行结果
-    """
-    if not os.path.exists(binary_path):
-        return RunResult(
-            success=False,
-            error=f"Binary not found: {binary_path}",
-        )
-
+    """运行进程的公共逻辑。"""
     import time
+
     start_time = time.time()
 
     try:
-        # Windows 不支持 ulimit，仅使用 timeout
         if sys.platform == "win32":
             process = await asyncio.create_subprocess_exec(
-                binary_path,
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         else:
-            # Linux: 使用 prlimit 设置内存限制
-            # 注意：需要 prlimit 命令可用
             memory_bytes = memory_mb * 1024 * 1024
             process = await asyncio.create_subprocess_exec(
-                "prlimit", f"--as={memory_bytes}", f"--data={memory_bytes}",
-                binary_path,
+                "prlimit",
+                f"--as={memory_bytes}",
+                f"--data={memory_bytes}",
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -216,8 +199,7 @@ async def run_binary(
 
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=stdin.encode("utf-8")),
-                timeout=timeout
+                process.communicate(input=stdin.encode("utf-8") if stdin else None), timeout=timeout
             )
         except TimeoutError:
             process.kill()
@@ -242,13 +224,40 @@ async def run_binary(
     except FileNotFoundError:
         return RunResult(
             success=False,
-            error=f"Binary not found or prlimit unavailable: {binary_path}",
+            error=f"Binary not found or prlimit unavailable: {cmd[0]}",
         )
     except Exception as e:
         return RunResult(
             success=False,
             error=f"Execution error: {str(e)}",
         )
+
+
+async def run_binary(
+    binary_path: str,
+    stdin: str = "",
+    timeout: int = 5,
+    memory_mb: int = 256,
+) -> RunResult:
+    """
+    运行二进制文件，带超时和内存限制。
+
+    Args:
+        binary_path: 二进制文件路径
+        stdin: 标准输入
+        timeout: 超时时间（秒）
+        memory_mb: 内存限制（MB），仅 Linux 有效
+
+    Returns:
+        RunResult: 执行结果
+    """
+    if not os.path.exists(binary_path):
+        return RunResult(
+            success=False,
+            error=f"Binary not found: {binary_path}",
+        )
+
+    return await _run_process([binary_path], stdin, timeout, memory_mb)
 
 
 async def run_binary_with_args(
@@ -277,64 +286,7 @@ async def run_binary_with_args(
             error=f"Binary not found: {binary_path}",
         )
 
-    import time
-    start_time = time.time()
-
-    try:
-        if sys.platform == "win32":
-            process = await asyncio.create_subprocess_exec(
-                binary_path,
-                *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        else:
-            memory_bytes = memory_mb * 1024 * 1024
-            process = await asyncio.create_subprocess_exec(
-                "prlimit", f"--as={memory_bytes}", f"--data={memory_bytes}",
-                binary_path,
-                *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=stdin.encode("utf-8") if stdin else None),
-                timeout=timeout
-            )
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            return RunResult(
-                success=False,
-                timed_out=True,
-                error=f"Execution timeout after {timeout}s",
-                time_ms=int((time.time() - start_time) * 1000),
-            )
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
-        return RunResult(
-            success=process.returncode == 0,
-            return_code=process.returncode,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
-            time_ms=elapsed_ms,
-        )
-
-    except FileNotFoundError:
-        return RunResult(
-            success=False,
-            error=f"Binary not found or prlimit unavailable: {binary_path}",
-        )
-    except Exception as e:
-        return RunResult(
-            success=False,
-            error=f"Execution error: {str(e)}",
-        )
+    return await _run_process([binary_path, *args], stdin, timeout, memory_mb)
 
 
 async def compile_all(

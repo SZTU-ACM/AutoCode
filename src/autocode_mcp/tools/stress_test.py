@@ -3,6 +3,7 @@ Stress Test 工具 - 对拍测试。
 
 基于论文框架，比较 sol.cpp 和 brute.cpp 的输出。
 """
+
 import os
 import tempfile
 
@@ -105,7 +106,7 @@ class StressTestRunTool(Tool):
                     with open(input_path) as f:
                         input_data = f.read()
                     val_result = await run_binary(val_exe, input_data, timeout=timeout)
-                    if val_result.returncode != 0:
+                    if val_result.return_code != 0:
                         validator_failed = True
                         last_input = input_data
                         failed_round = i
@@ -185,7 +186,7 @@ class StressTestRunTool(Tool):
                     "stderr": gen_result.stderr,
                 }
 
-            with open(input_path, "w") as f:
+            with open(input_path, "w", encoding="utf-8") as f:
                 f.write(gen_result.stdout)
 
             return {"success": True}
