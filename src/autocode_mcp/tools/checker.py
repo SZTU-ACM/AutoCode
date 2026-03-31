@@ -4,9 +4,9 @@ Checker 工具组 - 输出检查器。
 基于论文 Algorithm 3: BUILDCHECKER 实现。
 """
 import os
-import sys
 
 from ..utils.compiler import compile_cpp, run_binary_with_args
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -89,8 +89,7 @@ class CheckerBuildTool(Tool):
             return ToolResult.fail(f"Failed to save code: {str(e)}")
 
         # 编译
-        exe_ext = ".exe" if sys.platform == "win32" else ""
-        binary_path = os.path.join(problem_dir, f"checker{exe_ext}")
+        binary_path = os.path.join(problem_dir, f"checker{get_exe_extension()}")
 
         compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
 

@@ -2,9 +2,9 @@
 Solution 工具组 - 解法构建和运行。
 """
 import os
-import sys
 
 from ..utils.compiler import compile_cpp, run_binary
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -76,7 +76,7 @@ class SolutionBuildTool(Tool):
             return ToolResult.fail(f"Failed to save code: {str(e)}")
 
         # 编译
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
         binary_name = f"{solution_type}{exe_ext}"
         binary_path = os.path.join(problem_dir, binary_name)
 
@@ -148,7 +148,7 @@ class SolutionRunTool(Tool):
     ) -> ToolResult:
         """执行解法运行。"""
         # 确定二进制文件路径
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
         binary_path = os.path.join(problem_dir, f"{solution_type}{exe_ext}")
 
         if not os.path.exists(binary_path):

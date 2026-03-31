@@ -11,6 +11,7 @@ from .compiler import (
     run_binary,
     run_binary_with_args,
 )
+from .platform import get_exe_extension, is_linux, is_macos, is_windows
 
 __all__ = [
     "compile_cpp",
@@ -21,4 +22,8 @@ __all__ = [
     "RunResult",
     "get_work_dir",
     "cleanup_work_dir",
+    "get_exe_extension",
+    "is_windows",
+    "is_linux",
+    "is_macos",
 ]

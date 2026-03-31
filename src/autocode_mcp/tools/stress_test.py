@@ -4,10 +4,10 @@ Stress Test 工具 - 对拍测试。
 基于论文框架，比较 sol.cpp 和 brute.cpp 的输出。
 """
 import os
-import sys
 import tempfile
 
 from ..utils.compiler import run_binary
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -64,7 +64,7 @@ class StressTestRunTool(Tool):
         timeout: int = 30,
     ) -> ToolResult:
         """执行对拍测试。"""
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
 
         # 检查必要文件
         gen_exe = os.path.join(problem_dir, f"gen{exe_ext}")
@@ -92,24 +92,13 @@ class StressTestRunTool(Tool):
 
             for i in range(1, trials + 1):
                 # 1. 生成输入数据
-                # gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max>
-                # type=1 表示小数据
-                try:
-                    with open(input_path, "w") as f:
-                        gen_result = await run_binary(
-                            gen_exe,
-                            "",
-                            timeout=timeout,
-                        )
-                        if gen_result.timed_out or not gen_result.success:
-                            return ToolResult.fail(
-                                f"Generator failed at round {i}",
-                                round=i,
-                                stderr=gen_result.stderr,
-                            )
-                        f.write(gen_result.stdout)
-                except Exception as e:
-                    return ToolResult.fail(f"Generator error at round {i}: {str(e)}")
+                gen_result = await self._generate_input(gen_exe, input_path, i, timeout)
+                if not gen_result["success"]:
+                    return ToolResult.fail(
+                        gen_result["error"],
+                        round=i,
+                        stderr=gen_result.get("stderr", ""),
+                    )
 
                 # 2. 验证输入（如果有 validator）
                 if os.path.exists(val_exe):
@@ -122,9 +111,11 @@ class StressTestRunTool(Tool):
                         failed_round = i
                         break
 
-                # 3. 运行 sol
+                # 3. 运行 sol 和 brute，比较输出
                 with open(input_path) as f:
                     input_data = f.read()
+
+                # 运行 sol
                 sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
                 if sol_result.timed_out or not sol_result.success:
                     return ToolResult.fail(
@@ -135,7 +126,7 @@ class StressTestRunTool(Tool):
                     )
                 sol_output = sol_result.stdout
 
-                # 4. 运行 brute
+                # 运行 brute
                 brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
                 if brute_result.timed_out:
                     return ToolResult.fail(
@@ -159,6 +150,64 @@ class StressTestRunTool(Tool):
                     failed_round = i
                     break
 
+        return self._format_result(
+            failed_round,
+            validator_failed,
+            last_input,
+            sol_output,
+            brute_output,
+            trials,
+        )
+
+    async def _generate_input(
+        self,
+        gen_exe: str,
+        input_path: str,
+        round_num: int,
+        timeout: int,
+    ) -> dict:
+        """
+        生成输入数据。
+
+        Returns:
+            dict: {"success": bool, "error": str | None}
+        """
+        try:
+            gen_result = await run_binary(
+                gen_exe,
+                "",
+                timeout=timeout,
+            )
+            if gen_result.timed_out or not gen_result.success:
+                return {
+                    "success": False,
+                    "error": f"Generator failed at round {round_num}",
+                    "stderr": gen_result.stderr,
+                }
+
+            with open(input_path, "w") as f:
+                f.write(gen_result.stdout)
+
+            return {"success": True}
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Generator error at round {round_num}: {str(e)}",
+            }
+
+    def _format_result(
+        self,
+        failed_round: int | None,
+        validator_failed: bool,
+        last_input: str | None,
+        sol_output: str | None,
+        brute_output: str | None,
+        total_rounds: int,
+    ) -> ToolResult:
+        """
+        格式化测试结果。
+        """
         if failed_round:
             return ToolResult.fail(
                 f"Output mismatch at round {failed_round}"
@@ -169,11 +218,11 @@ class StressTestRunTool(Tool):
                 sol_output=sol_output,
                 brute_output=brute_output,
                 completed_rounds=failed_round - 1,
-                total_rounds=trials,
+                total_rounds=total_rounds,
             )
 
         return ToolResult.ok(
-            completed_rounds=trials,
-            total_rounds=trials,
-            message=f"All {trials} rounds passed",
+            completed_rounds=total_rounds,
+            total_rounds=total_rounds,
+            message=f"All {total_rounds} rounds passed",
         )

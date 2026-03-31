@@ -4,9 +4,9 @@ Validator 工具组 - 数据校验器。
 基于论文 Algorithm 1: BUILDVALIDATOR 实现。
 """
 import os
-import sys
 
 from ..utils.compiler import compile_cpp, run_binary
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -85,8 +85,7 @@ class ValidatorBuildTool(Tool):
             return ToolResult.fail(f"Failed to save code: {str(e)}")
 
         # 编译
-        exe_ext = ".exe" if sys.platform == "win32" else ""
-        binary_path = os.path.join(problem_dir, f"val{exe_ext}")
+        binary_path = os.path.join(problem_dir, f"val{get_exe_extension()}")
 
         compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
 

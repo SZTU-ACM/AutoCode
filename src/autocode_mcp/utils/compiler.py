@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 
 from .. import TEMPLATES_DIR
+from .platform import get_exe_extension
 
 
 @dataclass
@@ -353,9 +354,7 @@ async def compile_all(
         dict: 源文件名 -> 编译结果
     """
     results = {}
-
-    # 确定可执行文件扩展名
-    exe_ext = ".exe" if sys.platform == "win32" else ""
+    exe_ext = get_exe_extension()
 
     for source in sources:
         source_path = os.path.join(problem_dir, source)

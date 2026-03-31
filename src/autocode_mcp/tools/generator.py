@@ -5,9 +5,9 @@ Generator 工具组 - 数据生成器。
 """
 import hashlib
 import os
-import sys
 
 from ..utils.compiler import compile_cpp, run_binary, run_binary_with_args
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -65,7 +65,7 @@ class GeneratorBuildTool(Tool):
         except Exception as e:
             return ToolResult.fail(f"Failed to save code: {str(e)}")
 
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
         binary_path = os.path.join(problem_dir, f"gen{exe_ext}")
 
         compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
@@ -154,7 +154,7 @@ class GeneratorRunTool(Tool):
         t_max: int = 1,
     ) -> ToolResult:
         """执行数据生成。"""
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
 
         # 检查 generator
         gen_exe = os.path.join(problem_dir, f"gen{exe_ext}")

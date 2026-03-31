@@ -3,9 +3,9 @@ Problem 工具组 - 题目管理。
 """
 import os
 import shutil
-import sys
 
 from ..utils.compiler import run_binary
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
 
@@ -144,7 +144,7 @@ class ProblemGenerateTestsTool(Tool):
         timeout: int = 60,
     ) -> ToolResult:
         """执行测试数据生成。"""
-        exe_ext = ".exe" if sys.platform == "win32" else ""
+        exe_ext = get_exe_extension()
 
         # 检查必要文件
         gen_exe = os.path.join(problem_dir, "files", f"gen{exe_ext}")
