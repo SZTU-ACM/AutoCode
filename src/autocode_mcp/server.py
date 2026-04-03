@@ -3,6 +3,7 @@ MCP Server 入口。
 
 提供 14 个原子工具，基于 AutoCode 论文框架。
 """
+
 import asyncio
 from typing import Any
 
@@ -84,24 +85,30 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """执行工具调用。"""
     if name not in TOOLS:
-        return [TextContent(
-            type="text",
-            text=f"Unknown tool: {name}",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"Unknown tool: {name}",
+            )
+        ]
 
     tool = TOOLS[name]
     try:
         result = await tool.execute(**arguments)
-        return [TextContent(
-            type="text",
-            text=str(result.to_dict()),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=str(result.to_dict()),
+            )
+        ]
     except Exception as e:
         error_result = ToolResult.fail(str(e))
-        return [TextContent(
-            type="text",
-            text=str(error_result.to_dict()),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=str(error_result.to_dict()),
+            )
+        ]
 
 
 def main() -> None:
@@ -125,12 +132,14 @@ async def list_resources() -> list[Resource]:
     resource_list = []
     # 模板资源
     for template_name in resources.list_templates():
-        resource_list.append(Resource(
-            uri=f"template://{template_name}",
-            name=template_name,
-            description=f"Template file: {template_name}",
-            mimeType="text/plain",
-        ))
+        resource_list.append(
+            Resource(
+                uri=f"template://{template_name}",
+                name=template_name,
+                description=f"Template file: {template_name}",
+                mimeType="text/plain",
+            )
+        )
     return resource_list
 
 

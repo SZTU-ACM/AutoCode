@@ -3,6 +3,7 @@ Compiler 工具函数测试。
 
 测试 C++ 编译和执行的核心功能。
 """
+
 import os
 import tempfile
 
@@ -19,17 +20,17 @@ from autocode_mcp.utils.compiler import (
 )
 
 # 简单的 Hello World 代码
-HELLO_WORLD_CODE = '''
+HELLO_WORLD_CODE = """
 #include <iostream>
 
 int main() {
     std::cout << "Hello, World!" << std::endl;
     return 0;
 }
-'''
+"""
 
 # 带参数的程序代码
-ARGS_CODE = '''
+ARGS_CODE = """
 #include <iostream>
 #include <string>
 
@@ -41,10 +42,10 @@ int main(int argc, char* argv[]) {
     std::cout << std::endl;
     return 0;
 }
-'''
+"""
 
 # 无限循环代码（用于测试超时）
-INFINITE_LOOP_CODE = '''
+INFINITE_LOOP_CODE = """
 #include <iostream>
 
 int main() {
@@ -53,7 +54,7 @@ int main() {
     }
     return 0;
 }
-'''
+"""
 
 
 @pytest.mark.asyncio
@@ -174,7 +175,7 @@ async def test_run_binary_timeout():
 async def test_run_binary_with_stdin():
     """测试运行带标准输入。"""
     # 需要一个读取 stdin 的程序
-    STDIN_CODE = '''
+    stdin_code = """
 #include <iostream>
 #include <string>
 
@@ -184,14 +185,14 @@ int main() {
     std::cout << "Input: " << line << std::endl;
     return 0;
 }
-'''
+"""
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source_path = os.path.join(tmpdir, "test.cpp")
         binary_path = os.path.join(tmpdir, "test" + (".exe" if os.name == "nt" else ""))
 
         with open(source_path, "w") as f:
-            f.write(STDIN_CODE)
+            f.write(stdin_code)
 
         compile_result = await compile_cpp(source_path, binary_path)
         if not compile_result.success:
@@ -219,10 +220,7 @@ async def test_run_binary_with_args():
             pytest.skip("Compilation failed")
 
         # 运行带参数
-        result = await run_binary_with_args(
-            binary_path,
-            args=["hello", "world", "123"]
-        )
+        result = await run_binary_with_args(binary_path, args=["hello", "world", "123"])
 
         assert result.success
         assert "hello world 123" in result.stdout
@@ -246,14 +244,14 @@ async def test_compile_all_success():
         for i in range(3):
             source_path = os.path.join(tmpdir, f"test{i}.cpp")
             with open(source_path, "w") as f:
-                f.write(f'''
+                f.write(f"""
 #include <iostream>
 
 int main() {{
     std::cout << "Program {i}" << std::endl;
     return 0;
 }}
-''')
+""")
             sources.append(f"test{i}.cpp")
 
         # 批量编译

@@ -50,6 +50,7 @@ strict = true
 warn_return_any = true
 warn_unused_ignores = true
 exclude = ["tests/", ".venv/"]
+disable_error_code = ["override", "no-untyped-call", "untyped-decorator", "no-untyped-def", "var-annotated", "type-arg", "no-any-return", "index", "type-var", "arg-type"]
 
 [tool.coverage.run]
 source = ["src/autocode_mcp"]

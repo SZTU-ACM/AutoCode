@@ -70,7 +70,7 @@ async def compile_cpp(
     binary_path: str,
     timeout: int = 30,
     compiler: str = "g++",
-    std: str = "c++2c",
+    std: str = "c++20",
     opt_level: str = "O2",
     include_dirs: list[str] | None = None,
 ) -> CompileResult:
@@ -215,7 +215,7 @@ async def _run_process(
 
         return RunResult(
             success=process.returncode == 0,
-            return_code=process.returncode,
+            return_code=process.returncode if process.returncode is not None else -1,
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),
             time_ms=elapsed_ms,

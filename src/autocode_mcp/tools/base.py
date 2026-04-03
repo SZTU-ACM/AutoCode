@@ -1,8 +1,10 @@
 """
 工具基类和统一返回值格式。
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -15,13 +17,14 @@ class ToolResult:
         error: 失败原因（编译错误 stderr 等）
         data: 工具特定的结果数据
     """
+
     success: bool
     error: str | None = None
-    data: dict = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典格式返回给 MCP Client。"""
-        result = {"success": self.success}
+        result: dict[str, Any] = {"success": self.success}
         if self.error:
             result["error"] = self.error
         if self.data:
@@ -61,11 +64,11 @@ class Tool(ABC):
 
     @property
     @abstractmethod
-    def input_schema(self) -> dict:
+    def input_schema(self) -> dict[str, Any]:
         """JSON Schema 格式的输入定义。"""
         pass
 
-    def get_tool_definition(self) -> dict:
+    def get_tool_definition(self) -> dict[str, Any]:
         """获取 MCP 工具定义。"""
         return {
             "name": self.name,
