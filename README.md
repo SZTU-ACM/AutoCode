@@ -146,11 +146,27 @@ Edit `~/.config/opencode/opencode.json`:
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "servers": {
-      "autocode": {
-        "command": "autocode-mcp"
-      }
+    "autocode": {
+      "type": "local",
+      "command": ["autocode-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Or use `uvx` without pre-installation:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "autocode": {
+      "type": "local",
+      "command": ["uvx", "autocode-mcp"],
+      "enabled": true
     }
   }
 }

@@ -140,15 +140,33 @@ stress_test_run(problem_dir="problems/ab", trials=100)
 }
 ```
 
-### Claude Desktop
+### OpenCode
 
-编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）或 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）：
+编辑 `~/.config/opencode/opencode.json`：
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "autocode": {
-      "command": "autocode-mcp"
+      "type": "local",
+      "command": ["autocode-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+或使用 `uvx` 无需预安装：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "autocode": {
+      "type": "local",
+      "command": ["uvx", "autocode-mcp"],
+      "enabled": true
     }
   }
 }
