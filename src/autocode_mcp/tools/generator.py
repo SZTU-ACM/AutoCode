@@ -7,12 +7,13 @@ Generator 工具组 - 数据生成器。
 import hashlib
 import os
 
-from ..utils.compiler import compile_cpp, run_binary, run_binary_with_args
+from ..utils.compiler import run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
+from .mixins import BuildToolMixin
 
 
-class GeneratorBuildTool(Tool):
+class GeneratorBuildTool(Tool, BuildToolMixin):
     """构建数据生成器。"""
 
     @property
@@ -69,7 +70,7 @@ class GeneratorBuildTool(Tool):
         exe_ext = get_exe_extension()
         binary_path = os.path.join(problem_dir, f"gen{exe_ext}")
 
-        compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
+        compile_result = await self.build(source_path, binary_path, compiler=compiler)
 
         if not compile_result.success:
             return ToolResult.fail(

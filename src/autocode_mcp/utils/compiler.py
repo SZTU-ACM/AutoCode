@@ -15,7 +15,10 @@ import uuid
 from dataclasses import dataclass
 
 from .. import TEMPLATES_DIR
+from .cache import CompileCache
 from .platform import get_exe_extension
+
+_cache = CompileCache()
 
 
 @dataclass
@@ -73,6 +76,7 @@ async def compile_cpp(
     std: str = "c++20",
     opt_level: str = "O2",
     include_dirs: list[str] | None = None,
+    use_cache: bool = True,
 ) -> CompileResult:
     """
     编译 C++ 文件，带超时控制。
@@ -85,6 +89,7 @@ async def compile_cpp(
         std: C++ 标准
         opt_level: 优化级别
         include_dirs: 额外的 include 目录列表
+        use_cache: 是否使用编译缓存
 
     Returns:
         CompileResult: 编译结果
@@ -94,6 +99,19 @@ async def compile_cpp(
             success=False,
             error=f"Source file not found: {source_path}",
         )
+
+    if use_cache:
+        cached_binary = _cache.get(source_path, compiler, std, opt_level)
+        if cached_binary:
+            output_dir = os.path.dirname(binary_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            shutil.copy2(cached_binary, binary_path)
+            return CompileResult(
+                success=True,
+                binary_path=binary_path,
+                stderr="(cached)",
+            )
 
     # 确保输出目录存在
     output_dir = os.path.dirname(binary_path)
@@ -147,6 +165,9 @@ async def compile_cpp(
                 stderr=stderr.decode("utf-8", errors="replace"),
             )
 
+        if use_cache:
+            _cache.set(source_path, binary_path, compiler, std, opt_level)
+
         return CompileResult(
             success=True,
             binary_path=binary_path,
@@ -176,9 +197,25 @@ async def _run_process(
     import time
 
     start_time = time.time()
+    job = None
 
     try:
-        if sys.platform == "win32" or sys.platform == "darwin":
+        if sys.platform == "win32":
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            if process.pid:
+                try:
+                    from .win_job import WinJobObject
+
+                    job = WinJobObject(memory_mb=memory_mb, timeout_sec=timeout)
+                    job.assign_process(process.pid)
+                except Exception:
+                    job = None
+        elif sys.platform == "darwin":
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -204,6 +241,8 @@ async def _run_process(
         except TimeoutError:
             process.kill()
             await process.wait()
+            if job:
+                job.terminate()
             return RunResult(
                 success=False,
                 timed_out=True,
@@ -212,6 +251,9 @@ async def _run_process(
             )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+
+        if job:
+            job.terminate()
 
         return RunResult(
             success=process.returncode == 0,
@@ -227,6 +269,8 @@ async def _run_process(
             error=f"Binary not found or prlimit unavailable: {cmd[0]}",
         )
     except Exception as e:
+        if job:
+            job.terminate()
         return RunResult(
             success=False,
             error=f"Execution error: {str(e)}",
@@ -293,34 +337,36 @@ async def compile_all(
     problem_dir: str,
     sources: list[str],
     compiler: str = "g++",
+    max_concurrent: int = 4,
 ) -> dict[str, CompileResult]:
     """
-    批量编译多个源文件。
+    并发编译多个源文件。
 
     Args:
         problem_dir: 题目目录
         sources: 源文件名列表（如 ["gen.cpp", "val.cpp", "sol.cpp", "brute.cpp"]）
         compiler: 编译器名称
+        max_concurrent: 最大并发编译数
 
     Returns:
         dict: 源文件名 -> 编译结果
     """
-    results = {}
+    semaphore = asyncio.Semaphore(max_concurrent)
     exe_ext = get_exe_extension()
 
-    for source in sources:
-        source_path = os.path.join(problem_dir, source)
-        if not os.path.exists(source_path):
-            results[source] = CompileResult(
-                success=False,
-                error=f"Source file not found: {source}",
-            )
-            continue
+    async def compile_one(source: str) -> tuple[str, CompileResult]:
+        async with semaphore:
+            source_path = os.path.join(problem_dir, source)
+            if not os.path.exists(source_path):
+                return source, CompileResult(
+                    success=False,
+                    error=f"Source file not found: {source}",
+                )
+            base_name = os.path.splitext(source)[0]
+            binary_path = os.path.join(problem_dir, base_name + exe_ext)
+            result = await compile_cpp(source_path, binary_path, compiler=compiler)
+            return source, result
 
-        base_name = os.path.splitext(source)[0]
-        binary_path = os.path.join(problem_dir, base_name + exe_ext)
-
-        result = await compile_cpp(source_path, binary_path, compiler=compiler)
-        results[source] = result
-
-    return results
+    tasks = [compile_one(src) for src in sources]
+    results = await asyncio.gather(*tasks)
+    return dict(results)

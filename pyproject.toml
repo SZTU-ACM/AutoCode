@@ -7,6 +7,9 @@ requires-python = ">=3.14"
 dependencies = [
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
+    "pywin32>=306; sys_platform == 'win32'",
+    "psutil>=5.9.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -61,4 +64,11 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
+]
+
+[dependency-groups]
+dev = [
+    "types-psutil>=7.2.2.20260402",
+    "types-pywin32>=311.0.0.20260402",
+    "types-pyyaml>=6.0.12.20250915",
 ]

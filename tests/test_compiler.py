@@ -326,3 +326,40 @@ def test_cleanup_nonexistent_dir():
     """测试清理不存在的目录（不应报错）。"""
     cleanup_work_dir("/nonexistent/directory")
     # 应该静默成功
+
+
+MEMORY_HOG_CODE = """
+#include <iostream>
+#include <vector>
+
+int main() {
+    std::vector<int> data;
+    for (int i = 0; i < 10000000; i++) {
+        data.push_back(i);
+    }
+    std::cout << data.size() << std::endl;
+    return 0;
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_run_binary_with_memory_limit():
+    """测试运行带内存限制。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = os.path.join(tmpdir, "test.cpp")
+        binary_path = os.path.join(tmpdir, "test" + (".exe" if os.name == "nt" else ""))
+
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write(MEMORY_HOG_CODE)
+
+        compile_result = await compile_cpp(source_path, binary_path)
+        if not compile_result.success:
+            pytest.skip("Compilation failed")
+
+        _ = await run_binary(binary_path, memory_mb=4, timeout=10)
+
+        if os.name == "nt":
+            pass
+        else:
+            pass

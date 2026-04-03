@@ -3,14 +3,16 @@ Checker 工具组 - 输出检查器。
 
 基于论文 Algorithm 3: BUILDCHECKER 实现。
 """
+
 import os
 
-from ..utils.compiler import compile_cpp, run_binary_with_args
+from ..utils.compiler import run_binary_with_args
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
+from .mixins import BuildToolMixin
 
 
-class CheckerBuildTool(Tool):
+class CheckerBuildTool(Tool, BuildToolMixin):
     """构建并验证输出检查器。"""
 
     @property
@@ -91,7 +93,7 @@ class CheckerBuildTool(Tool):
         # 编译
         binary_path = os.path.join(problem_dir, f"checker{get_exe_extension()}")
 
-        compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
+        compile_result = await self.build(source_path, binary_path, compiler=compiler)
 
         if not compile_result.success:
             return ToolResult.fail(
@@ -151,12 +153,14 @@ class CheckerBuildTool(Tool):
                 if is_correct:
                     correct_count += 1
 
-                test_results.append({
-                    "index": i + 1,
-                    "expected_verdict": expected_verdict,
-                    "actual_verdict": actual_verdict,
-                    "correct": is_correct,
-                })
+                test_results.append(
+                    {
+                        "index": i + 1,
+                        "expected_verdict": expected_verdict,
+                        "actual_verdict": actual_verdict,
+                        "correct": is_correct,
+                    }
+                )
 
         total = len(test_scenarios)
         accuracy = correct_count / total if total > 0 else 0

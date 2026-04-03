@@ -1,14 +1,15 @@
 """
 Solution 工具组 - 解法构建和运行。
 """
+
 import os
 
-from ..utils.compiler import compile_cpp, run_binary
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
+from .mixins import BuildToolMixin, RunToolMixin
 
 
-class SolutionBuildTool(Tool):
+class SolutionBuildTool(Tool, BuildToolMixin):
     """构建并编译解法。"""
 
     @property
@@ -80,7 +81,7 @@ class SolutionBuildTool(Tool):
         binary_name = f"{solution_type}{exe_ext}"
         binary_path = os.path.join(problem_dir, binary_name)
 
-        result = await compile_cpp(source_path, binary_path, compiler=compiler)
+        result = await self.build(source_path, binary_path, compiler=compiler)
 
         if not result.success:
             return ToolResult.fail(
@@ -97,7 +98,7 @@ class SolutionBuildTool(Tool):
         )
 
 
-class SolutionRunTool(Tool):
+class SolutionRunTool(Tool, RunToolMixin):
     """运行解法。"""
 
     @property
@@ -153,12 +154,13 @@ class SolutionRunTool(Tool):
 
         if not os.path.exists(binary_path):
             return ToolResult.fail(
-                f"Binary not found: {solution_type}. "
-                f"Please run solution_build first."
+                f"Binary not found: {solution_type}. Please run solution_build first."
             )
 
         # 运行
-        result = await run_binary(binary_path, input_data, timeout=timeout)
+        result = await self.run(
+            binary_path, input_data, problem_dir, solution_type, timeout=timeout
+        )
 
         if result.timed_out:
             return ToolResult.fail(

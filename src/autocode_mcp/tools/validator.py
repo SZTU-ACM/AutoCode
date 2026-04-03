@@ -3,14 +3,16 @@ Validator 工具组 - 数据校验器。
 
 基于论文 Algorithm 1: BUILDVALIDATOR 实现。
 """
+
 import os
 
-from ..utils.compiler import compile_cpp, run_binary
+from ..utils.compiler import run_binary
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
+from .mixins import BuildToolMixin
 
 
-class ValidatorBuildTool(Tool):
+class ValidatorBuildTool(Tool, BuildToolMixin):
     """构建并验证数据校验器。"""
 
     @property
@@ -87,7 +89,7 @@ class ValidatorBuildTool(Tool):
         # 编译
         binary_path = os.path.join(problem_dir, f"val{get_exe_extension()}")
 
-        compile_result = await compile_cpp(source_path, binary_path, compiler=compiler)
+        compile_result = await self.build(source_path, binary_path, compiler=compiler)
 
         if not compile_result.success:
             return ToolResult.fail(
@@ -122,13 +124,15 @@ class ValidatorBuildTool(Tool):
             if is_correct:
                 correct_count += 1
 
-            test_results.append({
-                "index": i + 1,
-                "input": input_data[:100] + "..." if len(input_data) > 100 else input_data,
-                "expected_valid": expected_valid,
-                "actual_valid": actual_valid,
-                "correct": is_correct,
-            })
+            test_results.append(
+                {
+                    "index": i + 1,
+                    "input": input_data[:100] + "..." if len(input_data) > 100 else input_data,
+                    "expected_valid": expected_valid,
+                    "actual_valid": actual_valid,
+                    "correct": is_correct,
+                }
+            )
 
         score = correct_count
         total = len(test_cases)

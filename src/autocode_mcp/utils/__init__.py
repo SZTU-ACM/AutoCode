@@ -1,6 +1,8 @@
 """
 AutoCode MCP Utils 模块。
 """
+
+from .cache import CompileCache
 from .compiler import (
     CompileResult,
     RunResult,
@@ -14,6 +16,7 @@ from .compiler import (
 from .platform import get_exe_extension, is_linux, is_macos, is_windows
 
 __all__ = [
+    "CompileCache",
     "compile_cpp",
     "run_binary",
     "run_binary_with_args",
