@@ -40,13 +40,9 @@ typecheck:
 # 运行所有检查
 check: lint typecheck test
 
-# 清理缓存和临时文件
+# 清理缓存和临时文件（跨平台兼容）
 clean:
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
-	rm -rf htmlcov/ .coverage 2>/dev/null || true
+	uv run python -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]; [shutil.rmtree(p, ignore_errors=True) for p in ['.pytest_cache', '.mypy_cache', '.ruff_cache', 'htmlcov', '.coverage'] if pathlib.Path(p).exists()]"
 
 # 启动文档服务器 (如果有 mkdocs)
 docs:

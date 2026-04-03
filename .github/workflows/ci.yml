@@ -11,7 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       - run: uv sync --all-extras
       - run: uv run ruff check .
 
@@ -19,22 +24,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       - run: uv sync --all-extras
       - run: uv run mypy src/
 
-  test:
+  test-unit:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.14"]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --python ${{ matrix.python-version }} --all-extras
-      - run: uv run pytest --cov --cov-report=xml
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/ -v -m "not integration" --cov --cov-report=xml
       - uses: codecov/codecov-action@v4
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.os == 'ubuntu-latest'
         with:
           files: coverage.xml
+          flags: unit-tests
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/ -v -m "integration"
