@@ -26,7 +26,14 @@ class StressTestRunTool(Tool):
         用于验证解法正确性。支持自定义轮数和参数。
         使用小数据（N <= 100）确保暴力解法快速运行。
 
-        基于论文框架，这是验证解法正确性的关键步骤。
+        前置条件：
+        1. 已运行 solution_build 构建 sol.cpp
+        2. 已运行 solution_build 构建 brute.cpp
+        3. 已运行 generator_build 构建 gen.cpp
+
+        建议下一步：
+        - 如果通过：运行 problem_generate_tests 生成测试数据
+        - 如果失败：检查 sol.cpp 和 brute.cpp 的差异，修复错误
         """
 
     @property

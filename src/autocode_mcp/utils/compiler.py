@@ -13,10 +13,14 @@ import shutil
 import sys
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
+
+if TYPE_CHECKING:
+    from .win_job import WinJobObject
 
 _cache = CompileCache()
 
@@ -187,6 +191,48 @@ async def compile_cpp(
         )
 
 
+async def _force_terminate_process(
+    process: asyncio.subprocess.Process,
+    job: "WinJobObject | None" = None,
+) -> None:
+    """强制终止进程，确保不会卡住。
+
+    Args:
+        process: 要终止的进程
+        job: Windows Job Object（可选）
+    """
+    # 先尝试 Job Object 终止（Windows 上更可靠）
+    if job:
+        try:
+            job.terminate()
+        except Exception:
+            pass
+
+    # 再尝试正常终止
+    try:
+        process.kill()
+    except ProcessLookupError:
+        # 进程已经不存在
+        return
+    except Exception:
+        pass
+
+    # 等待进程退出，设置超时防止卡住
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2.0)
+    except TimeoutError:
+        # 如果 2 秒后进程仍未退出，尝试强制终止
+        try:
+            if sys.platform == "win32":
+                import signal
+
+                process.send_signal(signal.SIGTERM)
+            else:
+                process.kill()
+        except Exception:
+            pass
+
+
 async def _run_process(
     cmd: list[str],
     stdin: str = "",
@@ -198,6 +244,7 @@ async def _run_process(
 
     start_time = time.time()
     job = None
+    process = None
 
     try:
         if sys.platform == "win32":
@@ -214,6 +261,7 @@ async def _run_process(
                     job = WinJobObject(memory_mb=memory_mb, timeout_sec=timeout)
                     job.assign_process(process.pid)
                 except Exception:
+                    # Job Object 创建失败，但仍需确保进程可控
                     job = None
         elif sys.platform == "darwin":
             process = await asyncio.create_subprocess_exec(
@@ -239,10 +287,8 @@ async def _run_process(
                 process.communicate(input=stdin.encode("utf-8") if stdin else None), timeout=timeout
             )
         except TimeoutError:
-            process.kill()
-            await process.wait()
-            if job:
-                job.terminate()
+            # 超时时强制终止进程
+            await _force_terminate_process(process, job)
             return RunResult(
                 success=False,
                 timed_out=True,
@@ -252,6 +298,7 @@ async def _run_process(
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
+        # 正常完成后清理 Job Object
         if job:
             job.terminate()
 
@@ -269,8 +316,9 @@ async def _run_process(
             error=f"Binary not found or prlimit unavailable: {cmd[0]}",
         )
     except Exception as e:
-        if job:
-            job.terminate()
+        # 异常时确保进程被终止
+        if process:
+            await _force_terminate_process(process, job)
         return RunResult(
             success=False,
             error=f"Execution error: {str(e)}",

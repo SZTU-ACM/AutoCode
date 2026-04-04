@@ -26,7 +26,12 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
 
         保存并编译 gen.cpp。
 
-        注意：此工具不生成代码，代码由 Client LLM 生成后传入。
+        前置条件：
+        1. 已运行 problem_create 创建题目目录
+
+        建议下一步：
+        - 运行 validator_build 构建校验器
+        - 运行 stress_test_run 进行对拍测试
         """
 
     @property
@@ -106,6 +111,13 @@ class GeneratorRunTool(Tool):
 
         自动通过 Validator 过滤无效输入。
         支持去重、平衡、采样。
+
+        前置条件：
+        1. 已运行 generator_build 构建生成器
+
+        建议下一步：
+        - 运行 stress_test_run 验证解法正确性
+        - 运行 problem_generate_tests 生成最终测试数据
         """
 
     @property

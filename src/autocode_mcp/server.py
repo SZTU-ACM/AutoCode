@@ -15,6 +15,7 @@ from . import prompts, resources
 from .tools.base import Tool as BaseTool
 from .tools.base import ToolResult
 from .tools.checker import CheckerBuildTool
+from .tools.complexity import SolutionAnalyzeTool
 from .tools.file_ops import FileReadTool, FileSaveTool
 from .tools.generator import GeneratorBuildTool, GeneratorRunTool
 from .tools.interactor import InteractorBuildTool
@@ -44,6 +45,7 @@ def register_all_tools() -> None:
     # Solution 工具组
     register_tool(SolutionBuildTool())
     register_tool(SolutionRunTool())
+    register_tool(SolutionAnalyzeTool())
 
     # Stress Test 工具组
     register_tool(StressTestRunTool())

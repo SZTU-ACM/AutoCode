@@ -29,8 +29,12 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
         3. 运行测试用例验证健壮性
         4. 返回得分和详细结果
 
-        注意：此工具不生成代码，代码由 Client LLM 生成后传入。
-        测试用例也应由 Client LLM 生成（10 valid + 30 near-valid illegal）。
+        前置条件：
+        1. 已运行 problem_create 创建题目目录
+
+        建议下一步：
+        - 运行 generator_build 构建数据生成器
+        - 运行 problem_generate_tests 生成测试数据时使用 validator 过滤
         """
 
     @property

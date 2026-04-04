@@ -114,6 +114,14 @@ class ProblemGenerateTestsTool(Tool):
         - 支持去重、平衡、采样
 
         生成 01.in ~ N.in 及对应的 .ans 文件。
+
+        前置条件：
+        1. 已运行 generator_build 构建 gen.cpp
+        2. 已运行 solution_build 构建 sol.cpp
+        3. 建议先运行 stress_test_run 验证解法正确性
+
+        建议下一步：
+        - 运行 problem_pack_polygon 打包为 Polygon 格式
         """
 
     @property
@@ -135,9 +143,27 @@ class ProblemGenerateTestsTool(Tool):
                     "description": "单次执行超时（秒）",
                     "default": 60,
                 },
+                "constraints": {
+                    "type": "object",
+                    "description": "题目约束条件，用于生成极限数据",
+                    "properties": {
+                        "n_max": {
+                            "type": "integer",
+                            "description": "N 的最大值约束",
+                        },
+                        "t_max": {
+                            "type": "integer",
+                            "description": "T 的最大值约束",
+                        },
+                        "sum_n_max": {
+                            "type": "integer",
+                            "description": "sum(N) 的最大值约束",
+                        },
+                    },
+                },
                 "test_configs": {
                     "type": "array",
-                    "description": "自定义测试配置列表（可选，不提供则使用默认配置）",
+                    "description": "自定义测试配置列表（可选，不提供则根据 constraints 自动生成）",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -149,7 +175,7 @@ class ProblemGenerateTestsTool(Tool):
                             "type": {
                                 "type": "string",
                                 "enum": ["1", "2", "3", "4"],
-                                "description": "生成策略",
+                                "description": "生成策略 (1=tiny, 2=random, 3=extreme, 4=tle)",
                             },
                             "n_min": {"type": "integer", "description": "N 最小值"},
                             "n_max": {"type": "integer", "description": "N 最大值"},
@@ -168,6 +194,7 @@ class ProblemGenerateTestsTool(Tool):
         problem_dir: str,
         test_count: int = 20,
         timeout: int = 60,
+        constraints: dict | None = None,
         test_configs: list[dict] | None = None,
     ) -> ToolResult:
         """执行测试数据生成。"""
@@ -211,7 +238,7 @@ class ProblemGenerateTestsTool(Tool):
                 for c in test_configs
             ]
         else:
-            test_configs_list = self._get_default_configs()
+            test_configs_list = self._get_default_configs(constraints)
 
         for i, config in enumerate(test_configs_list[:test_count], 1):
             test_file = os.path.join(tests_dir, f"{i:02d}.in")
@@ -264,33 +291,85 @@ class ProblemGenerateTestsTool(Tool):
                 errors=errors,
             )
 
-    def _get_default_configs(self) -> list[tuple[str, str, str, str, str, str]]:
+    def _get_default_configs(
+        self, constraints: dict | None = None
+    ) -> list[tuple[str, str, str, str, str, str]]:
         """获取默认测试配置。
+
+        Args:
+            constraints: 题目约束条件，包含 n_max, t_max, sum_n_max 等
 
         Returns:
             配置列表，每项为 (seed_offset, type, n_min, n_max, t_min, t_max)
         """
+        # 从约束中获取极限值
+        n_limit = constraints.get("n_max", 100000) if constraints else 100000
+        t_limit = constraints.get("t_max", 1) if constraints else 1
+        sum_n_limit = constraints.get("sum_n_max", n_limit) if constraints else n_limit
+
         configs = []
-        # 小数据
-        configs.extend([("1", "1", "1", "10", "1", "3")] * 3)
-        # 随机数据
+
+        # 1. 边界情况 (type=1 tiny) - 最小值和极小值
         configs.extend(
             [
-                ("2", "2", "10", "100", "1", "3"),
-                ("2", "2", "100", "1000", "1", "3"),
-                ("2", "2", "1000", "5000", "1", "3"),
-                ("2", "2", "5000", "10000", "1", "3"),
+                ("0", "1", "1", "1", "1", "1"),  # N=1, T=1
+                ("1", "1", "1", "1", str(t_limit), str(t_limit)),  # N=1, T=max
+                ("2", "1", "2", "2", "1", "1"),  # N=2
             ]
         )
-        # 大数据
+
+        # 2. 小数据随机 (type=2 random)
         configs.extend(
             [
-                ("3", "3", "100000", "200000", "1", "1"),
-                ("3", "3", "150000", "200000", "1", "1"),
+                ("3", "2", "1", "10", "1", str(min(3, t_limit))),
+                ("4", "2", "10", "100", "1", str(min(3, t_limit))),
             ]
         )
-        # 边界数据
-        configs.extend([("4", "4", "10", "50", "1", "3")])
+
+        # 3. 中等数据
+        mid_n = n_limit // 2
+        configs.extend(
+            [
+                ("5", "2", "100", str(mid_n // 10), "1", str(min(3, t_limit))),
+                ("6", "2", str(mid_n // 10), str(mid_n), "1", str(min(2, t_limit))),
+            ]
+        )
+
+        # 4. 大数据随机 (type=2)
+        if n_limit >= 10000:
+            configs.extend(
+                [
+                    ("7", "2", str(mid_n), str(n_limit), "1", "1"),
+                    ("8", "2", str(int(n_limit * 0.8)), str(n_limit), "1", "1"),
+                ]
+            )
+
+        # 5. 极限数据 (type=3 extreme) - 接近上限
+        configs.extend(
+            [
+                ("9", "3", str(n_limit), str(n_limit), "1", "1"),  # N=max
+                ("10", "3", str(n_limit - 1), str(n_limit), "1", "1"),  # N=max-1
+                ("11", "3", str(int(n_limit * 0.99)), str(n_limit), "1", "1"),  # 接近极限
+            ]
+        )
+
+        # 6. T 极限情况
+        if t_limit > 1:
+            # T=max, N 根据sum约束调整
+            n_per_test = min(n_limit, sum_n_limit // t_limit) if sum_n_limit else n_limit
+            configs.append(
+                ("12", "3", str(max(1, n_per_test // 2)), str(n_per_test), str(t_limit), str(t_limit))
+            )
+
+        # 7. TLE 诱导数据 (type=4)
+        if n_limit >= 100:
+            configs.extend(
+                [
+                    ("13", "4", str(n_limit), str(n_limit), "1", "1"),
+                    ("14", "4", str(int(n_limit * 0.9)), str(n_limit), "1", "1"),
+                ]
+            )
+
         return configs
 
 

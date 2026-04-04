@@ -24,7 +24,12 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         - sol.cpp: 标准解法（最优时间复杂度）
         - brute.cpp: 暴力解法（用于验证）
 
-        此工具不生成代码，代码由 Client LLM 生成后传入。
+        前置条件：
+        1. 已运行 problem_create 创建题目目录
+
+        建议下一步：
+        - 构建 brute.cpp 后运行 stress_test_run 验证解法正确性
+        - 构建 sol.cpp 后运行 generator_build 构建数据生成器
         """
 
     @property
@@ -111,6 +116,13 @@ class SolutionRunTool(Tool, RunToolMixin):
 
         在指定输入上运行解法，返回输出和执行时间。
         用于验证解法正确性或生成答案文件。
+
+        前置条件：
+        1. 已运行 solution_build 构建解法
+
+        建议下一步：
+        - 如果验证通过，继续构建 generator
+        - 如果验证失败，修复解法代码
         """
 
     @property
