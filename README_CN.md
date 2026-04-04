@@ -46,7 +46,7 @@ uv sync
 
 ### 前置要求
 
-- **Python 3.14+**
+- **Python 3.10+**
 - **g++ 编译器**，支持 C++20（推荐 GCC 10+）
 - **testlib.h**（已包含在 templates/ 目录）
 

@@ -2,6 +2,8 @@
 工具基类和统一返回值格式。
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any

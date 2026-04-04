@@ -46,7 +46,7 @@ uv sync
 
 ### Prerequisites
 
-- **Python 3.14+**
+- **Python 3.10+**
 - **g++ compiler** with C++20 support (GCC 10+ recommended)
 - **testlib.h** (included in templates/)
 

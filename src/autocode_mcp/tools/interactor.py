@@ -261,7 +261,7 @@ class InteractorBuildTool(Tool):
                         break
                     writer.write(data)
                     await writer.drain()
-            except asyncio.CancelledError, ConnectionResetError, BrokenPipeError, OSError:
+            except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError, OSError):
                 pass
 
         pipe_tasks = []
@@ -298,11 +298,11 @@ class InteractorBuildTool(Tool):
                 if proc.returncode is None:
                     try:
                         proc.kill()
-                    except ProcessLookupError, OSError:
+                    except (ProcessLookupError, OSError):
                         pass
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2)
-                except TimeoutError, OSError:
+                except (TimeoutError, OSError):
                     pass
 
         # 根据交互器退出码判断结果

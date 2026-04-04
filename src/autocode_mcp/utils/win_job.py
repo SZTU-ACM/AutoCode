@@ -5,6 +5,8 @@ Windows Job Objects 模块。
 仅在 Windows 平台上可用，其他平台会抛出 RuntimeError。
 """
 
+from __future__ import annotations
+
 import sys
 from typing import TYPE_CHECKING
 

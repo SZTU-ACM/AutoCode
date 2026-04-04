@@ -3,7 +3,7 @@ name = "autocode-mcp"
 version = "0.1.0"
 description = "MCP Server for competitive programming problem creation, based on AutoCode paper"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
@@ -38,7 +38,7 @@ markers = ["integration: marks tests as integration tests (deselect with '-m \"n
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
@@ -48,7 +48,7 @@ ignore = ["E501"]
 known-first-party = ["autocode_mcp"]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
