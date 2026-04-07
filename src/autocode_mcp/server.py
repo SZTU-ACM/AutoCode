@@ -4,6 +4,8 @@ MCP Server 入口。
 提供 14 个原子工具，基于 AutoCode 论文框架。
 """
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any
 

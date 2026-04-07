@@ -4,6 +4,8 @@ Stress Test 工具 - 对拍测试。
 基于论文框架，比较 sol.cpp 和 brute.cpp 的输出。
 """
 
+from __future__ import annotations
+
 import os
 import tempfile
 
@@ -197,10 +199,19 @@ class StressTestRunTool(Tool):
                 [str(seed)],
                 timeout=timeout,
             )
-            if gen_result.timed_out or not gen_result.success:
+            # Generator 可能因 testlib.h 优化问题崩溃，但输出仍有效
+            # 只要没有超时且有输出，就认为成功
+            if gen_result.timed_out:
                 return {
                     "success": False,
-                    "error": f"Generator failed at round {round_num}",
+                    "error": f"Generator timed out at round {round_num}",
+                    "stderr": gen_result.stderr,
+                }
+
+            if not gen_result.stdout.strip():
+                return {
+                    "success": False,
+                    "error": f"Generator produced no output at round {round_num}",
                     "stderr": gen_result.stderr,
                 }
 

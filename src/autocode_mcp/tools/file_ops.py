@@ -2,6 +2,8 @@
 文件操作工具。
 """
 
+from __future__ import annotations
+
 import os
 
 from .base import Tool, ToolResult

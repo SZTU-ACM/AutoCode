@@ -3,6 +3,8 @@ AutoCode MCP Resources 模块。
 
 提供题目文件、测试数据、配置等资源访问。
 """
+from __future__ import annotations
+
 import os
 
 from .. import TEMPLATES_DIR

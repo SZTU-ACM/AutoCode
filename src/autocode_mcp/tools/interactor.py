@@ -4,6 +4,8 @@ Interactor 工具组 - 交互器。
 基于论文 Algorithm 4: BUILDINTERACTOR 实现。
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 

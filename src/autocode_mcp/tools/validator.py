@@ -4,6 +4,8 @@ Validator 工具组 - 数据校验器。
 基于论文 Algorithm 1: BUILDVALIDATOR 实现。
 """
 
+from __future__ import annotations
+
 import os
 
 from ..utils.compiler import run_binary

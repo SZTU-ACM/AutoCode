@@ -4,6 +4,8 @@ Mixin 模块 - 提供代码复用的工具基类。
 用于减少工具类之间的重复代码。
 """
 
+from __future__ import annotations
+
 from ..utils.compiler import CompileResult, compile_cpp, run_binary
 from ..utils.resource_limit import get_resource_limit
 

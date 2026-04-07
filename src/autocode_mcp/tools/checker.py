@@ -4,6 +4,8 @@ Checker 工具组 - 输出检查器。
 基于论文 Algorithm 3: BUILDCHECKER 实现。
 """
 
+from __future__ import annotations
+
 import os
 
 from ..utils.compiler import run_binary_with_args

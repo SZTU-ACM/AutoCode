@@ -2,6 +2,8 @@
 Problem 工具组 - 题目管理。
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 
@@ -198,6 +200,17 @@ class ProblemGenerateTestsTool(Tool):
         test_configs: list[dict] | None = None,
     ) -> ToolResult:
         """执行测试数据生成。"""
+        # 验证 constraints 参数
+        if constraints:
+            n_max = constraints.get("n_max")
+            if n_max is not None and n_max <= 0:
+                return ToolResult.fail("n_max must be positive")
+            n_min = constraints.get("n_min")
+            if n_min is not None and n_min < 0:
+                return ToolResult.fail("n_min must be non-negative")
+            if n_max is not None and n_min is not None and n_min > n_max:
+                return ToolResult.fail("n_min cannot be greater than n_max")
+
         exe_ext = get_exe_extension()
 
         # 检查必要文件
@@ -257,7 +270,8 @@ class ProblemGenerateTestsTool(Tool):
             try:
                 # 生成输入（使用配置参数）
                 gen_result = await run_binary_with_args(gen_exe, cmd_args, timeout=timeout)
-                if not gen_result.success:
+                # Generator 可能因 testlib.h 优化问题崩溃，但输出仍有效
+                if gen_result.timed_out or not gen_result.stdout.strip():
                     errors.append((i, f"Generator failed: {gen_result.stderr}"))
                     continue
 

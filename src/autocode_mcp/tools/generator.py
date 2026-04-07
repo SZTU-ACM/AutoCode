@@ -4,6 +4,8 @@ Generator 工具组 - 数据生成器。
 基于论文 Algorithm 2: BUILDGENERATORSUITE 实现。
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 

@@ -4,6 +4,8 @@ Complexity 分析工具 - 分析解法复杂度。
 基于代码静态分析估算时间/空间复杂度，并推荐测试参数。
 """
 
+from __future__ import annotations
+
 import re
 
 from .base import Tool, ToolResult
@@ -56,30 +58,37 @@ def analyze_loop_complexity(code: str) -> str:
     Returns:
         估算的复杂度字符串
     """
-    # 统计嵌套循环层数
+    # 循环模式
     loop_patterns = [
         r"\bfor\s*\(",
         r"\bwhile\s*\(",
-        r"\bfor\s+.*:\s*",  # range-based for
+        r"\bfor\s+\w+.*:",  # range-based for
     ]
 
     max_nesting = 0
-    current_nesting = 0
+    brace_depth = 0
 
     lines = code.split("\n")
     for line in lines:
-        # 计算当前行的循环数
-        loop_count = 0
-        for pattern in loop_patterns:
-            loop_count += len(re.findall(pattern, line))
+        # 移除单行注释
+        if "//" in line:
+            line = line[: line.index("//")]
 
-        # 检测循环结束
-        brace_change = line.count("{") - line.count("}")
+        # 检测当前行是否有循环
+        has_loop = any(re.search(p, line) for p in loop_patterns)
 
-        # 更新嵌套深度
-        current_nesting += loop_count
-        max_nesting = max(max_nesting, current_nesting)
-        current_nesting = max(0, current_nesting + brace_change)
+        # 如果有循环，记录当前深度
+        # brace_depth 表示当前所在的大括号层级
+        # 循环嵌套数 = 当前大括号层级
+        if has_loop:
+            max_nesting = max(max_nesting, brace_depth)
+
+        # 处理大括号
+        for char in line:
+            if char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth = max(0, brace_depth - 1)
 
     # 根据嵌套层数估算复杂度
     if max_nesting == 0:
@@ -94,17 +103,18 @@ def analyze_loop_complexity(code: str) -> str:
         return ComplexityLevel.EXPONENTIAL
 
 
-def detect_algorithm_patterns(code: str) -> tuple[str, list[str]]:
+def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
     """检测常见算法模式。
 
     Args:
         code: C++ 源代码
 
     Returns:
-        (复杂度, 检测到的模式列表)
+        (复杂度或 None, 检测到的模式列表)
+        如果没有检测到模式，返回 (None, [])
     """
     patterns = []
-    complexity = ComplexityLevel.LINEAR  # 默认
+    complexity = None  # 默认不返回复杂度
 
     # 二分查找
     if re.search(r"\bbinary_search\b|\blower_bound\b|\bupper_bound\b", code):
@@ -140,7 +150,7 @@ def detect_algorithm_patterns(code: str) -> tuple[str, list[str]]:
         patterns.append("recursion")
 
     # 位运算
-    if re.search(r"1\s*<<\s*\d|bitmask|bitset", code):
+    if re.search(r"1\s*<<\s*\w+|bitmask|bitset", code):
         patterns.append("bitmask")
         complexity = ComplexityLevel.EXPONENTIAL
 
@@ -248,25 +258,27 @@ class SolutionAnalyzeTool(Tool):
         # 2. 检测算法模式
         pattern_complexity, patterns = detect_algorithm_patterns(code)
 
-        # 3. 选择更优的复杂度估计
-        # 优先使用模式检测的结果
-        complexity_order = [
-            ComplexityLevel.CONSTANT,
-            ComplexityLevel.LOG_N,
-            ComplexityLevel.LINEAR,
-            ComplexityLevel.N_LOG_N,
-            ComplexityLevel.QUADRATIC,
-            ComplexityLevel.CUBIC,
-            ComplexityLevel.EXPONENTIAL,
-            ComplexityLevel.FACTORIAL,
-        ]
+        # 3. 选择复杂度估计
+        # 如果检测到算法模式，取两者中较大的（更保守的估计）
+        if pattern_complexity is not None:
+            complexity_order = [
+                ComplexityLevel.CONSTANT,
+                ComplexityLevel.LOG_N,
+                ComplexityLevel.LINEAR,
+                ComplexityLevel.N_LOG_N,
+                ComplexityLevel.QUADRATIC,
+                ComplexityLevel.CUBIC,
+                ComplexityLevel.EXPONENTIAL,
+                ComplexityLevel.FACTORIAL,
+            ]
 
-        loop_idx = complexity_order.index(loop_complexity)
-        pattern_idx = complexity_order.index(pattern_complexity)
+            loop_idx = complexity_order.index(loop_complexity)
+            pattern_idx = complexity_order.index(pattern_complexity)
 
-        # 如果模式检测到更优的复杂度，使用它
-        if pattern_idx < loop_idx:
-            final_complexity = pattern_complexity
+            # 取较大的复杂度（更保守）
+            final_complexity = (
+                pattern_complexity if pattern_idx > loop_idx else loop_complexity
+            )
         else:
             final_complexity = loop_complexity
 

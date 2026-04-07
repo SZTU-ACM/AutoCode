@@ -7,6 +7,8 @@
 - 临时目录隔离
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import shutil
@@ -193,7 +195,7 @@ async def compile_cpp(
 
 async def _force_terminate_process(
     process: asyncio.subprocess.Process,
-    job: "WinJobObject | None" = None,
+    job: WinJobObject | None = None,
 ) -> None:
     """强制终止进程，确保不会卡住。
 
@@ -221,14 +223,9 @@ async def _force_terminate_process(
     try:
         await asyncio.wait_for(process.wait(), timeout=2.0)
     except TimeoutError:
-        # 如果 2 秒后进程仍未退出，尝试强制终止
+        # 如果 2 秒后进程仍未退出，再次尝试强制终止
         try:
-            if sys.platform == "win32":
-                import signal
-
-                process.send_signal(signal.SIGTERM)
-            else:
-                process.kill()
+            process.kill()
         except Exception:
             pass
 

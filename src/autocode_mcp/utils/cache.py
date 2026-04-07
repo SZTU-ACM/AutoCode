@@ -4,6 +4,8 @@
 缓存已编译的二进制文件，避免重复编译。
 """
 
+from __future__ import annotations
+
 import hashlib
 import shutil
 from pathlib import Path
