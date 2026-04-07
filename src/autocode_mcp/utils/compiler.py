@@ -212,13 +212,13 @@ def _set_macos_resource_limit(memory_mb: int) -> None:
     memory_bytes = memory_mb * 1024 * 1024
     # 设置虚拟内存限制 (address space)
     try:
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))  # type: ignore[attr-defined]
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))  # type: ignore[attr-defined, unused-ignore]
     except (ValueError, OSError) as e:
         _logger.debug("Failed to set RLIMIT_AS on macOS: %s", e)
 
     # 设置数据段大小限制
     try:
-        resource.setrlimit(resource.RLIMIT_DATA, (memory_bytes, memory_bytes))  # type: ignore[attr-defined]
+        resource.setrlimit(resource.RLIMIT_DATA, (memory_bytes, memory_bytes))  # type: ignore[attr-defined, unused-ignore]
     except (ValueError, OSError) as e:
         _logger.debug("Failed to set RLIMIT_DATA on macOS: %s", e)
 
