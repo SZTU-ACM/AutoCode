@@ -44,10 +44,15 @@ def infer_state(problem_dir: str) -> dict[str, Any]:
         "sol_built": (root / "solutions" / "sol.cpp").exists() or any(root.glob("solutions/sol.*")),
         "brute_built": (root / "solutions" / "brute.cpp").exists() or any(root.glob("solutions/brute.*")),
         "validator_ready": (root / "files" / "val.cpp").exists() or any(root.glob("files/val.*")),
+        "validator_accuracy": None,
         "generator_built": (root / "files" / "gen.cpp").exists() or any(root.glob("files/gen.*")),
         "stress_passed": False,
+        "stress_completed_rounds": 0,
+        "stress_total_rounds": 0,
         "checker_ready": (root / "files" / "checker.cpp").exists() or any(root.glob("files/checker.*")),
+        "checker_accuracy": None,
         "tests_generated": any((root / "tests").glob("*.in")) if (root / "tests").exists() else False,
+        "generated_test_count": len(list((root / "tests").glob("*.in"))) if (root / "tests").exists() else 0,
         "packaged": (root / "problem.xml").exists(),
     }
 
@@ -94,6 +99,26 @@ def deny(reason: str) -> None:
     print(json.dumps(output, ensure_ascii=False))
 
 
+def quality_summary(state: dict[str, Any]) -> str:
+    return (
+        "Workflow state: "
+        f"created={state['created']}, "
+        f"sol_built={state['sol_built']}, "
+        f"brute_built={state['brute_built']}, "
+        f"validator_ready={state['validator_ready']}, "
+        f"validator_accuracy={state.get('validator_accuracy')}, "
+        f"generator_built={state['generator_built']}, "
+        f"stress_passed={state['stress_passed']}, "
+        f"stress_completed_rounds={state.get('stress_completed_rounds', 0)}, "
+        f"stress_total_rounds={state.get('stress_total_rounds', 0)}, "
+        f"checker_ready={state['checker_ready']}, "
+        f"checker_accuracy={state.get('checker_accuracy')}, "
+        f"tests_generated={state['tests_generated']}, "
+        f"generated_test_count={state.get('generated_test_count', 0)}, "
+        f"packaged={state['packaged']}."
+    )
+
+
 def pre_tool(payload: dict[str, Any]) -> int:
     short_name = tool_short_name(payload.get("tool_name", ""))
     problem_dir = get_problem_dir(payload)
@@ -109,11 +134,11 @@ def pre_tool(payload: dict[str, Any]) -> int:
         "solution_build_brute": "必须先构建标准解 sol，再构建 brute。",
         "solution_build": "必须先运行 problem_create 创建题目目录。",
         "validator_build": "必须先完成 problem_create、solution_build(sol)、solution_build(brute)。",
-        "generator_build": "必须先完成 validator_build，并让 validator 达到可用状态。",
-        "stress_test_run": "必须先完成 validator_build 和 generator_build，然后再进行 stress_test_run。",
-        "checker_build": "必须先通过 stress_test_run，再构建 checker。",
-        "problem_generate_tests": "必须先通过 stress_test_run，才能生成最终测试数据。",
-        "problem_pack_polygon": "必须先生成最终测试数据，再进行打包。",
+        "generator_build": "必须先完成 validator_build，并且 validator accuracy >= 0.9。",
+        "stress_test_run": "必须先完成 validator_build(accuracy >= 0.9) 和 generator_build，然后再进行 stress_test_run。",
+        "checker_build": "必须先通过 stress_test_run（completed_rounds == total_rounds），再构建 checker。",
+        "problem_generate_tests": "必须先通过 stress_test_run（completed_rounds == total_rounds），才能生成最终测试数据。",
+        "problem_pack_polygon": "必须先生成最终测试数据，并且生成数量 > 0，再进行打包。",
     }
 
     tool_input = payload.get("tool_input", {})
@@ -130,12 +155,18 @@ def pre_tool(payload: dict[str, Any]) -> int:
         deny(reasons["validator_build"])
         return 0
 
-    if short_name == "generator_build" and not state["validator_ready"]:
+    if short_name == "generator_build" and not (
+        state["validator_ready"] and (state.get("validator_accuracy") is None or state.get("validator_accuracy", 0) >= 0.9)
+    ):
         deny(reasons["generator_build"])
         return 0
 
     if short_name == "stress_test_run" and not (
-        state["sol_built"] and state["brute_built"] and state["validator_ready"] and state["generator_built"]
+        state["sol_built"]
+        and state["brute_built"]
+        and state["validator_ready"]
+        and state.get("validator_accuracy", 0) >= 0.9
+        and state["generator_built"]
     ):
         deny(reasons["stress_test_run"])
         return 0
@@ -148,7 +179,9 @@ def pre_tool(payload: dict[str, Any]) -> int:
         deny(reasons["problem_generate_tests"])
         return 0
 
-    if short_name == "problem_pack_polygon" and not state["tests_generated"]:
+    if short_name == "problem_pack_polygon" and not (
+        state["tests_generated"] and state.get("generated_test_count", 0) > 0
+    ):
         deny(reasons["problem_pack_polygon"])
         return 0
 
@@ -176,16 +209,23 @@ def post_tool(payload: dict[str, Any]) -> int:
         elif solution_type == "brute":
             state["brute_built"] = True
     elif short_name == "validator_build":
-        state["validator_ready"] = data.get("accuracy", 1.0) >= 0.9
+        accuracy = data.get("accuracy")
+        state["validator_accuracy"] = accuracy
+        state["validator_ready"] = accuracy is None or accuracy >= 0.9
     elif short_name == "generator_build":
         state["generator_built"] = True
     elif short_name == "stress_test_run":
+        state["stress_completed_rounds"] = data.get("completed_rounds", 0)
+        state["stress_total_rounds"] = data.get("total_rounds", 0)
         state["stress_passed"] = data.get("completed_rounds") == data.get("total_rounds")
     elif short_name == "checker_build":
-        state["checker_ready"] = data.get("accuracy", 1.0) >= 0.9
+        accuracy = data.get("accuracy")
+        state["checker_accuracy"] = accuracy
+        state["checker_ready"] = accuracy is None or accuracy >= 0.9
     elif short_name == "problem_generate_tests":
         generated_tests = data.get("generated_tests", [])
         state["tests_generated"] = bool(generated_tests)
+        state["generated_test_count"] = len(generated_tests)
     elif short_name == "problem_pack_polygon":
         state["packaged"] = True
 
@@ -194,13 +234,26 @@ def post_tool(payload: dict[str, Any]) -> int:
 
 
 def session_start() -> int:
-    reminder = (
-        "AutoCode plugin active. Enforce this workflow: "
+    additional_context = (
+        "AutoCode plugin active. Enforce this workflow with quality gates: "
         "problem_create -> solution_build(sol) -> solution_build(brute) -> "
-        "validator_build -> generator_build -> stress_test_run -> "
-        "checker_build(if needed) -> problem_generate_tests -> problem_pack_polygon."
+        "validator_build(accuracy >= 0.9) -> generator_build -> "
+        "stress_test_run(completed_rounds == total_rounds) -> "
+        "checker_build if needed (accuracy >= 0.9) -> "
+        "problem_generate_tests(generated_test_count > 0) -> problem_pack_polygon. "
+        "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )
-    print(reminder)
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": additional_context,
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
