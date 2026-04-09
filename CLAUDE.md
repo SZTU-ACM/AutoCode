@@ -43,32 +43,33 @@ AutoCode/
 
 | 工具 | 描述 |
 |------|------|
-| FileSaveTool | 保存文件 |
-| FileReadTool | 读取文件 |
-| FileListTool | 列出文件 |
-| SolutionBuildTool | 构建解法 |
-| SolutionTestTool | 测试解法 |
-| StressTestTool | 压力测试 |
-| ProblemInitTool | 初始化题目 |
-| ProblemGenerateTestsTool | 生成测试数据 |
-| ValidatorBuildTool | 构建校验器 |
-| ValidatorSelectTool | 选择最佳校验器 |
-| GeneratorBuildTool | 构建生成器 |
-| GeneratorRunTool | 运行生成器 |
-| CheckerBuildTool | 构建检查器 |
-| InteractorBuildTool | 构建交互器 |
+| file_read | 读取文件 |
+| file_save | 保存文件 |
+| solution_build | 构建解法 |
+| solution_run | 执行解法 |
+| solution_analyze | 分析解法复杂度 |
+| validator_build | 构建校验器 |
+| validator_select | 选择最佳校验器 |
+| generator_build | 构建生成器 |
+| generator_run | 运行生成器 |
+| checker_build | 构建检查器 |
+| interactor_build | 构建交互器 |
+| stress_test_run | 压力测试 |
+| problem_create | 初始化题目 |
+| problem_generate_tests | 生成测试数据 |
+| problem_pack_polygon | 打包为 Polygon 格式 |
 
 ## 出题工作流程
 
-1. 初始化题目目录 (`ProblemInitTool`)
-2. 实现解法 (`SolutionBuildTool`)
-3. 构建校验器 (`ValidatorBuildTool`)
-4. 构建生成器 (`GeneratorBuildTool`)
-5. 运行压力测试 (`StressTestTool`)
-6. 生成测试数据 (`ProblemGenerateTestsTool`)
+1. 初始化题目目录 (`problem_create`)
+2. 实现解法 (`solution_build`)
+3. 构建校验器 (`validator_build`)
+4. 构建生成器 (`generator_build`)
+5. 运行压力测试 (`stress_test_run`)
+6. 生成测试数据 (`problem_generate_tests`)
 
 ## 关键约束
 
 - 包管理强制使用 `uv`（绝对禁用 pip/poetry/conda）
 - 运行时强制使用 `uv run`
-- C++ 标准使用 C++2c
+- C++ 标准使用 C++20（需要 GCC 10+）

@@ -27,21 +27,21 @@ Compilation failed with error
    g++ --version
    ```
 
-### C++2c 标准不支持
+### C++20 标准不支持
 
 **错误信息：**
 ```
-error: 'c++2c' is not a valid standard
+error: unrecognized command line option "-std=c++20"
 ```
 
 **解决方案：**
 
-1. 升级到 GCC 14+：
+1. 升级到 GCC 10+：
    ```bash
-   gcc --version  # 需要 14.0 或更高
+   gcc --version  # 需要 10.0 或更高
    ```
 
-2. 或降级到 C++20：
+2. 或降级到 C++17：
    - 修改 `compiler.py` 中的 `std` 参数默认值
 
 ### 编译超时
@@ -203,4 +203,4 @@ PermissionError: [Errno 13] Permission denied
 1. 查看测试用例：`tests/` 目录
 2. 检查工具文档：`src/autocode_mcp/tools/` 源代码注释
 3. 运行测试验证环境：`pytest tests/ -v`
-4. 提交 Issue：[GitHub Issues](https://github.com/your-repo/issues)
+4. 提交 Issue：[GitHub Issues](https://github.com/SummerOneTwo/AutoCode/issues)
