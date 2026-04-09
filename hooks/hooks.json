@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/workflow_guard.py session"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__autocode__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/workflow_guard.py pre"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__autocode__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/workflow_guard.py post"
+          }
+        ]
+      }
+    ]
+  }
+}

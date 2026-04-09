@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "autocode": {
+      "command": "uvx",
+      "args": ["autocode-mcp"],
+      "description": "AutoCode MCP Server for competitive programming problem creation"
+    }
+  }
+}

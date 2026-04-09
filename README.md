@@ -24,6 +24,30 @@ AutoCode MCP Server provides 15 atomic tools that enable AI assistants to create
 
 ## Installation
 
+### Claude Code Plugin (Recommended)
+
+This repository is structured as an official Claude Code plugin:
+
+- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
+- [`settings.json`](settings.json)
+- [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
+- [`hooks/hooks.json`](hooks/hooks.json)
+- [`.mcp.json`](.mcp.json)
+
+The plugin does not only expose an MCP server. It also ships:
+
+- a default workflow agent
+- automatic workflow skills
+- enforcement hooks that block skipped AutoCode steps
+
+For a personal third-party marketplace setup, use the sibling repository at `../autocode-marketplace`. That marketplace is configured for remote GitHub-based installation of this plugin, not official marketplace publication.
+
+When you are ready to distribute it, Anthropic’s docs indicate plugin distribution goes through a marketplace, and official marketplace submission is done via the Claude.ai or Console submission forms.
+
+```bash
+claude mcp add autocode -- uvx autocode-mcp
+```
+
 ### From PyPI (Recommended)
 
 ```bash
@@ -65,9 +89,28 @@ uv run pytest tests/ -v
 
 ## Quick Start
 
-### 1. Configure Your MCP Client
+### 1. Install the Plugin
 
-Add to your Claude Code configuration (`~/.config/claude-code/config.json`):
+Recommended:
+
+- Install this repository as a Claude Code plugin.
+- For local development, test it with `claude --plugin-dir .`.
+- For personal marketplace usage, add the sibling marketplace and install from it:
+
+```bash
+claude plugin marketplace add ../autocode-marketplace
+claude plugin install autocode-mcp@autocode-marketplace
+```
+
+Note: marketplace installs pull from `SummerOneTwo/AutoCode`, so push plugin changes before testing remote installation.
+
+Fallback for direct Claude Code MCP setup:
+
+```bash
+claude mcp add autocode -- uvx autocode-mcp
+```
+
+Project-local alternative:
 
 ```json
 {
@@ -108,9 +151,11 @@ solution_build(
 stress_test_run(problem_dir="problems/ab", trials=100)
 ```
 
-## MCP Client Setup
+## Client Setup
 
 ### Transport & Compatibility
+
+**Recommended**: Install as a Claude Code plugin.
 
 **Current Support**: Local stdio transport only. The server communicates via standard input/output streams and is designed for local trusted environments.
 
@@ -122,9 +167,22 @@ stress_test_run(problem_dir="problems/ab", trials=100)
 
 **Not Supported**: HTTP/SSE transport, remote connections, or multi-tenant environments.
 
-### Claude Code
+### Claude Code Plugin
 
-Edit `~/.config/claude-code/config.json`:
+Recommended plugin files:
+
+- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
+- [`settings.json`](settings.json)
+- [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
+- [`hooks/hooks.json`](hooks/hooks.json)
+
+Direct MCP fallback:
+
+```bash
+claude mcp add autocode -- uvx autocode-mcp
+```
+
+Manual config:
 
 ```json
 {
@@ -135,6 +193,10 @@ Edit `~/.config/claude-code/config.json`:
   }
 }
 ```
+
+### Other MCP Clients
+
+The same MCP server also works with other local MCP clients, but the workflow-enforcement agent and hooks are Claude Code plugin features.
 
 ### Cursor
 

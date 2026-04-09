@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-04-09
 
+## [0.4.1] - 2026-04-09
+
+### Features
+
+- 按官方 Claude Code plugin 结构补全插件：`.claude-plugin/plugin.json`、`settings.json`、`agents/`、`hooks/`
+- 新增工作流强制 hook，会拦截跳过 `problem_create/solution_build/validator_build/generator_build/stress_test_run/problem_generate_tests/problem_pack_polygon` 的调用
+- 将 README / README_CN 的默认安装路径调整为 Claude Code plugin 安装，其它 MCP 客户端作为兼容入口
+
+### Design Rationale
+
+- 用 Claude Code 官方插件结构替代错误的 Codex 插件结构
+- 不再只提供 MCP 包装，而是同时提供默认 agent、skills 与 hooks，对工作流做硬约束
+
+### Notes & Caveats
+
+- 当前插件仍依赖本地 `stdio` MCP server 提供实际工具执行能力
+- Claude Code 的 workflow enforcement 依赖 plugin agent 与 hooks，其它 MCP 客户端不会自动获得这部分能力
+
 ### Breaking Changes
 
 - **配置单位变更**

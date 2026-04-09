@@ -7,7 +7,7 @@
 import asyncio
 import json
 import os
-import subprocess
+import shutil
 import tempfile
 
 import pytest
@@ -72,10 +72,12 @@ class PackagedMCPClient:
         """关闭连接。"""
         if self.process.stdin:
             self.process.stdin.close()
-        try:
+            await self.process.stdin.wait_closed()
+
+        if self.process.returncode is None:
             self.process.kill()
-        except ProcessLookupError:
-            pass
+
+        await self.process.communicate()
 
 
 @pytest.fixture
@@ -154,12 +156,4 @@ async def test_packaged_console_script_call_tool(packaged_mcp_client: PackagedMC
 
 def test_console_script_exists():
     """验证 autocode-mcp console script 在环境中存在。"""
-    # 检查 console script 是否可执行
-    result = subprocess.run(
-        ["autocode-mcp", "--help"],
-        capture_output=True,
-        text=True,
-    )
-    # --help 可能返回 0 或非 0，但应该能运行
-    # 如果命令不存在会抛出 FileNotFoundError
-    assert "autocode-mcp" in result.stdout or result.returncode is not None
+    assert shutil.which("autocode-mcp") is not None

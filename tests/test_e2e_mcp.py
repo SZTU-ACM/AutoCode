@@ -79,10 +79,12 @@ class MCPClient:
         """关闭连接。"""
         if self.process.stdin:
             self.process.stdin.close()
-        try:
+            await self.process.stdin.wait_closed()
+
+        if self.process.returncode is None:
             self.process.kill()
-        except ProcessLookupError:
-            pass
+
+        await self.process.communicate()
 
 
 @pytest.fixture
