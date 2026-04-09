@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 
-MODULE_PATH = Path("hooks/workflow_guard.py")
+MODULE_PATH = Path("scripts/workflow_guard.py")
 
 
 def load_module():

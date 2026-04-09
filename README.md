@@ -5,62 +5,61 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
-**An MCP Server for competitive programming problem creation, implementing the Validator-Generator-Checker framework from the AutoCode paper.**
+**基于论文《AutoCode: LLMs as Problem Setters for Competitive Programming》实现的竞赛编程出题辅助 MCP Server。**
 
-AutoCode MCP Server provides 15 atomic tools that enable AI assistants to create, validate, and test competitive programming problems. It handles compilation, execution, stress testing, and test data generation—letting the AI focus on problem design and solution logic.
+AutoCode MCP Server 提供 15 个原子工具，让 AI 助手能够创建、验证和测试竞赛编程题目。它负责编译、执行、压力测试和测试数据生成——让 AI 专注于题目设计和解法逻辑。
 
-[中文文档](README_CN.md)
+## 特性
 
-## Features
+- **Validator-Generator-Checker 框架** — 基于论文实现输入正确性自动验证、多策略测试生成和输出验证
+- **15 个原子工具** — 文件操作、解法构建、压力测试、校验器/生成器/检查器构建等
+- **testlib.h 支持** — 完整集成竞赛编程标准库，用于校验器、生成器和检查器
+- **多策略生成** — 四种生成策略：tiny（穷举）、random（随机）、extreme（边界情况）、tle（诱导超时）
+- **压力测试** — 自动比较最优解和暴力解，可配置测试轮数
+- **MCP 协议** — 原生支持 Claude Code、Cursor 等 MCP 兼容的 AI 工具
+- **执行控制** — 超时控制、内存限制（Linux）、临时目录隔离（仅限本地可信环境）
+- **Polygon 打包** — 导出为 Polygon 格式，适用于 Codeforces 等平台
 
-- **Validator-Generator-Checker Framework** — Automated validation of input correctness, multi-strategy test generation, and output verification based on the AutoCode paper
-- **15 Atomic Tools** — File operations, solution building, stress testing, validator/generator/checker construction, and more
-- **testlib.h Support** — Full integration with the competitive programming standard library for validators, generators, and checkers
-- **Multi-Strategy Generation** — Four generation strategies: tiny (exhaustive), random, extreme (edge cases), and TLE-inducing
-- **Stress Testing** — Automated comparison between optimal and brute-force solutions with configurable trial counts
-- **MCP Protocol** — Native support for Claude Code, Cursor, and other MCP-compatible AI tools
-- **Execution Control** — Timeout control, memory limits (Linux), and temporary directory isolation (local trusted environments only)
-- **Polygon Packaging** — Export problems in Polygon format for Codeforces-style platforms
+## 安装
 
-## Installation
+### Claude Code 插件安装（推荐）
 
-### Claude Code Plugin (Recommended)
-
-This repository is structured as an official Claude Code plugin:
+本仓库已经按官方 Claude Code plugin 结构组织：
 
 - [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
 - [`settings.json`](settings.json)
 - [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
 - [`hooks/hooks.json`](hooks/hooks.json)
+- [`scripts/workflow_guard.py`](scripts/workflow_guard.py)
 - [`.mcp.json`](.mcp.json)
 
-The plugin does not only expose an MCP server. It also ships:
+这个插件不只是暴露 MCP server，还会一起安装：
 
-- a default workflow agent
-- automatic workflow skills
-- enforcement hooks that block skipped AutoCode steps
+- 默认工作流 agent
+- AutoCode 工作流 skill
+- 用于阻止跳步的 hooks
 
-For a personal third-party marketplace setup, use the sibling repository at `../autocode-marketplace`. That marketplace is configured for remote GitHub-based installation of this plugin, not official marketplace publication.
+如果你要做个人第三方 marketplace，可直接使用同级仓库 `../autocode-marketplace`。它默认走 GitHub 远程安装，不需要上官方市场。
 
-When you are ready to distribute it, Anthropic’s docs indicate plugin distribution goes through a marketplace, and official marketplace submission is done via the Claude.ai or Console submission forms.
+如果当前环境不走 Claude Code 插件安装，也可以直接在 Claude Code 中添加 MCP server：
 
 ```bash
 claude mcp add autocode -- uvx autocode-mcp
 ```
 
-### From PyPI (Recommended)
+### 从 PyPI 安装（推荐）
 
 ```bash
 pip install autocode-mcp
 ```
 
-### Using uv
+### 使用 uv 安装
 
 ```bash
 uv tool install autocode-mcp
 ```
 
-### From Source
+### 从源码安装
 
 ```bash
 git clone https://github.com/SummerOneTwo/AutoCode.git
@@ -68,49 +67,49 @@ cd AutoCode
 uv sync
 ```
 
-### Prerequisites
+### 前置要求
 
 - **Python 3.10+**
-- **g++ compiler** with C++20 support (GCC 10+ recommended)
-- **testlib.h** (included in templates/)
+- **g++ 编译器**，支持 C++20（推荐 GCC 10+）
+- **testlib.h**（已内置在 `src/autocode_mcp/templates/`）
 
-Verify your setup:
+验证安装：
 
 ```bash
-# Check Python version
+# 检查 Python 版本
 python --version
 
-# Check g++ version
+# 检查 g++ 版本
 g++ --version
 
-# Run tests
+# 运行测试
 uv run pytest tests/ -v
 ```
 
-## Quick Start
+## 快速开始
 
-### 1. Install the Plugin
+### 1. 安装插件
 
-Recommended:
+推荐方式：
 
-- Install this repository as a Claude Code plugin.
-- For local development, test it with `claude --plugin-dir .`.
-- For personal marketplace usage, add the sibling marketplace and install from it:
+- 以 Claude Code plugin 方式安装本仓库。
+- 本地开发时可用 `claude --plugin-dir .` 测试插件行为。
+- 如果走个人 marketplace，可直接执行：
 
 ```bash
 claude plugin marketplace add ../autocode-marketplace
 claude plugin install autocode@autocode-marketplace
 ```
 
-Note: marketplace installs pull from `SummerOneTwo/AutoCode`, so push plugin changes before testing remote installation.
+注意：marketplace 默认从 `SummerOneTwo/AutoCode` 远程安装，所以测试远程安装前需要先把插件改动推到 GitHub。
 
-Fallback for direct Claude Code MCP setup:
+直接接入 Claude Code 的备用方式：
 
 ```bash
 claude mcp add autocode -- uvx autocode-mcp
 ```
 
-Project-local alternative:
+项目级备用方式：
 
 ```json
 {
@@ -122,67 +121,68 @@ Project-local alternative:
 }
 ```
 
-### 2. Create Your First Problem
+### 2. 创建你的第一个题目
 
-In Claude Code, simply ask:
+在 Claude Code 中，只需说：
 
-> "Create a competitive programming problem: Given two integers A and B, output their sum."
+> "创建一道竞赛编程题目：给定两个整数 A 和 B，输出它们的和。"
 
-Claude will use AutoCode tools to:
-1. Generate problem statement
-2. Implement solutions (optimal + brute force)
-3. Build validator and generator
-4. Run stress tests
-5. Generate final test data
+Claude 将使用 AutoCode 工具：
+1. 生成题目描述
+2. 实现解法（最优解 + 暴力解）
+3. 构建校验器和生成器
+4. 运行压力测试
+5. 生成最终测试数据
 
-### 3. Manual Tool Usage
+### 3. 手动调用工具
 
-You can also call tools directly:
+你也可以直接调用工具：
 
 ```python
-# Build a solution
+# 构建解法
 solution_build(
     problem_dir="problems/ab",
     solution_type="sol",
     code="#include <iostream>\nint main() { int a, b; std::cin >> a >> b; std::cout << a + b; }"
 )
 
-# Run stress test
+# 运行压力测试
 stress_test_run(problem_dir="problems/ab", trials=100)
 ```
 
-## Client Setup
+## 客户端配置
 
-### Transport & Compatibility
+### 传输层与兼容性
 
-**Recommended**: Install as a Claude Code plugin.
+**推荐方式**：直接作为 Claude Code plugin 安装。
 
-**Current Support**: Local stdio transport only. The server communicates via standard input/output streams and is designed for local trusted environments.
+**当前支持**：仅支持本地 stdio 传输。服务器通过标准输入/输出流通信，适用于本地可信环境。
 
-| Client | Status | Notes |
-|--------|--------|-------|
-| Claude Code | ✅ Verified | Primary development environment |
-| Cursor | ⚠️ Config provided | Not yet tested end-to-end |
-| OpenCode | ⚠️ Config provided | Not yet tested end-to-end |
+| 客户端 | 状态 | 说明 |
+|--------|------|------|
+| Claude Code | ✅ 已验证 | 主要开发环境 |
+| Cursor | ⚠️ 配置已提供 | 尚未端到端测试 |
+| OpenCode | ⚠️ 配置已提供 | 尚未端到端测试 |
 
-**Not Supported**: HTTP/SSE transport, remote connections, or multi-tenant environments.
+**不支持**：HTTP/SSE 传输、远程连接或多租户环境。
 
 ### Claude Code Plugin
 
-Recommended plugin files:
+推荐的插件文件：
 
 - [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
 - [`settings.json`](settings.json)
 - [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
 - [`hooks/hooks.json`](hooks/hooks.json)
+- [`scripts/workflow_guard.py`](scripts/workflow_guard.py)
 
-Direct MCP fallback:
+直接 MCP 接入的备用方式：
 
 ```bash
 claude mcp add autocode -- uvx autocode-mcp
 ```
 
-Manual config:
+手动配置方式：
 
 ```json
 {
@@ -194,13 +194,13 @@ Manual config:
 }
 ```
 
-### Other MCP Clients
+### 其他 MCP 客户端
 
-The same MCP server also works with other local MCP clients, but the workflow-enforcement agent and hooks are Claude Code plugin features.
+同一个 MCP server 也可用于其他本地 MCP 客户端，但工作流强制约束的 agent 和 hooks 是 Claude Code plugin 能力。
 
 ### Cursor
 
-Add to your Cursor settings (Settings → MCP):
+添加到 Cursor 设置（Settings → MCP）：
 
 ```json
 {
@@ -216,7 +216,7 @@ Add to your Cursor settings (Settings → MCP):
 
 ### OpenCode
 
-Edit `~/.config/opencode/opencode.json`:
+编辑 `~/.config/opencode/opencode.json`：
 
 ```json
 {
@@ -231,7 +231,7 @@ Edit `~/.config/opencode/opencode.json`:
 }
 ```
 
-Or use `uvx` without pre-installation:
+或使用 `uvx` 无需预安装：
 
 ```json
 {
@@ -246,9 +246,9 @@ Or use `uvx` without pre-installation:
 }
 ```
 
-### From Source (Development)
+### 从源码运行（开发模式）
 
-For development or custom installations:
+用于开发或自定义安装：
 
 ```json
 {
@@ -261,13 +261,13 @@ For development or custom installations:
 }
 ```
 
-### Verify Installation
+### 验证安装
 
-After configuration, restart your MCP client and check that tools are available. You should see 15 tools available.
+配置完成后，重启 MCP 客户端并检查工具是否可用。你应该能看到 15 个工具，包括 `solution_build`、`validator_build`、`generator_build` 等。
 
-## Tools Reference
+## 工具参考
 
-AutoCode provides 15 atomic tools organized into 7 groups. All tools return a unified format:
+AutoCode 提供 15 个原子工具，分为 7 组。所有工具返回统一格式：
 
 ```json
 {
@@ -277,65 +277,65 @@ AutoCode provides 15 atomic tools organized into 7 groups. All tools return a un
 }
 ```
 
-### File Operations
+### 文件操作
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `file_save` | Save content to a file | `path`, `content` |
-| `file_read` | Read file content | `path` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `file_save` | 保存内容到文件 | `path`, `content` |
+| `file_read` | 读取文件内容 | `path` |
 
-### Solution Tools
+### 解法工具
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `solution_build` | Compile solution code | `problem_dir`, `solution_type` ("sol"/"brute"), `code` |
-| `solution_run` | Execute compiled solution | `problem_dir`, `solution_type`, `input_data`, `timeout` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `solution_build` | 编译解法代码 | `problem_dir`, `solution_type` ("sol"/"brute"), `code` |
+| `solution_run` | 执行已编译的解法 | `problem_dir`, `solution_type`, `input_data`, `timeout` |
 
-### Validator Tools
+### 校验器工具
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `validator_build` | Build and test validator | `problem_dir`, `code`, `test_cases` |
-| `validator_select` | Select best validator from candidates | `candidates` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `validator_build` | 构建并测试校验器 | `problem_dir`, `code`, `test_cases` |
+| `validator_select` | 从候选中选择最佳校验器 | `candidates` |
 
-### Generator Tools
+### 生成器工具
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `generator_build` | Compile generator | `problem_dir`, `code` |
-| `generator_run` | Generate test inputs | `problem_dir`, `strategies`, `test_count`, `validator_path` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `generator_build` | 编译生成器 | `problem_dir`, `code` |
+| `generator_run` | 生成测试输入 | `problem_dir`, `strategies`, `test_count`, `validator_path` |
 
-### Checker Tools
+### 检查器工具
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `checker_build` | Build output checker | `problem_dir`, `code`, `test_scenarios` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `checker_build` | 构建输出检查器 | `problem_dir`, `code`, `test_scenarios` |
 
-### Interactor Tools
+### 交互器工具
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `interactor_build` | Build interactor for interactive problems | `problem_dir`, `code`, `reference_solution_path`, `mutant_solutions` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `interactor_build` | 构建交互题的交互器 | `problem_dir`, `code`, `reference_solution_path`, `mutant_solutions` |
 
-### Stress Testing
+### 压力测试
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `stress_test_run` | Compare sol vs brute outputs | `problem_dir`, `trials`, `n_max`, `timeout` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `stress_test_run` | 比较 sol 和 brute 输出 | `problem_dir`, `trials`, `n_max`, `timeout` |
 
-### Problem Management
+### 题目管理
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `problem_create` | Initialize problem directory | `problem_dir`, `problem_name` |
-| `problem_generate_tests` | Generate final test data | `problem_dir`, `test_count` |
-| `problem_pack_polygon` | Package for Polygon platform | `problem_dir`, `time_limit`, `memory_limit` |
+| 工具 | 描述 | 关键参数 |
+|------|------|----------|
+| `problem_create` | 初始化题目目录 | `problem_dir`, `problem_name` |
+| `problem_generate_tests` | 生成最终测试数据 | `problem_dir`, `test_count` |
+| `problem_pack_polygon` | 打包为 Polygon 格式 | `problem_dir`, `time_limit`, `memory_limit` |
 
-## Workflow Tutorial: A+B Problem
+## 工作流教程：A+B 问题
 
-This tutorial walks through creating a simple A+B problem using AutoCode tools.
+本教程演示如何使用 AutoCode 工具创建一道简单的 A+B 问题。
 
-### Step 1: Initialize Problem
+### 步骤 1：初始化题目
 
 ```python
 problem_create(
@@ -344,9 +344,9 @@ problem_create(
 )
 ```
 
-### Step 2: Implement Solutions
+### 步骤 2：实现解法
 
-**Optimal Solution (sol.cpp):**
+**最优解（sol.cpp）：**
 ```cpp
 #include <iostream>
 int main() {
@@ -357,25 +357,25 @@ int main() {
 }
 ```
 
-**Brute Force (brute.cpp):**
+**暴力解（brute.cpp）：**
 ```cpp
 #include <iostream>
 int main() {
     int a, b;
     std::cin >> a >> b;
-    // Same as optimal for A+B, but could be slower for complex problems
+    // 对于 A+B 问题与最优解相同，但复杂问题可能更慢
     std::cout << a + b << std::endl;
     return 0;
 }
 ```
 
-Build both:
+构建两个解法：
 ```python
 solution_build(problem_dir="problems/ab", solution_type="sol", code="...")
 solution_build(problem_dir="problems/ab", solution_type="brute", code="...")
 ```
 
-### Step 3: Build Validator
+### 步骤 3：构建校验器
 
 ```cpp
 #include "testlib.h"
@@ -390,7 +390,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-Build with test cases:
+构建并测试：
 ```python
 validator_build(
     problem_dir="problems/ab",
@@ -399,13 +399,13 @@ validator_build(
         {"input": "1 2\n", "expected_valid": True},
         {"input": "0 0\n", "expected_valid": True},
         {"input": "-1000 1000\n", "expected_valid": True},
-        {"input": "1001 0\n", "expected_valid": False},  # out of range
-        {"input": "1 2 3\n", "expected_valid": False},   # extra number
+        {"input": "1001 0\n", "expected_valid": False},  # 超出范围
+        {"input": "1 2 3\n", "expected_valid": False},   # 多余数字
     ]
 )
 ```
 
-### Step 4: Build Generator
+### 步骤 4：构建生成器
 
 ```cpp
 #include "testlib.h"
@@ -423,7 +423,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-Build and run:
+构建并运行：
 ```python
 generator_build(problem_dir="problems/ab", code="...")
 
@@ -435,7 +435,7 @@ generator_run(
 )
 ```
 
-### Step 5: Stress Test
+### 步骤 5：压力测试
 
 ```python
 stress_test_run(
@@ -446,12 +446,12 @@ stress_test_run(
 )
 ```
 
-Expected output:
+预期输出：
 ```
 All 1000 rounds passed
 ```
 
-### Step 6: Generate Final Tests
+### 步骤 6：生成最终测试
 
 ```python
 problem_generate_tests(
@@ -460,7 +460,7 @@ problem_generate_tests(
 )
 ```
 
-### Step 7: Package for Polygon
+### 步骤 7：打包为 Polygon 格式
 
 ```python
 problem_pack_polygon(
@@ -470,120 +470,120 @@ problem_pack_polygon(
 )
 ```
 
-## Architecture
+## 架构
 
-### Validator-Generator-Checker Framework
+### Validator-Generator-Checker 框架
 
 ```
 ┌─────────────────┐
-│  Problem Design │
+│   题面设计      │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐     ┌──────────────┐
-│  Solution Build │────►│  Validator   │ Verify input constraints
+│  解法构建       │────►│  Validator   │ 验证输入约束
 │  (sol + brute)  │     └──────────────┘
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐     ┌──────────────┐
-│  Generator      │────►│  Stress Test │ Compare sol vs brute
-│  Multi-strategy │     └──────────────┘
+│  Generator      │────►│  Stress Test │ 比较 sol 和 brute
+│  多策略生成     │     └──────────────┘
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Checker        │ Verify output correctness
+│  Checker        │ 验证输出正确性
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Polygon Pack   │ Export for platforms
+│  Polygon 打包   │ 导出为平台格式
 └─────────────────┘
 ```
 
-### Design Principles
+### 设计原则
 
-1. **Tool-Only, No LLM** — Server provides compilation, execution, and validation. All code generation is done by the client LLM.
+1. **纯工具模式，无 LLM** — Server 提供编译、执行和验证。所有代码生成由客户端 LLM 完成。
 
-2. **Stateless** — Each tool call is independent. State is managed via `problem_dir` parameter.
+2. **无状态设计** — 每次工具调用独立。状态通过 `problem_dir` 参数管理。
 
-3. **Unified Return Format** — All tools return `{success, error, data}` for consistent error handling.
+3. **统一返回格式** — 所有工具返回 `{success, error, data}`，便于一致的错误处理。
 
-4. **Execution Control** — Timeout control, memory limits (Linux via prlimit), and temporary directory isolation.
+4. **安全执行** — 超时控制、内存限制（Linux 通过 prlimit）、临时目录隔离。
 
-### Security Boundaries
+### 安全边界
 
-⚠️ **Important: This tool is designed for local trusted environments only**
+⚠️ **重要提示：本工具仅适用于本地可信环境**
 
-#### File Operations
+#### 文件操作
 
-- **With `problem_dir` parameter**: `file_read` and `file_save` restrict access to paths within the specified directory
-- **Without `problem_dir` parameter**: These tools can read/write **any arbitrary path** on the filesystem
-- **Recommendation**: Always specify `problem_dir` when calling file operations to limit scope
+- **指定 `problem_dir` 参数时**：`file_read` 和 `file_save` 限制在指定目录内访问
+- **不指定 `problem_dir` 参数时**：这些工具可以读写**任意路径**的文件
+- **建议**：调用文件操作时始终指定 `problem_dir` 以限制访问范围
 
-#### Code Execution
+#### 代码执行
 
-- Compiles and executes AI-generated C++ code with only time/memory limits
-- No sandbox isolation (uses `prlimit` on Linux for memory limits only)
-- **Risk**: Malformed or malicious code could potentially affect the system
+- 编译并执行 AI 生成的 C++ 代码，仅提供时间/内存限制
+- 无沙箱隔离（Linux 上仅通过 `prlimit` 限制内存）
+- **风险**：畸形或恶意代码可能影响系统
 
-#### Use Cases
+#### 适用场景
 
-✅ **Suitable For**:
-- Local development machines
-- Competitive programming problem creation
-- AI-assisted coding in trusted environments
-- Personal workstations with regular backups
+✅ **适用于**：
+- 本地开发机器
+- 竞赛编程出题
+- 可信环境下的 AI 辅助编程
+- 有定期备份的个人工作站
 
-❌ **Not Suitable For**:
-- Multi-tenant environments
-- Untrusted code execution
-- Production-grade code execution platforms
-- Shared servers without isolation
+❌ **不适用于**：
+- 多租户环境
+- 不可信代码执行
+- 生产级代码运行平台
+- 无隔离的共享服务器
 
-#### Mitigation Strategies
+#### 安全加固建议
 
-For stronger isolation, consider:
-- Running inside a Docker container
-- Using a virtual machine
-- Restricting filesystem permissions at the OS level
-- Running as a non-privileged user
+如需更强的安全隔离，建议：
+- 在 Docker 容器中运行
+- 使用虚拟机
+- 在操作系统层面限制文件系统权限
+- 以非特权用户身份运行
 
-### Generation Strategies
+### 生成策略
 
-| Strategy | Type Code | Purpose |
-|----------|-----------|---------|
-| `tiny` | 1 | Small exhaustive tests (N ≤ 10) |
-| `random` | 2 | Random data within constraints |
-| `extreme` | 3 | Edge cases: overflow, precision, hash collisions |
-| `tle` | 4 | TLE-inducing data for performance testing |
+| 策略 | 类型码 | 用途 |
+|------|--------|------|
+| `tiny` | 1 | 小数据穷举测试（N ≤ 10） |
+| `random` | 2 | 约束范围内的随机数据 |
+| `extreme` | 3 | 边界情况：溢出、精度、hash 碰撞 |
+| `tle` | 4 | 诱导 TLE 的性能测试数据 |
 
-### File Structure
+### 文件结构
 
 ```
 problems/your-problem/
 ├── files/
-│   ├── testlib.h       # Competitive programming standard library
-│   ├── gen.cpp         # Test generator
-│   ├── val.cpp         # Input validator
-│   ├── checker.cpp     # Output checker (optional)
-│   └── interactor.cpp  # Interactor (for interactive problems)
+│   ├── testlib.h       # 竞赛编程标准库
+│   ├── gen.cpp         # 测试生成器
+│   ├── val.cpp         # 输入校验器
+│   ├── checker.cpp     # 输出检查器（可选）
+│   └── interactor.cpp  # 交互器（交互题）
 ├── solutions/
-│   ├── sol.cpp         # Optimal solution
-│   └── brute.cpp       # Brute force (for validation)
+│   ├── sol.cpp         # 最优解
+│   └── brute.cpp       # 暴力解（用于验证）
 ├── statements/
-│   └── README.md       # Problem statement
+│   └── README.md       # 题目描述
 ├── tests/
-│   ├── 01.in           # Test input
-│   ├── 01.ans          # Expected output
+│   ├── 01.in           # 测试输入
+│   ├── 01.ans          # 期望输出
 │   └── ...
-└── problem.xml         # Polygon configuration
+└── problem.xml         # Polygon 配置
 ```
 
-## Development
+## 开发
 
-### Setup
+### 环境搭建
 
 ```bash
 git clone https://github.com/SummerOneTwo/AutoCode.git
@@ -591,85 +591,84 @@ cd AutoCode
 uv sync
 ```
 
-### Running Tests
+### 运行测试
 
 ```bash
-# Run all tests
+# 运行所有测试
 uv run pytest tests/ -v
 
-# Run with coverage
+# 运行并生成覆盖率报告
 uv run pytest tests/ --cov=src/autocode_mcp --cov-report=html
 
-# Run specific test file
+# 运行特定测试文件
 uv run pytest tests/test_compiler.py -v
 ```
 
-### Code Quality
+### 代码质量
 
 ```bash
-# Linting
+# Lint 检查
 uv run ruff check .
 
-# Type checking
+# 类型检查
 uv run mypy src/
 
-# Format
+# 格式化
 uv run ruff format .
 ```
 
-### Project Structure
+### 项目结构
 
 ```
 autocode-mcp/
 ├── src/autocode_mcp/
-│   ├── tools/           # MCP tool implementations
-│   │   ├── base.py      # Tool base class
-│   │   ├── solution.py  # Solution tools
-│   │   ├── validator.py # Validator tools
-│   │   ├── generator.py # Generator tools
-│   │   ├── checker.py   # Checker tools
+│   ├── tools/           # MCP 工具实现
+│   │   ├── base.py      # 工具基类
+│   │   ├── solution.py  # 解法工具
+│   │   ├── validator.py # 校验器工具
+│   │   ├── generator.py # 生成器工具
+│   │   ├── checker.py   # 检查器工具
 │   │   ├── stress_test.py
 │   │   └── ...
 │   ├── utils/
-│   │   ├── compiler.py  # C++ compilation utilities
-│   │   └── platform.py  # Platform-specific helpers
-│   ├── prompts/         # Workflow prompt templates
-│   ├── resources/       # Template resources
-│   └── server.py        # MCP server entry point
-├── templates/           # C++ templates (testlib.h, etc.)
-├── tests/               # Test suite
+│   │   ├── compiler.py  # C++ 编译工具
+│   │   └── platform.py  # 平台相关辅助函数
+│   ├── prompts/         # 工作流提示词模板
+│   ├── resources/       # 模板资源
+│   └── server.py        # MCP server 入口
+├── tests/               # 测试套件
 └── pyproject.toml
 ```
 
-### Adding New Tools
+### 添加新工具
 
-1. Create a new file in `src/autocode_mcp/tools/`
-2. Inherit from `Tool` base class
-3. Implement `name`, `description`, `input_schema`, and `execute()`
-4. Register in `server.py`
-5. Add tests in `tests/`
+1. 在 `src/autocode_mcp/tools/` 创建新文件
+2. 继承 `Tool` 基类
+3. 实现 `name`、`description`、`input_schema` 和 `execute()`
+4. 在 `server.py` 中注册
+5. 在 `tests/` 中添加测试
 
-## Contributing
+## 贡献
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解贡献指南。
 
-## Troubleshooting
+## 故障排查
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
+查看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) 了解常见问题和解决方案。
 
-## License
+## 许可证
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - 详见 [LICENSE](LICENSE)。
 
-## Acknowledgments
+## 致谢
 
-- Based on the paper ["AutoCode: LLMs as Problem Setters for Competitive Programming"](https://arxiv.org/abs/2510.12803)
-- Uses [testlib.h](https://github.com/MikeMirzayanov/testlib) for competitive programming utilities
-- Built on the [Model Context Protocol](https://modelcontextprotocol.io/)
+- 基于论文 ["AutoCode: LLMs as Problem Setters for Competitive Programming"](https://arxiv.org/abs/2510.12803)
+- 使用 [testlib.h](https://github.com/MikeMirzayanov/testlib) 竞赛编程工具库
+- 基于 [Model Context Protocol](https://modelcontextprotocol.io/) 构建
 
-## Links
+## 链接
 
-- [Documentation](https://github.com/SummerOneTwo/AutoCode#readme)
+- [文档](https://github.com/SummerOneTwo/AutoCode#readme)
 - [PyPI](https://pypi.org/project/autocode-mcp/)
 - [GitHub](https://github.com/SummerOneTwo/AutoCode)
 - [Issue Tracker](https://github.com/SummerOneTwo/AutoCode/issues)

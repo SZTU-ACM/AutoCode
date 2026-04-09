@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -97,26 +96,6 @@ def deny(reason: str) -> None:
         }
     }
     print(json.dumps(output, ensure_ascii=False))
-
-
-def quality_summary(state: dict[str, Any]) -> str:
-    return (
-        "Workflow state: "
-        f"created={state['created']}, "
-        f"sol_built={state['sol_built']}, "
-        f"brute_built={state['brute_built']}, "
-        f"validator_ready={state['validator_ready']}, "
-        f"validator_accuracy={state.get('validator_accuracy')}, "
-        f"generator_built={state['generator_built']}, "
-        f"stress_passed={state['stress_passed']}, "
-        f"stress_completed_rounds={state.get('stress_completed_rounds', 0)}, "
-        f"stress_total_rounds={state.get('stress_total_rounds', 0)}, "
-        f"checker_ready={state['checker_ready']}, "
-        f"checker_accuracy={state.get('checker_accuracy')}, "
-        f"tests_generated={state['tests_generated']}, "
-        f"generated_test_count={state.get('generated_test_count', 0)}, "
-        f"packaged={state['packaged']}."
-    )
 
 
 def pre_tool(payload: dict[str, Any]) -> int:

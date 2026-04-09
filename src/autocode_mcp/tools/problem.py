@@ -93,7 +93,7 @@ class ProblemCreateTool(Tool):
             return ToolResult.fail(
                 f"testlib.h template not found at {template_testlib}. "
                 "Please download from https://github.com/MikeMirzayanov/testlib "
-                "and place it in the templates/ directory."
+                "and place it in src/autocode_mcp/templates/."
             )
 
         # 创建基础 README.md

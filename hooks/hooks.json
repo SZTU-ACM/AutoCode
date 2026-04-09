@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/workflow_guard.py\" session",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/scripts/workflow_guard.py\" session",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/workflow_guard.py\" pre",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/scripts/workflow_guard.py\" pre",
             "timeout": 30
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/workflow_guard.py\" post",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/scripts/workflow_guard.py\" post",
             "timeout": 30
           }
         ]
