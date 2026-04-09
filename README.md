@@ -19,7 +19,7 @@ AutoCode MCP Server provides 15 atomic tools that enable AI assistants to create
 - **Multi-Strategy Generation** — Four generation strategies: tiny (exhaustive), random, extreme (edge cases), and TLE-inducing
 - **Stress Testing** — Automated comparison between optimal and brute-force solutions with configurable trial counts
 - **MCP Protocol** — Native support for Claude Code, Cursor, and other MCP-compatible AI tools
-- **Safe Execution** — Timeout control, memory limits (Linux), and temporary directory isolation
+- **Execution Control** — Timeout control, memory limits (Linux), and temporary directory isolation (local trusted environments only)
 - **Polygon Packaging** — Export problems in Polygon format for Codeforces-style platforms
 
 ## Installation
@@ -109,6 +109,18 @@ stress_test_run(problem_dir="problems/ab", trials=100)
 ```
 
 ## MCP Client Setup
+
+### Transport & Compatibility
+
+**Current Support**: Local stdio transport only. The server communicates via standard input/output streams and is designed for local trusted environments.
+
+| Client | Status | Notes |
+|--------|--------|-------|
+| Claude Code | ✅ Verified | Primary development environment |
+| Cursor | ⚠️ Config provided | Not yet tested end-to-end |
+| OpenCode | ⚠️ Config provided | Not yet tested end-to-end |
+
+**Not Supported**: HTTP/SSE transport, remote connections, or multi-tenant environments.
 
 ### Claude Code
 
@@ -436,7 +448,18 @@ problem_pack_polygon(
 
 3. **Unified Return Format** — All tools return `{success, error, data}` for consistent error handling.
 
-4. **Safe Execution** — Timeout control, memory limits (Linux via prlimit), and temporary directory isolation.
+4. **Execution Control** — Timeout control, memory limits (Linux via prlimit), and temporary directory isolation.
+
+### Security Boundaries
+
+⚠️ **Important: This tool is designed for local trusted environments only**
+
+- **File Operations**: `file_read` and `file_save` can read/write arbitrary paths (use `problem_dir` parameter to limit scope)
+- **Code Execution**: Compiles and executes AI-generated C++ code with only time/memory limits, no sandbox isolation
+- **Use Cases**: Local development, competitive programming problem creation, AI-assisted coding in trusted environments
+- **Not Suitable For**: Multi-tenant environments, untrusted code execution, production-grade code execution platforms
+
+For stronger isolation, run inside a container or virtual machine.
 
 ### Generation Strategies
 

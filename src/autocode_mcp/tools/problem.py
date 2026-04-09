@@ -387,7 +387,7 @@ class ProblemGenerateTestsTool(Tool):
                 # Validator 过滤
                 if validator_available:
                     val_result = await run_binary(val_exe, input_data, timeout=timeout)
-                    if val_result.returncode != 0:
+                    if val_result.return_code != 0:
                         # 输入无效，跳过
                         seed += 1
                         continue

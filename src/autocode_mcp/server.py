@@ -7,6 +7,7 @@ MCP Server 入口。
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from mcp.server import Server
@@ -109,7 +110,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
         result = await tool.execute(**arguments)
         result_dict = result.to_dict()
         return CallToolResult(
-            content=[TextContent(type="text", text=str(result_dict))],
+            content=[TextContent(type="text", text=json.dumps(result_dict, ensure_ascii=False))],
             structuredContent=result_dict,
             isError=not result.success,
         )
@@ -117,7 +118,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
         error_result = ToolResult.fail(str(e))
         error_dict = error_result.to_dict()
         return CallToolResult(
-            content=[TextContent(type="text", text=str(error_dict))],
+            content=[TextContent(type="text", text=json.dumps(error_dict, ensure_ascii=False))],
             structuredContent=error_dict,
             isError=True,
         )
