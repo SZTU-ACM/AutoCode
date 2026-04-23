@@ -150,6 +150,10 @@ async def compile_cpp(
         binary_path,
     ]
 
+    # Windows 上使用静态链接避免 DLL 版本冲突（特别是 testlib.h 程序）
+    if sys.platform == "win32":
+        cmd.append("-static")
+
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -316,8 +320,16 @@ async def _run_process(
             )
 
         try:
+            # Windows 上 testlib strict 模式期望 CRLF 换行符
+            # 将 LF 转换为 CRLF 以满足 validator 的 readEoln() 要求
+            processed_stdin = stdin
+            if sys.platform == "win32" and stdin:
+                # 避免重复转换：先还原已有的 CRLF，再将所有 LF 转为 CRLF
+                processed_stdin = stdin.replace("\r\n", "\n").replace("\n", "\r\n")
+
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=stdin.encode("utf-8") if stdin else None), timeout=timeout
+                process.communicate(input=processed_stdin.encode("utf-8") if processed_stdin else None),
+                timeout=timeout,
             )
         except TimeoutError:
             # 超时时强制终止进程
