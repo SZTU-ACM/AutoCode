@@ -35,6 +35,7 @@ from .tools.interactor import InteractorBuildTool
 from .tools.problem import ProblemCreateTool, ProblemGenerateTestsTool, ProblemPackPolygonTool
 from .tools.solution import SolutionBuildTool, SolutionRunTool
 from .tools.stress_test import StressTestRunTool
+from .tools.validation import ProblemValidateTool
 from .tools.validator import ValidatorBuildTool, ValidatorSelectTool
 
 # 创建 MCP Server 实例
@@ -67,6 +68,7 @@ def register_all_tools() -> None:
     register_tool(ProblemCreateTool())
     register_tool(ProblemGenerateTestsTool())
     register_tool(ProblemPackPolygonTool())
+    register_tool(ProblemValidateTool())
 
     # Validator 工具组
     register_tool(ValidatorBuildTool())

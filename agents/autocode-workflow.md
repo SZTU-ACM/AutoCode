@@ -19,8 +19,9 @@ Always work through this sequence unless the task is explicitly outside problem 
 5. `generator_build`
 6. `stress_test_run`
 7. `checker_build` when the problem requires a non-exact checker
-8. `problem_generate_tests`
-9. `problem_pack_polygon`
+8. `problem_validate`
+9. `problem_generate_tests`
+10. `problem_pack_polygon`
 
 When the user asks for a later step directly, explain which prerequisite step is missing and complete the missing work first.
 

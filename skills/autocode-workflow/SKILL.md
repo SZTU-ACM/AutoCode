@@ -52,13 +52,19 @@ Based on the paper "AutoCode: LLMs as Problem Setters for Competitive Programmin
 │  │       (for non-exact problems)           │                               │
 │  └────────────────────┬────────────────────┘                                │
 │                       │                                                      │
-│  Phase 7: Test Generation                                                    │
+│  Phase 7: Sample Validation                                                  │
+│  ┌────────────────────┴────────────────────┐                                │
+│  │          problem_validate                │ Validate statement samples    │
+│  │      (statement_samples + sample_files)  │ and test files                │
+│  └────────────────────┬────────────────────┘                                │
+│                       │                                                      │
+│  Phase 8: Test Generation                                                    │
 │  ┌────────────────────┴────────────────────┐                                │
 │  │        problem_generate_tests            │ Generate final test data      │
 │  │     (dedup + validator filter + balance) │                               │
 │  └────────────────────┬────────────────────┘                                │
 │                       │                                                      │
-│  Phase 8: Packaging                                                          │
+│  Phase 9: Packaging                                                          │
 │  ┌────────────────────┴────────────────────┐                                │
 │  │        problem_pack_polygon              │ Export for Codeforces/Polygon │
 │  └─────────────────────────────────────────┘                                │
@@ -198,9 +204,31 @@ Verify: Check accuracy >= 0.9
 ]
 ```
 
-### Phase 7: Test Generation
+### Phase 7: Sample Validation
 
-**Step 7.1: Generate Final Tests**
+**Step 7.1: Validate Statement Samples**
+```
+Tool: problem_validate
+Required: problem_dir
+Optional: statement_samples (if not provided, auto-extract from README.md)
+Output: validation results for statement_samples and sample_files
+Verify: Check success=true, all samples passed
+CRITICAL: Must pass validation before generating final tests
+```
+
+**Validation Types:**
+- `statement_samples`: Validate samples in problem statement (README.md)
+- `sample_files`: Validate sample files in tests/ directory
+
+**If validation fails:**
+1. Check the failing sample's expected output
+2. Run sol manually to verify correct output
+3. Update README.md or sample files as needed
+4. Re-run validation
+
+### Phase 8: Test Generation
+
+**Step 8.1: Generate Final Tests**
 ```
 Tool: problem_generate_tests
 Required: problem_dir
@@ -209,9 +237,9 @@ Output: tests/01.in ~ tests/50.in + corresponding .ans files
 Verify: Check generated_tests count matches test_count
 ```
 
-### Phase 8: Packaging
+### Phase 9: Packaging
 
-**Step 8.1: Pack for Polygon**
+**Step 9.1: Pack for Polygon**
 ```
 Tool: problem_pack_polygon
 Required: problem_dir
@@ -254,16 +282,18 @@ Generate 3-5 mutant solutions with common bugs:
 | 4 | `generator_build` | Step 3 | `success=true`, gen.exe exists |
 | 5 | `stress_test_run` | Step 4 | `"All N rounds passed"` |
 | 6 | `checker_build` (optional) | Step 5 | `accuracy >= 0.9` |
-| 7 | `problem_generate_tests` | Step 5 or 6 | `generated_tests == test_count` |
-| 8 | `problem_pack_polygon` | Step 7 | `success=true` |
+| 7 | `problem_validate` | Step 5 or 6 | `success=true`, all samples passed |
+| 8 | `problem_generate_tests` | Step 7 | `generated_tests == test_count` |
+| 9 | `problem_pack_polygon` | Step 8 | `success=true` |
 
 ### FORBIDDEN Actions
 
 1. **NEVER** call `generator_build` before `validator_build`
 2. **NEVER** call `stress_test_run` before building BOTH sol AND brute
-3. **NEVER** call `problem_generate_tests` before stress test passes
-4. **NEVER** skip stress test verification
-5. **NEVER** proceed if any step returns `success=false`
+3. **NEVER** call `problem_validate` before stress test passes
+4. **NEVER** call `problem_generate_tests` before validation passes
+5. **NEVER** skip stress test verification
+6. **NEVER** proceed if any step returns `success=false`
 
 ## Error Recovery
 
@@ -284,6 +314,13 @@ Generate 3-5 mutant solutions with common bugs:
 3. Fix the buggy solution
 4. Rebuild and re-run stress test
 
+### Validation Failure
+1. The result contains `statement_samples` or `sample_files` details
+2. Check which sample failed (expected vs actual output)
+3. Verify correct output by running sol manually
+4. Update README.md or sample files with correct output
+5. Re-run validation
+
 ## Quality Checklist
 
 Before considering the problem complete:
@@ -295,6 +332,8 @@ Before considering the problem complete:
 - [ ] Generator produces valid inputs
 - [ ] Stress test passes 1000+ rounds
 - [ ] (If applicable) Checker passes 90%+ scenarios
+- [ ] Statement samples validated (problem_validate passed)
+- [ ] Sample files validated (problem_validate passed)
 - [ ] Final test data generated (50+ tests)
 - [ ] Polygon package created
 
@@ -329,11 +368,15 @@ assert result["completed_rounds"] == result["total_rounds"]
 result = checker_build(problem_dir="problems/ab", code=checker_code, test_scenarios=checker_tests)
 assert result["accuracy"] >= 0.9
 
-# Phase 7: Generate Tests
+# Phase 7: Validate Samples
+result = problem_validate(problem_dir="problems/ab")
+assert result["success"] == True
+
+# Phase 8: Generate Tests
 result = problem_generate_tests(problem_dir="problems/ab", test_count=50)
 assert len(result["generated_tests"]) == 50
 
-# Phase 8: Package
+# Phase 9: Package
 result = problem_pack_polygon(problem_dir="problems/ab", time_limit=1, memory_limit=256)
 assert result["success"] == True
 ```
@@ -356,4 +399,5 @@ If the user asks to skip steps (e.g., "just generate tests"), you MUST:
 | `checker_build` | Algorithm 3 | Build output verification |
 | `interactor_build` | Algorithm 4 | Build interactive problem handler |
 | `stress_test_run` | - | Verify solution correctness |
+| `problem_validate` | - | Validate statement samples and sample files |
 | `problem_generate_tests` | - | Generate final test dataset |

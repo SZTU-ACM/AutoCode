@@ -10,6 +10,7 @@ from .interactor import InteractorBuildTool
 from .problem import ProblemCreateTool, ProblemGenerateTestsTool, ProblemPackPolygonTool
 from .solution import SolutionBuildTool, SolutionRunTool
 from .stress_test import StressTestRunTool
+from .validation import ProblemValidateTool
 from .validator import ValidatorBuildTool, ValidatorSelectTool
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "ProblemCreateTool",
     "ProblemGenerateTestsTool",
     "ProblemPackPolygonTool",
+    "ProblemValidateTool",
     "ValidatorBuildTool",
     "ValidatorSelectTool",
     "GeneratorBuildTool",

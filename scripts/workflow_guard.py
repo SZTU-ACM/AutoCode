@@ -49,6 +49,9 @@ def infer_state(problem_dir: str) -> dict[str, Any]:
         "stress_total_rounds": 0,
         "checker_ready": (root / "files" / "checker.cpp").exists() or any(root.glob("files/checker.*")),
         "checker_accuracy": None,
+        "statement_validated": False,
+        "sample_files_validated": False,
+        "validation_passed": False,
         "tests_generated": any((root / "tests").glob("*.in")) if (root / "tests").exists() else False,
         "generated_test_count": len(list((root / "tests").glob("*.in"))) if (root / "tests").exists() else 0,
         "packaged": (root / "problem.xml").exists(),
@@ -115,7 +118,8 @@ def pre_tool(payload: dict[str, Any]) -> int:
         "generator_build": "必须先完成 validator_build，并且 validator accuracy >= 0.9。",
         "stress_test_run": "必须先完成 validator_build(accuracy >= 0.9) 和 generator_build，然后再进行 stress_test_run。",
         "checker_build": "必须先通过 stress_test_run（completed_rounds == total_rounds），再构建 checker。",
-        "problem_generate_tests": "必须先通过 stress_test_run（completed_rounds == total_rounds），才能生成最终测试数据。",
+        "problem_validate": "必须先通过 stress_test_run（completed_rounds == total_rounds），再进行验证。",
+        "problem_generate_tests": "必须先通过 problem_validate（验证通过），才能生成最终测试数据。",
         "problem_pack_polygon": "必须先生成最终测试数据，并且生成数量 > 0，再进行打包。",
     }
 
@@ -153,7 +157,13 @@ def pre_tool(payload: dict[str, Any]) -> int:
         deny(reasons["checker_build"])
         return 0
 
-    if short_name == "problem_generate_tests" and not state["stress_passed"]:
+    if short_name == "problem_validate" and not state["stress_passed"]:
+        deny(reasons["problem_validate"])
+        return 0
+
+    if short_name == "problem_generate_tests" and not (
+        state["stress_passed"] and state.get("validation_passed", False)
+    ):
         deny(reasons["problem_generate_tests"])
         return 0
 
@@ -173,6 +183,17 @@ def post_tool(payload: dict[str, Any]) -> int:
         return 0
 
     success, data = parse_tool_result(payload)
+
+    # 特殊处理：problem_validate 失败时也需要更新状态
+    # 确保重新验证失败后清除旧的 validation_passed 状态
+    if short_name == "problem_validate" and not success:
+        state = load_state(problem_dir)
+        state["statement_validated"] = data.get("statement_samples", {}).get("validated", False)
+        state["sample_files_validated"] = data.get("sample_files", {}).get("validated", False)
+        state["validation_passed"] = False
+        save_state(problem_dir, state)
+        return 0
+
     if not success:
         return 0
 
@@ -200,6 +221,10 @@ def post_tool(payload: dict[str, Any]) -> int:
         accuracy = data.get("accuracy")
         state["checker_accuracy"] = accuracy
         state["checker_ready"] = accuracy is None or accuracy >= 0.9
+    elif short_name == "problem_validate":
+        state["statement_validated"] = data.get("statement_samples", {}).get("validated", False)
+        state["sample_files_validated"] = data.get("sample_files", {}).get("validated", False)
+        state["validation_passed"] = success
     elif short_name == "problem_generate_tests":
         generated_tests = data.get("generated_tests", [])
         state["tests_generated"] = bool(generated_tests)
@@ -218,6 +243,7 @@ def session_start() -> int:
         "validator_build(accuracy >= 0.9) -> generator_build -> "
         "stress_test_run(completed_rounds == total_rounds) -> "
         "checker_build if needed (accuracy >= 0.9) -> "
+        "problem_validate(validation_passed) -> "
         "problem_generate_tests(generated_test_count > 0) -> problem_pack_polygon. "
         "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )
