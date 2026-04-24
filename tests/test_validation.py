@@ -7,8 +7,6 @@ ProblemValidateTool 测试。
 import os
 import tempfile
 
-import pytest
-
 from autocode_mcp.tools.validation import ProblemValidateTool
 
 

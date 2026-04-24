@@ -316,7 +316,7 @@ class ProblemValidateTool(Tool):
             if len(actual_tokens) == len(expected_tokens):
                 actual_nums = [float(x) for x in actual_tokens]
                 expected_nums = [float(x) for x in expected_tokens]
-                return all(abs(a - e) < tolerance for a, e in zip(actual_nums, expected_nums))
+                return all(abs(a - e) < tolerance for a, e in zip(actual_nums, expected_nums, strict=False))
         except ValueError:
             pass
 
@@ -364,7 +364,7 @@ class ProblemValidateTool(Tool):
         output_blocks = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
 
         # 配对
-        for i, (inp, out) in enumerate(zip(input_blocks, output_blocks)):
+        for _i, (inp, out) in enumerate(zip(input_blocks, output_blocks, strict=False)):
             samples.append({
                 "input": inp.strip(),
                 "expected_output": out.strip(),
@@ -392,7 +392,7 @@ class ProblemValidateTool(Tool):
             inputs = re.findall(input_pattern, content, re.DOTALL | re.IGNORECASE)
             outputs = re.findall(output_pattern, content, re.DOTALL | re.IGNORECASE)
 
-            for inp, out in zip(inputs, outputs):
+            for inp, out in zip(inputs, outputs, strict=False):
                 samples.append({
                     "input": inp.strip(),
                     "expected_output": out.strip(),
