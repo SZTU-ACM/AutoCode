@@ -1,6 +1,6 @@
 # AutoCode MCP Server
 
-[![PyPI version](https://badge.fury.io/py/autocode-mcp.svg)](https://badge.fury.io/py/autocode-mcp)
+[![PyPI version](https://img.shields.io/pypi/v/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
