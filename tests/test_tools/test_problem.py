@@ -2,6 +2,7 @@
 Problem 工具组测试。
 """
 
+import json
 import os
 import tempfile
 
@@ -9,6 +10,7 @@ import pytest
 
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.problem import (
+    CandidateTest,
     ProblemCreateTool,
     ProblemGenerateTestsTool,
     ProblemPackPolygonTool,
@@ -447,6 +449,118 @@ def test_problem_verify_tests_file_count_reports_large_gaps():
         assert len(result["missing_indices"]) == 98
 
 
+def test_problem_verify_tests_limit_ratio_passes_with_manifest():
+    """测试极限数据占比校验通过。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 4 组中 2 组为 type=3/4，满足 >=50%
+        for i in range(1, 5):
+            with open(os.path.join(tmpdir, f"{i:02d}.in"), "w", encoding="utf-8") as f:
+                f.write("x\n")
+            with open(os.path.join(tmpdir, f"{i:02d}.ans"), "w", encoding="utf-8") as f:
+                f.write("y\n")
+
+        manifest = {
+            "version": 1,
+            "limit_strategy_types": ["3", "4"],
+            "tests": [
+                {"in_file": "01.in", "ans_file": "01.ans", "type_param": "1", "signature": "a"},
+                {"in_file": "02.in", "ans_file": "02.ans", "type_param": "2", "signature": "b"},
+                {"in_file": "03.in", "ans_file": "03.ans", "type_param": "3", "signature": "c"},
+                {"in_file": "04.in", "ans_file": "04.ans", "type_param": "4", "signature": "d"},
+            ],
+        }
+        with open(
+            os.path.join(tmpdir, ".autocode_tests_manifest.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(manifest, f)
+
+        result = tool._check_limit_ratio(tmpdir)
+        assert result["passed"] is True
+        assert result["limit_case_count"] == 2
+        assert result["limit_case_minimum_required"] == 2
+
+
+def test_problem_verify_tests_limit_ratio_fails_when_insufficient():
+    """测试极限数据占比不足时校验失败。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 5 组中只有 2 组 type=3/4，不满足 >=3
+        for i in range(1, 6):
+            with open(os.path.join(tmpdir, f"{i:02d}.in"), "w", encoding="utf-8") as f:
+                f.write("x\n")
+            with open(os.path.join(tmpdir, f"{i:02d}.ans"), "w", encoding="utf-8") as f:
+                f.write("y\n")
+
+        manifest = {
+            "version": 1,
+            "limit_strategy_types": ["3", "4"],
+            "tests": [
+                {"in_file": "01.in", "ans_file": "01.ans", "type_param": "1", "signature": "a"},
+                {"in_file": "02.in", "ans_file": "02.ans", "type_param": "2", "signature": "b"},
+                {"in_file": "03.in", "ans_file": "03.ans", "type_param": "2", "signature": "c"},
+                {"in_file": "04.in", "ans_file": "04.ans", "type_param": "3", "signature": "d"},
+                {"in_file": "05.in", "ans_file": "05.ans", "type_param": "4", "signature": "e"},
+            ],
+        }
+        with open(
+            os.path.join(tmpdir, ".autocode_tests_manifest.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(manifest, f)
+
+        result = tool._check_limit_ratio(tmpdir)
+        assert result["passed"] is False
+        assert result["limit_case_count"] == 2
+        assert result["limit_case_minimum_required"] == 3
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_default_enables_limit_ratio():
+    """默认会启用 limit_ratio（即使 verify_types 未显式包含）。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty"],  # 不包含 limit_ratio
+        )
+        assert not result.success
+        assert result.data.get("limit_ratio_enabled") is True
+        assert "limit_ratio" in result.data.get("results", {})
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_can_disable_limit_ratio():
+    """允许显式关闭 limit_ratio，默认其他检查正常执行。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty"],
+            enable_limit_ratio=False,
+        )
+        assert result.success
+        assert result.data.get("limit_ratio_enabled") is False
+        assert "limit_ratio" not in result.data.get("results", {})
+
+
 @pytest.mark.asyncio
 async def test_problem_pack_polygon_dynamic_test_count():
     """测试 Polygon 打包使用动态 test-count。"""
@@ -531,6 +645,50 @@ int main() {
         assert len(result.data.get("generated_tests", [])) == 1
 
 
+def test_balance_and_sample_at_least_half_extreme_or_tle():
+    """最终采样中 type 3/4 不少于一半（候选充足时）。"""
+    tool = ProblemGenerateTestsTool()
+
+    def mk(type_param: str, sig: str) -> CandidateTest:
+        return CandidateTest(
+            input_data=f"{type_param}-{sig}",
+            output_data="o",
+            type_param=type_param,
+            signature=sig,
+        )
+
+    candidates = (
+        [mk("1", f"a{i}") for i in range(10)]
+        + [mk("2", f"b{i}") for i in range(10)]
+        + [mk("3", f"c{i}") for i in range(10)]
+        + [mk("4", f"d{i}") for i in range(10)]
+    )
+
+    out = tool._balance_and_sample(candidates, 10, balance_remainder=True)
+    assert len(out) == 10
+    assert sum(1 for x in out if x.type_param in ("3", "4")) >= 5
+
+    out11 = tool._balance_and_sample(candidates, 11, balance_remainder=True)
+    assert len(out11) == 11
+    assert sum(1 for x in out11 if x.type_param in ("3", "4")) >= 6
+
+
+def test_balance_and_sample_keeps_duplicates_when_dedup_disabled():
+    """采样函数不应按 signature 强制去重（由 enable_dedup 控制前置候选）。"""
+    tool = ProblemGenerateTestsTool()
+
+    dup1 = CandidateTest("in-a", "out", "3", "same")
+    dup2 = CandidateTest("in-b", "out", "3", "same")
+    dup3 = CandidateTest("in-c", "out", "2", "same")
+    dup4 = CandidateTest("in-d", "out", "1", "same")
+    candidates = [dup1, dup2, dup3, dup4]
+
+    out = tool._balance_and_sample(candidates, 4, balance_remainder=False)
+    assert len(out) == 4
+    assert out.count(dup1) == 1
+    assert out.count(dup2) == 1
+
+
 @pytest.mark.asyncio
 async def test_problem_generate_tests_balance():
     """测试平衡分布功能。"""
@@ -590,6 +748,8 @@ int main() {
 
         assert result.success
         assert result.data.get("balance_enabled") is True
+        assert result.data.get("limit_case_quota_met") is True
+        assert result.data.get("limit_case_count", 0) >= 4  # 8 条中至少 4 条为 extreme/tle
         # 检查类型分布
         type_dist = result.data.get("type_distribution", {})
         # 应该有 4 种类型，每种 2 个

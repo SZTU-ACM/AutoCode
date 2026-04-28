@@ -5,6 +5,7 @@ Problem 工具组 - 题目管理。
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -22,6 +23,11 @@ class CandidateTest:
     output_data: str
     type_param: str  # 1=tiny, 2=random, 3=extreme, 4=tle
     signature: str
+
+
+# 最终测试集中「极限类」占比下限：至少一半来自 generator type 3/4（extreme + TLE 压力）
+_LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
+_TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
 
 
 class ProblemCreateTool(Tool):
@@ -125,6 +131,7 @@ class ProblemGenerateTestsTool(Tool):
         - 使用 gen.cpp 生成测试数据
         - 使用 sol.cpp 生成答案
         - 支持去重、平衡、采样
+        - 最终测试集中至少一半为极限类（generator type=3 extreme 与 type=4 tle），在候选不足时可能无法完全满足
 
         生成 01.in ~ N.in 及对应的 .ans 文件。
 
@@ -223,7 +230,7 @@ class ProblemGenerateTestsTool(Tool):
                 },
                 "enable_balance": {
                     "type": "boolean",
-                    "description": "启用平衡分布（确保各策略类型均衡）",
+                    "description": "启用平衡分布：在已满足「至少一半为 extreme/tle」后，将剩余名额在各非极限类型间尽量均衡分配；关闭时剩余名额按确定性的 (type_param, signature) 顺序填充",
                     "default": True,
                 },
                 "oversample_ratio": {
@@ -255,8 +262,8 @@ class ProblemGenerateTestsTool(Tool):
         1. 生成超额候选数据
         2. 去重（基于 MD5 signature）
         3. Validator 过滤（自动检测 val.exe）
-        4. 平衡分布（按策略类型）
-        5. 采样最终 test_count 个
+        4. 采样：至少一半为 type=3/4（极限 + TLE 压力），其余再平衡或按签名排序
+        5. 输出最终 test_count 个
         """
         # 验证 constraints 参数
         if constraints:
@@ -434,18 +441,17 @@ class ProblemGenerateTestsTool(Tool):
 
             seed += 1
 
-        # 平衡分布和采样
-        if enable_balance and len(candidates) > test_count:
-            final_tests = self._balance_and_sample(candidates, test_count)
-        elif len(candidates) > test_count:
-            # 简单确定性采样（按 signature 排序）
-            sorted_candidates = sorted(candidates, key=lambda c: c.signature)
-            final_tests = sorted_candidates[:test_count]
+        # 极限占比 + 平衡/确定性采样
+        if len(candidates) > test_count:
+            final_tests = self._balance_and_sample(
+                candidates, test_count, balance_remainder=enable_balance
+            )
         else:
             final_tests = candidates
 
         # 写入文件
         generated_tests = []
+        test_manifest: list[dict[str, str | int]] = []
         for i, candidate in enumerate(final_tests, 1):
             test_file = os.path.join(tests_dir, f"{i:02d}.in")
             ans_file = os.path.join(tests_dir, f"{i:02d}.ans")
@@ -456,6 +462,28 @@ class ProblemGenerateTestsTool(Tool):
                 f.write(candidate.output_data)
 
             generated_tests.append(i)
+            test_manifest.append(
+                {
+                    "index": i,
+                    "in_file": f"{i:02d}.in",
+                    "ans_file": f"{i:02d}.ans",
+                    "type_param": candidate.type_param,
+                    "signature": candidate.signature,
+                }
+            )
+
+        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 1,
+                    "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
+                    "tests": test_manifest,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
         # 统计信息
         type_counts: dict[str, int] = {}
@@ -467,6 +495,10 @@ class ProblemGenerateTestsTool(Tool):
             type_names.get(k, k): v for k, v in type_counts.items()
         }
 
+        limit_in_final = sum(1 for c in final_tests if c.type_param in _LIMIT_STRATEGY_TYPES)
+        limit_minimum = (len(final_tests) + 1) // 2 if final_tests else 0
+        limit_quota_met = len(final_tests) == 0 or limit_in_final >= limit_minimum
+
         if len(generated_tests) == test_count:
             return ToolResult.ok(
                 tests_dir=tests_dir,
@@ -475,6 +507,9 @@ class ProblemGenerateTestsTool(Tool):
                 dedup_enabled=enable_dedup,
                 validator_filter_enabled=validator_available,
                 balance_enabled=enable_balance,
+                limit_case_count=limit_in_final,
+                limit_case_minimum_required=limit_minimum,
+                limit_case_quota_met=limit_quota_met,
                 candidates_generated=len(candidates),
                 sol_name=effective_sol_name,
                 message=f"Generated {len(generated_tests)} test cases (from {len(candidates)} candidates)",
@@ -485,6 +520,9 @@ class ProblemGenerateTestsTool(Tool):
                 generated_tests=generated_tests,
                 errors=errors,
                 sol_name=effective_sol_name,
+                limit_case_count=limit_in_final,
+                limit_case_minimum_required=limit_minimum,
+                limit_case_quota_met=limit_quota_met,
             )
 
     def _resolve_tests_dir(
@@ -533,7 +571,11 @@ class ProblemGenerateTestsTool(Tool):
         """创建测试目录并清理旧的 .in/.ans 文件。"""
         os.makedirs(tests_dir, exist_ok=True)
         for filename in os.listdir(tests_dir):
-            if not (filename.endswith(".in") or filename.endswith(".ans")):
+            if not (
+                filename.endswith(".in")
+                or filename.endswith(".ans")
+                or filename == _TEST_MANIFEST_FILENAME
+            ):
                 continue
             path = os.path.join(tests_dir, filename)
             if os.path.isfile(path):
@@ -541,41 +583,89 @@ class ProblemGenerateTestsTool(Tool):
         return None
 
     def _balance_and_sample(
-        self, candidates: list[CandidateTest], target_count: int
+        self,
+        candidates: list[CandidateTest],
+        target_count: int,
+        balance_remainder: bool = True,
     ) -> list[CandidateTest]:
-        """平衡分布并采样。
+        """采样：至少一半为极限类（type 3/4），其余再分配。
 
-        确保各策略类型的测试数据数量均衡。
-        使用确定性排序保证结果可重现。
+        先取不少于 ceil(target_count/2) 条来自 extreme/tle 的候选（若候选不足则全取），
+        再在剩余候选中填满 target_count；剩余部分在 balance_remainder 为真时在
+        各类型间均衡，否则按 (type_param, signature) 确定性排序依次选取。
         """
-        # 按类型分组
-        by_type: dict[str, list[CandidateTest]] = {}
-        for c in candidates:
-            if c.type_param not in by_type:
-                by_type[c.type_param] = []
-            by_type[c.type_param].append(c)
-
-        # 计算每种类型应该采样多少
-        num_types = len(by_type)
-        if num_types == 0:
+        if target_count <= 0 or not candidates:
             return []
 
-        base_count = target_count // num_types
-        remainder = target_count % num_types
+        need_limit = (target_count + 1) // 2  # 不少于一半（向上取整到整数条数）
+        extreme_pool = sorted(
+            [c for c in candidates if c.type_param in _LIMIT_STRATEGY_TYPES],
+            key=lambda c: (c.type_param, c.signature),
+        )
 
         result: list[CandidateTest] = []
-        type_order = sorted(by_type.keys())  # 确保确定性
+        selected_ids: set[int] = set()
 
-        for i, type_param in enumerate(type_order):
-            type_candidates = by_type[type_param]
-            # 前 remainder 个类型多分配一个
-            count = base_count + (1 if i < remainder else 0)
-            # 使用确定性排序而非随机采样，保证结果可重现
-            sorted_candidates = sorted(type_candidates, key=lambda c: c.signature)
-            if len(sorted_candidates) <= count:
-                result.extend(sorted_candidates)
-            else:
-                result.extend(sorted_candidates[:count])
+        for c in extreme_pool:
+            if len(result) >= need_limit:
+                break
+            cid = id(c)
+            if cid in selected_ids:
+                continue
+            result.append(c)
+            selected_ids.add(cid)
+
+        remaining = [c for c in candidates if id(c) not in selected_ids]
+        need_more = target_count - len(result)
+        if need_more <= 0:
+            return result[:target_count]
+
+        if balance_remainder:
+            by_type: dict[str, list[CandidateTest]] = {}
+            for c in remaining:
+                by_type.setdefault(c.type_param, []).append(c)
+            for t in by_type:
+                by_type[t] = sorted(by_type[t], key=lambda c: c.signature)
+
+            type_order = sorted(by_type.keys())
+            if not type_order:
+                return result[:target_count]
+
+            num_types = len(type_order)
+            base_count = need_more // num_types
+            rem = need_more % num_types
+
+            for i, type_param in enumerate(type_order):
+                count = base_count + (1 if i < rem else 0)
+                for c in by_type[type_param][:count]:
+                    cid = id(c)
+                    if cid in selected_ids:
+                        continue
+                    result.append(c)
+                    selected_ids.add(cid)
+                    if len(result) >= target_count:
+                        break
+                if len(result) >= target_count:
+                    break
+
+            if len(result) < target_count:
+                for c in sorted(remaining, key=lambda c: (c.type_param, c.signature)):
+                    if len(result) >= target_count:
+                        break
+                    cid = id(c)
+                    if cid in selected_ids:
+                        continue
+                    result.append(c)
+                    selected_ids.add(cid)
+        else:
+            for c in sorted(remaining, key=lambda c: (c.type_param, c.signature)):
+                if len(result) >= target_count:
+                    break
+                cid = id(c)
+                if cid in selected_ids:
+                    continue
+                result.append(c)
+                selected_ids.add(cid)
 
         return result[:target_count]
 

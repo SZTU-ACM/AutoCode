@@ -6,7 +6,7 @@ AutoCode MCP Server - 竞赛编程出题辅助工具
 """
 import os
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # 获取 templates 目录路径（包内目录）
 _PACKAGE_DIR = os.path.dirname(__file__)

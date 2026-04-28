@@ -62,7 +62,8 @@ TEST_GENERATION_PROMPT = """
 ## 3. 后处理
 - 使用 Validator 过滤无效输入
 - 去重（基于 signature）
-- 平衡分布
+- 先保证最终测试中至少一半是 extreme/tle（type=3/4，候选不足时尽量满足）
+- 再平衡分布
 - 采样
 
 ## 质量指标
@@ -141,8 +142,9 @@ int main(int argc, char* argv[]) {
 ### 后处理
 1. Validator 过滤
 2. 去重（MD5 signature）
-3. 平衡分布
-4. 采样
+3. 先保证最终测试中 extreme/tle（type=3/4）不少于一半（候选不足时尽量满足）
+4. 对剩余名额平衡分布
+5. 采样
 """
 
 # Checker 构建提示词

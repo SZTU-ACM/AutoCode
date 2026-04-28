@@ -270,7 +270,7 @@ def session_start() -> int:
         "stress_test_run(completed_rounds == total_rounds) -> "
         "checker_build if needed (accuracy >= 0.9) -> "
         "problem_validate(validation_passed) -> "
-        "problem_generate_tests(generated_test_count > 0) -> "
+        "problem_generate_tests(generated_test_count > 0, and prefer >=50% type3/type4 in final tests when candidates are sufficient) -> "
         "problem_verify_tests(passed) -> problem_pack_polygon. "
         "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )

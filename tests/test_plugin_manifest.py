@@ -11,7 +11,7 @@ def test_claude_plugin_manifest_links_mcp_config():
     manifest = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
 
     assert manifest["name"] == "autocode"
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.8.0"
 
 
 def test_claude_plugin_manifest_has_interface_metadata():

@@ -1,6 +1,6 @@
 {
   "name": "autocode",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Claude Code plugin for competitive programming problem-setting workflows.",
   "author": {
     "name": "SummerOneTwo",

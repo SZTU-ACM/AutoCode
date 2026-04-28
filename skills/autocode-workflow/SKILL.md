@@ -61,7 +61,7 @@ Based on the paper "AutoCode: LLMs as Problem Setters for Competitive Programmin
 │  Phase 8: Test Generation                                                    │
 │  ┌────────────────────┴────────────────────┐                                │
 │  │        problem_generate_tests            │ Generate final test data      │
-│  │     (dedup + validator filter + balance) │                               │
+│  │ (dedup + validator filter + extreme>=50%)│                               │
 │  └────────────────────┬────────────────────┘                                │
 │                       │                                                      │
 │  Phase 9: Packaging                                                          │
@@ -235,6 +235,7 @@ Required: problem_dir
 Recommended: test_count=50, enable_dedup=true, enable_validator_filter=true
 Output: tests/01.in ~ tests/50.in + corresponding .ans files
 Verify: Check generated_tests count matches test_count
+Quality Gate: In final tests, type 3/4 (extreme + tle) should be >= ceil(test_count/2) when candidates are sufficient
 ```
 
 ### Phase 9: Packaging
@@ -283,7 +284,7 @@ Generate 3-5 mutant solutions with common bugs:
 | 5 | `stress_test_run` | Step 4 | `"All N rounds passed"` |
 | 6 | `checker_build` (optional) | Step 5 | `accuracy >= 0.9` |
 | 7 | `problem_validate` | Step 5 or 6 | `success=true`, all samples passed |
-| 8 | `problem_generate_tests` | Step 7 | `generated_tests == test_count` |
+| 8 | `problem_generate_tests` | Step 7 | `generated_tests == test_count` and `type3+type4 >= ceil(test_count/2)` (if candidates sufficient) |
 | 9 | `problem_pack_polygon` | Step 8 | `success=true` |
 
 ### FORBIDDEN Actions
@@ -335,6 +336,7 @@ Before considering the problem complete:
 - [ ] Statement samples validated (problem_validate passed)
 - [ ] Sample files validated (problem_validate passed)
 - [ ] Final test data generated (50+ tests)
+- [ ] Final test data has at least 50% extreme/tle cases when candidate pool allows
 - [ ] Polygon package created
 
 ## Example Complete Workflow

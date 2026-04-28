@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-04-28
+
+### Improvements
+
+- **最终测试数据配比约束**: `problem_generate_tests` 采样策略更新为优先保证最终测试集中 `type=3/4`（extreme + tle）不少于一半（候选不足时尽量满足），并返回 `limit_case_count`、`limit_case_minimum_required`、`limit_case_quota_met` 统计字段。
+- **验证阶段硬约束**: `problem_verify_tests` 新增 `limit_ratio` 校验（默认启用），基于生成 manifest 强制检查最终测试中 `type=3/4` 是否达到至少一半，不满足将直接验证失败；可通过 `enable_limit_ratio=false` 显式关闭。
+- **文档与工作流同步**: 更新 README、workflow skill、agent 提示与 prompts 文案，统一说明“最终测试至少一半极限数据”的质量门槛。
+
 ## [0.7.0] - 2026-04-27
 
 ### Features

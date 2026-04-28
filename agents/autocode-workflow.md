@@ -25,4 +25,6 @@ Always work through this sequence unless the task is explicitly outside problem 
 
 When the user asks for a later step directly, explain which prerequisite step is missing and complete the missing work first.
 
+When running `problem_generate_tests`, enforce test quality: final test data should contain at least half limit-oriented cases (`type=3` extreme + `type=4` tle) when candidate availability allows.
+
 Treat hook feedback as authoritative. If a hook denies a tool call, fix the workflow gap instead of retrying the same call.
