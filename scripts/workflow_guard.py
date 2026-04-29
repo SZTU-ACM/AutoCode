@@ -272,6 +272,8 @@ def session_start() -> int:
         "problem_validate(validation_passed) -> "
         "problem_generate_tests(generated_test_count > 0, and prefer >=50% type3/type4 in final tests when candidates are sufficient) -> "
         "problem_verify_tests(passed) -> problem_pack_polygon. "
+        "When running long problem_generate_tests tasks, avoid sending new chat messages because that can interrupt MCP calls; if interrupted, resume with checkpoint state (resume=true). "
+        "Generator quality gate: ensure type=3 and type=4 branches are semantically different, and type=4 includes targeted worst-case patterns rather than only max parameters. "
         "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )
     print(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 from ..utils.compiler import run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
@@ -58,6 +59,16 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
                     "description": "编译器名称",
                     "default": "g++",
                 },
+                "enable_semantic_check": {
+                    "type": "boolean",
+                    "description": "是否启用 type=3/type=4 语义静态检查",
+                    "default": True,
+                },
+                "strict_semantic_check": {
+                    "type": "boolean",
+                    "description": "语义静态检查不通过时是否直接失败",
+                    "default": False,
+                },
             },
             "required": ["problem_dir"],
             "anyOf": [
@@ -72,6 +83,8 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
         code: str | None = None,
         source_path: str | None = None,
         compiler: str = "g++",
+        enable_semantic_check: bool = True,
+        strict_semantic_check: bool = False,
     ) -> ToolResult:
         """执行 Generator 构建。"""
         resolved, err = resolve_source(problem_dir, code, source_path)
@@ -107,14 +120,64 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
 
         binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
 
+        semantic_check = self._check_type34_semantics(resolved.code) if enable_semantic_check else {"enabled": False}
+        if (
+            enable_semantic_check
+            and strict_semantic_check
+            and not semantic_check.get("passed", True)
+        ):
+            return ToolResult.fail(
+                "Generator semantic check failed: type=3/type=4 lack substantial difference",
+                semantic_check=semantic_check,
+            )
+
         return ToolResult.ok(
             source_path=compile_source,
             canonical_path=canonical_path,
             binary_path=binary_path,
             binary_size=binary_size,
             compile_log=compile_result.stderr,
+            semantic_check=semantic_check,
             message="Generator built successfully",
         )
+
+    def _check_type34_semantics(self, code: str) -> dict:
+        type3_blocks = self._extract_type_branch_snippets(code, 3)
+        type4_blocks = self._extract_type_branch_snippets(code, 4)
+        has_type3 = bool(type3_blocks)
+        has_type4 = bool(type4_blocks)
+        if not has_type3 or not has_type4:
+            return {
+                "enabled": True,
+                "passed": True,
+                "advisory": True,
+                "reason": "semantic check could not reliably detect both type=3/type=4 branches",
+                "hint": "请人工确认 type=3/type=4 分支存在且有实质差异",
+            }
+
+        norm3 = " ".join(type3_blocks).replace(" ", "")
+        norm4 = " ".join(type4_blocks).replace(" ", "")
+        output_lines = [line.strip() for line in code.splitlines() if "cout" in line or "printf" in line]
+        duplicate_outputs = len(set(output_lines)) <= 1 and len(output_lines) > 0
+        similar = norm3 == norm4 or (norm3 and norm4 and abs(len(norm3) - len(norm4)) < 10) or duplicate_outputs
+        return {
+            "enabled": True,
+            "passed": not similar,
+            "reason": "" if not similar else "type=3/type=4 branch snippets are too similar",
+            "hint": "为 type=4 增加针对性卡法，而不仅是 n_max/t_max 取最大值",
+        }
+
+    def _extract_type_branch_snippets(self, code: str, type_value: int) -> list[str]:
+        patterns = [
+            rf"type\s*==\s*{type_value}\b",
+            rf"\b{type_value}\s*==\s*type\b",
+            rf"case\s+{type_value}\s*:",
+        ]
+        snippets: list[str] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, code):
+                snippets.append(code[match.start(): match.start() + 240])
+        return snippets
 
 
 class GeneratorRunTool(Tool):

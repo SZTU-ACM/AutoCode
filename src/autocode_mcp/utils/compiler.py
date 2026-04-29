@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -271,6 +272,7 @@ async def _run_process(
     stdin: str = "",
     timeout: int = 5,
     memory_mb: int = 256,
+    process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """运行进程的公共逻辑。"""
     import time
@@ -295,7 +297,12 @@ async def _run_process(
                     job.assign_process(process.pid)
                 except (OSError, RuntimeError) as e:
                     # Job Object 创建/分配失败，记录日志并继续（进程仍可运行）
-                    _logger.warning("Failed to setup Windows Job Object: %s", e)
+                    _logger.warning(
+                        "Failed to setup Windows Job Object (pid=%s, cmd=%s): %s",
+                        process.pid,
+                        cmd[0] if cmd else "",
+                        e,
+                    )
                     job = None
         elif sys.platform == "darwin":
             # macOS: 使用 preexec_fn 设置资源限制
@@ -319,6 +326,12 @@ async def _run_process(
                 stderr=asyncio.subprocess.PIPE,
             )
 
+        if process and process.pid and process_start_hook:
+            try:
+                process_start_hook(process.pid)
+            except Exception as e:
+                _logger.debug("process_start_hook failed: %s", e)
+
         try:
             # Windows 上 testlib strict 模式期望 CRLF 换行符
             # 将 LF 转换为 CRLF 以满足 validator 的 readEoln() 要求
@@ -331,6 +344,10 @@ async def _run_process(
                 process.communicate(input=processed_stdin.encode("utf-8") if processed_stdin else None),
                 timeout=timeout,
             )
+        except asyncio.CancelledError:
+            # 调用被取消时也必须强制清理子进程，防止残留。
+            await _force_terminate_process(process, job)
+            raise
         except TimeoutError:
             # 超时时强制终止进程
             await _force_terminate_process(process, job)
@@ -343,9 +360,10 @@ async def _run_process(
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
-        # 正常完成后清理 Job Object
+        # 正常完成后关闭 Job Handle；若 Job 配置了 KILL_ON_JOB_CLOSE，
+        # 关闭时仍可能终止 Job 中尚未退出的子进程。
         if job:
-            job.terminate()
+            job.close()
 
         return RunResult(
             success=process.returncode == 0,
@@ -375,6 +393,7 @@ async def run_binary(
     stdin: str = "",
     timeout: int = 5,
     memory_mb: int = 256,
+    process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """
     运行二进制文件，带超时和内存限制。
@@ -394,7 +413,7 @@ async def run_binary(
             error=f"Binary not found: {binary_path}",
         )
 
-    return await _run_process([binary_path], stdin, timeout, memory_mb)
+    return await _run_process([binary_path], stdin, timeout, memory_mb, process_start_hook)
 
 
 async def run_binary_with_args(
@@ -403,6 +422,7 @@ async def run_binary_with_args(
     stdin: str = "",
     timeout: int = 5,
     memory_mb: int = 256,
+    process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """
     运行二进制文件并传递命令行参数。
@@ -423,7 +443,13 @@ async def run_binary_with_args(
             error=f"Binary not found: {binary_path}",
         )
 
-    return await _run_process([binary_path, *args], stdin, timeout, memory_mb)
+    return await _run_process(
+        [binary_path, *args],
+        stdin,
+        timeout,
+        memory_mb,
+        process_start_hook,
+    )
 
 
 async def compile_all(

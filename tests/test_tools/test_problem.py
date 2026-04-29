@@ -2,6 +2,7 @@
 Problem 工具组测试。
 """
 
+import asyncio
 import json
 import os
 import tempfile
@@ -11,6 +12,7 @@ import pytest
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.problem import (
     CandidateTest,
+    ProblemCleanupProcessesTool,
     ProblemCreateTool,
     ProblemGenerateTestsTool,
     ProblemPackPolygonTool,
@@ -376,6 +378,32 @@ def test_problem_generate_tests_clear_only_generated_files():
         assert not os.path.exists(old_ans_path)
 
 
+def test_problem_generate_tests_clear_only_generated_files_with_custom_answer_ext():
+    """测试清理输出目录时可按自定义答案后缀删除文件。"""
+    tool = ProblemGenerateTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir)
+        keep_path = os.path.join(tests_dir, "notes.txt")
+        old_in_path = os.path.join(tests_dir, "01.in")
+        old_out_path = os.path.join(tests_dir, "01.out")
+
+        with open(keep_path, "w", encoding="utf-8") as f:
+            f.write("keep me")
+        with open(old_in_path, "w", encoding="utf-8") as f:
+            f.write("old input")
+        with open(old_out_path, "w", encoding="utf-8") as f:
+            f.write("old answer")
+
+        result = tool._clear_generated_tests(tests_dir, ".out")
+
+        assert result is None
+        assert os.path.exists(keep_path)
+        assert not os.path.exists(old_in_path)
+        assert not os.path.exists(old_out_path)
+
+
 @pytest.mark.asyncio
 async def test_problem_generate_tests_uses_custom_sol_name(monkeypatch):
     """测试生成答案时使用自定义 sol_name。"""
@@ -417,6 +445,91 @@ async def test_problem_generate_tests_uses_custom_sol_name(monkeypatch):
         assert os.path.exists(os.path.join(problem_dir, "tests", "01.ans"))
 
 
+@pytest.mark.asyncio
+async def test_problem_generate_tests_supports_custom_answer_ext(monkeypatch):
+    """测试生成答案时支持自定义 answer_ext。"""
+    tool = ProblemGenerateTestsTool()
+
+    async def fake_run_binary_with_args(*args, **kwargs):
+        return RunResult(success=True, stdout="7\n")
+
+    async def fake_run_binary(binary_path, stdin="", timeout=5, memory_mb=256):
+        return RunResult(success=True, stdout="7\n")
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary_with_args", fake_run_binary_with_args)
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary", fake_run_binary)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "custom_ext")
+        files_dir = os.path.join(problem_dir, "files")
+        solutions_dir = os.path.join(problem_dir, "solutions")
+        os.makedirs(files_dir)
+        os.makedirs(solutions_dir)
+
+        exe_ext = get_exe_extension()
+        open(os.path.join(files_dir, f"gen{exe_ext}"), "w").close()
+        open(os.path.join(solutions_dir, f"sol{exe_ext}"), "w").close()
+
+        result = await tool.execute(
+            problem_dir=problem_dir,
+            test_count=1,
+            answer_ext=".out",
+            enable_dedup=False,
+            oversample_ratio=1.0,
+        )
+
+        assert result.success
+        assert result.data["answer_ext"] == ".out"
+        assert os.path.exists(os.path.join(problem_dir, "tests", "01.in"))
+        assert os.path.exists(os.path.join(problem_dir, "tests", "01.out"))
+
+
+@pytest.mark.asyncio
+async def test_problem_generate_tests_resume_without_state_falls_back_to_fresh(monkeypatch):
+    """resume=true 且无状态文件时应回退 fresh run 并清理旧测试。"""
+    tool = ProblemGenerateTestsTool()
+
+    async def fake_run_binary_with_args(*args, **kwargs):
+        return RunResult(success=True, stdout="9\n")
+
+    async def fake_run_binary(binary_path, stdin="", timeout=5, memory_mb=256):
+        return RunResult(success=True, stdout="9\n")
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary_with_args", fake_run_binary_with_args)
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary", fake_run_binary)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "resume_fallback")
+        files_dir = os.path.join(problem_dir, "files")
+        solutions_dir = os.path.join(problem_dir, "solutions")
+        tests_dir = os.path.join(problem_dir, "tests")
+        os.makedirs(files_dir)
+        os.makedirs(solutions_dir)
+        os.makedirs(tests_dir)
+
+        exe_ext = get_exe_extension()
+        open(os.path.join(files_dir, f"gen{exe_ext}"), "w").close()
+        open(os.path.join(solutions_dir, f"sol{exe_ext}"), "w").close()
+
+        with open(os.path.join(tests_dir, "02.in"), "w", encoding="utf-8") as f:
+            f.write("stale\n")
+        with open(os.path.join(tests_dir, "02.ans"), "w", encoding="utf-8") as f:
+            f.write("stale\n")
+
+        result = await tool.execute(
+            problem_dir=problem_dir,
+            test_count=1,
+            resume=True,
+            enable_dedup=False,
+            oversample_ratio=1.0,
+        )
+
+        assert result.success
+        assert result.data["progress_snapshot"].get("resume_fallback") is True
+        assert not os.path.exists(os.path.join(tests_dir, "02.in"))
+        assert not os.path.exists(os.path.join(tests_dir, "02.ans"))
+
+
 def test_problem_verify_tests_file_count_requires_contiguous_numeric_names():
     """测试 file_count 会检查数字文件名连续性。"""
     tool = ProblemVerifyTestsTool()
@@ -426,7 +539,7 @@ def test_problem_verify_tests_file_count_requires_contiguous_numeric_names():
             with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
                 f.write("x\n")
 
-        result = tool._check_file_count(tmpdir)
+        result = tool._check_file_count(tmpdir, ".ans")
 
         assert not result["passed"]
         assert result["missing_indices"] == [2]
@@ -441,7 +554,7 @@ def test_problem_verify_tests_file_count_reports_large_gaps():
             with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
                 f.write("x\n")
 
-        result = tool._check_file_count(tmpdir)
+        result = tool._check_file_count(tmpdir, ".ans")
 
         assert not result["passed"]
         assert result["missing_indices"][0] == 2
@@ -520,6 +633,212 @@ def test_problem_verify_tests_limit_ratio_fails_when_insufficient():
         assert result["limit_case_minimum_required"] == 3
 
 
+def test_problem_verify_tests_limit_semantics_fails_for_overlapping_signatures():
+    """测试 type3/type4 签名高度重叠时触发语义门禁。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "01.in"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        manifest = {
+            "version": 1,
+            "tests": [
+                {"in_file": "01.in", "ans_file": "01.ans", "type_param": "3", "signature": "same"},
+                {"in_file": "02.in", "ans_file": "02.ans", "type_param": "4", "signature": "same"},
+            ],
+        }
+        with open(os.path.join(tmpdir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        result = tool._check_limit_semantics(tmpdir)
+        assert result["passed"] is False
+
+
+def test_problem_verify_tests_file_count_supports_multi_part_answer_ext():
+    """多段后缀（如 .a.out）不应误报 orphan。"""
+    tool = ProblemVerifyTestsTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.a.out"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("x\n")
+        result = tool._check_file_count(tmpdir, ".a.out")
+        assert result["passed"] is True
+        assert result["orphan_ans"] == []
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_supports_custom_answer_ext():
+    """测试 verify 可读取自定义答案后缀。"""
+    tool = ProblemVerifyTestsTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(tmpdir, "01.out"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        manifest = {
+            "version": 1,
+            "answer_ext": ".out",
+            "tests": [{"in_file": "01.in", "ans_file": "01.out", "type_param": "3", "signature": "a"}],
+        }
+        with open(os.path.join(tmpdir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty"],
+            enable_limit_ratio=False,
+        )
+        assert result.success
+
+
+@pytest.mark.asyncio
+async def test_problem_cleanup_processes_does_not_global_kill_without_tracked_pids():
+    """cleanup 不应在无 tracked PID 时按进程名全局误杀。"""
+    tool = ProblemCleanupProcessesTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
+        assert result.success
+        if os.name == "nt":
+            assert "warning" in result.data
+        else:
+            assert result.data.get("message") == "Cleanup finished"
+
+
+@pytest.mark.asyncio
+async def test_problem_cleanup_processes_kills_tracked_pids(monkeypatch):
+    """cleanup 应按状态文件里的 PID 精准清理。"""
+    tool = ProblemCleanupProcessesTool()
+    called_cmds: list[list[str]] = []
+
+    class _FakeProc:
+        def __init__(self):
+            self.returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        called_cmds.append([str(a) for a in args])
+        return _FakeProc()
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        with open(os.path.join(tests_dir, ".autocode_generate_state.json"), "w", encoding="utf-8") as f:
+            json.dump({"active_pids": [12345, 23456]}, f)
+        result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
+        assert result.success
+        if os.name == "nt":
+            assert result.data.get("killed_pids") == [12345, 23456]
+            assert len(called_cmds) == 2
+        else:
+            assert result.data.get("removed_files") == []
+
+
+@pytest.mark.asyncio
+async def test_problem_cleanup_processes_keeps_failed_pid_for_retry(monkeypatch):
+    """cleanup 失败 PID 应保留在状态文件中，支持后续重试。"""
+    tool = ProblemCleanupProcessesTool()
+    calls = {"count": 0}
+
+    class _FakeProc:
+        def __init__(self, rc):
+            self.returncode = rc
+
+        async def communicate(self):
+            return b"", b"failed" if self.returncode != 0 else b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls["count"] += 1
+        # 第一个 PID 成功，第二个失败
+        return _FakeProc(0 if calls["count"] == 1 else 1)
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"active_pids": [111, 222]}, f)
+
+        result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
+        assert result.success
+        if os.name == "nt":
+            assert result.data.get("killed_pids") == [111]
+            assert os.path.exists(state_path)
+            with open(state_path, encoding="utf-8") as f:
+                state = json.load(f)
+            assert state.get("active_pids") == [222]
+        else:
+            assert result.data.get("removed_files") == []
+
+
+@pytest.mark.asyncio
+async def test_problem_cleanup_processes_preserves_checkpoint_fields(monkeypatch):
+    """cleanup 更新 active_pids 时不应覆盖 checkpoint 其他字段。"""
+    tool = ProblemCleanupProcessesTool()
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "phase": "partial",
+                    "next_seed": 9,
+                    "answer_ext": ".out",
+                    "candidates": [{"signature": "x"}],
+                    "errors": [{"seed": 1, "error": "e"}],
+                    "active_pids": [555],
+                },
+                f,
+            )
+
+        result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
+        assert result.success
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        if os.name == "nt":
+            assert state.get("active_pids") == []
+        else:
+            assert state.get("active_pids") == [555]
+        assert state.get("phase") == "partial"
+        assert state.get("next_seed") == 9
+        assert state.get("answer_ext") == ".out"
+
+
+@pytest.mark.asyncio
+async def test_problem_generate_tests_run_with_retry_keeps_pid_on_cancel(monkeypatch):
+    """取消时 _run_with_retry 应保留 active_pids 供后续 cleanup 使用。"""
+    tool = ProblemGenerateTestsTool()
+
+    async def fake_run_binary_with_args(binary_path, args, timeout=5, process_start_hook=None, **kwargs):
+        if process_start_hook:
+            process_start_hook(43210)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary_with_args", fake_run_binary_with_args)
+
+    active_pids: set[int] = set()
+    with pytest.raises(asyncio.CancelledError):
+        await tool._run_with_retry("dummy", ["1"], timeout=1, active_pids=active_pids)
+    assert 43210 in active_pids
+
+
 @pytest.mark.asyncio
 async def test_problem_verify_tests_default_enables_limit_ratio():
     """默认会启用 limit_ratio（即使 verify_types 未显式包含）。"""
@@ -587,6 +906,30 @@ async def test_problem_pack_polygon_dynamic_test_count():
             content = f.read()
             assert "<test-count>5</test-count>" in content
             assert "<test-count>20</test-count>" not in content
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_sanitizes_answer_ext_from_manifest():
+    """manifest 中非法 answer_ext 不应污染 problem.xml。"""
+    create_tool = ProblemCreateTool()
+    pack_tool = ProblemPackPolygonTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_ext_sanitize")
+        await create_tool.execute(problem_dir=problem_dir, problem_name="Pack & Test")
+        tests_dir = os.path.join(problem_dir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        with open(os.path.join(tests_dir, "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(tests_dir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"answer_ext": ".bad<ext>"}, f)
+
+        result = await pack_tool.execute(problem_dir=problem_dir)
+        assert result.success
+        xml_path = os.path.join(problem_dir, "problem.xml")
+        with open(xml_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "<answer-path-pattern>tests/%02d.ans</answer-path-pattern>" in content
 
 
 @pytest.mark.asyncio

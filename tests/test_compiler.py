@@ -4,11 +4,13 @@ Compiler 工具函数测试。
 测试 C++ 编译和执行的核心功能。
 """
 
+import asyncio
 import os
 import tempfile
 
 import pytest
 
+import autocode_mcp.utils.compiler as compiler_module
 from autocode_mcp.utils.compiler import (
     CompileResult,
     cleanup_work_dir,
@@ -363,3 +365,39 @@ async def test_run_binary_with_memory_limit():
             pass
         else:
             pass
+
+
+@pytest.mark.asyncio
+async def test_run_binary_with_args_cancelled_force_terminates(monkeypatch):
+    """CancelledError 路径应强制终止子进程。"""
+    killed = {"value": False}
+
+    class FakeProcess:
+        def __init__(self):
+            self.pid = 1234
+            self.returncode = None
+
+        async def communicate(self, input=None):
+            raise asyncio.CancelledError()
+
+        def kill(self):
+            killed["value"] = True
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        binary_path = os.path.join(tmpdir, "dummy.exe")
+        with open(binary_path, "w", encoding="utf-8") as f:
+            f.write("x")
+
+        monkeypatch.setattr(compiler_module.sys, "platform", "linux")
+        monkeypatch.setattr(compiler_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_binary_with_args(binary_path, ["1"], timeout=1)
+        assert killed["value"] is True

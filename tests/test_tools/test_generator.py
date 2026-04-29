@@ -40,6 +40,22 @@ int main(int argc, char* argv[]) {
 }
 """
 
+WEAK_GENERATOR_CODE = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int type = atoi(argv[2]);
+    int n_max = atoi(argv[4]);
+    if (type == 3) {
+        std::cout << n_max << "\\n";
+    } else if (type == 4) {
+        std::cout << n_max << "\\n";
+    }
+    return 0;
+}
+"""
+
 
 @pytest.mark.asyncio
 async def test_generator_build():
@@ -55,6 +71,7 @@ async def test_generator_build():
         assert result.success
         assert os.path.exists(result.data["source_path"])
         assert os.path.exists(result.data["binary_path"])
+        assert "semantic_check" in result.data
 
 
 @pytest.mark.asyncio
@@ -162,3 +179,17 @@ async def test_generator_run_with_custom_params():
             lines = inp["input"].strip().split("\n")
             n = int(lines[0])
             assert 5 <= n <= 10
+
+
+@pytest.mark.asyncio
+async def test_generator_build_strict_semantic_check():
+    """严格语义检查下，type3/type4 同构应构建失败。"""
+    tool = GeneratorBuildTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            code=WEAK_GENERATOR_CODE,
+            strict_semantic_check=True,
+        )
+        assert not result.success
+        assert "semantic" in result.error.lower()

@@ -65,6 +65,7 @@ TEST_GENERATION_PROMPT = """
 - 先保证最终测试中至少一半是 extreme/tle（type=3/4，候选不足时尽量满足）
 - 再平衡分布
 - 采样
+- 长任务期间避免发送新消息（可能中断 MCP 调用）；若中断，优先使用 resume/checkpoint 续跑
 
 ## 质量指标
 - Consistency > 90%
@@ -124,6 +125,7 @@ gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max>
 - type=2 (random): 随机数据
 - type=3 (extreme): 极端数据（溢出、精度、hash碰撞）
 - type=4 (tle): TLE 诱导数据
+- 要求 type=3 与 type=4 分支有实质差异，type=4 应包含针对性卡法，不应仅靠 n_max/t_max 拉满
 
 ### 代码模板
 ```cpp

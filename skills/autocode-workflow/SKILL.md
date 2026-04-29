@@ -233,9 +233,10 @@ CRITICAL: Must pass validation before generating final tests
 Tool: problem_generate_tests
 Required: problem_dir
 Recommended: test_count=50, enable_dedup=true, enable_validator_filter=true
-Output: tests/01.in ~ tests/50.in + corresponding .ans files
+Output: tests/01.in ~ tests/50.in + corresponding answer files (`.ans` by default, or configured `answer_ext` such as `.out`)
 Verify: Check generated_tests count matches test_count
 Quality Gate: In final tests, type 3/4 (extreme + tle) should be >= ceil(test_count/2) when candidates are sufficient
+Long-running note: sending new user messages may interrupt MCP execution; prefer waiting, or resume with `resume=true` if interrupted.
 ```
 
 ### Phase 9: Packaging
@@ -337,6 +338,7 @@ Before considering the problem complete:
 - [ ] Sample files validated (problem_validate passed)
 - [ ] Final test data generated (50+ tests)
 - [ ] Final test data has at least 50% extreme/tle cases when candidate pool allows
+- [ ] type=3/type=4 generation logic is semantically different (not just max-parameter duplication)
 - [ ] Polygon package created
 
 ## Example Complete Workflow

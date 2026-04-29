@@ -126,7 +126,7 @@ async def test_mcp_list_tools(mcp_client: MCPClient):
 
     tools = await mcp_client.list_tools()
 
-    assert len(tools) == 17
+    assert len(tools) == 18
 
     tool_names = {t["name"] for t in tools}
     expected_tools = {
@@ -140,6 +140,7 @@ async def test_mcp_list_tools(mcp_client: MCPClient):
         "stress_test_run",
         "problem_create",
         "problem_generate_tests",
+        "problem_cleanup_processes",
         "problem_validate",
     }
     assert expected_tools.issubset(tool_names)
@@ -273,7 +274,7 @@ async def test_packaged_console_script_list_tools(packaged_mcp_client: MCPClient
 
     tools = await packaged_mcp_client.list_tools()
 
-    assert len(tools) == 17
+    assert len(tools) == 18
     tool_names = {t["name"] for t in tools}
     assert "solution_build" in tool_names
     assert "validator_build" in tool_names

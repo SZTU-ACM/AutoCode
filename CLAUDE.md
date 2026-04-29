@@ -88,9 +88,9 @@ AutoCode/
 ├── statements/         # 题面
 │   └── README.md
 └── tests/              # 生成的测试数据
-    ├── 01.in
-    ├── 01.ans
-    └── ...
+ ├── 01.in
+ ├── 01.ans / 01.out（由 answer_ext 控制）
+ └── ...
 ```
 
 ## 出题工作流程
@@ -102,7 +102,7 @@ AutoCode/
 5. 构建生成器 (`generator_build`)
 6. 运行压力测试 (`stress_test_run`, completed_rounds == total_rounds)
 7. 按需构建检查器 (`checker_build`, accuracy >= 0.9)
-8. 生成测试数据（`problem_generate_tests`, generated_test_count > 0，且最终 extreme/tle 至少占一半；候选不足时尽量满足）
+8. 生成测试数据（`problem_generate_tests`, generated_test_count > 0，支持 `answer_ext`；最终 extreme/tle 至少占一半；候选不足时尽量满足；长任务中断可 `resume=true` 续跑）
 9. 验证测试数据 (`problem_verify_tests`, passed)
 10. 打包 Polygon (`problem_pack_polygon`)
 

@@ -140,6 +140,16 @@ class WinJobObject:
             win32api.CloseHandle(self.job_handle)
             self.job_handle = None
 
+    def close(self) -> None:
+        """关闭 Job Object 句柄。
+
+        注意：当前 Job 使用了 KILL_ON_JOB_CLOSE，关闭最后一个句柄时
+        仍可能终止 Job 中尚未退出的进程。
+        """
+        if self.job_handle is not None and self.job_handle != 0:
+            win32api.CloseHandle(self.job_handle)
+            self.job_handle = None
+
     def __enter__(self) -> WinJobObject:
         """上下文管理器入口。"""
         return self

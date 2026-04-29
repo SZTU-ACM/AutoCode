@@ -68,6 +68,7 @@ class ProblemVerifyTestsTool(Tool):
                             "validator",
                             "no_empty",
                             "limit_ratio",
+                            "limit_semantics",
                         ],
                     },
                     "description": "要执行的验证类型，默认全部执行",
@@ -80,6 +81,10 @@ class ProblemVerifyTestsTool(Tool):
                     "type": "boolean",
                     "description": "是否启用 extreme/tle 占比检查（默认开启；设为 false 可关闭）",
                     "default": True,
+                },
+                "answer_ext": {
+                    "type": "string",
+                    "description": "答案文件后缀，默认自动从 manifest 推断（否则使用 .ans）",
                 },
                 "timeout": {
                     "type": "integer",
@@ -97,6 +102,7 @@ class ProblemVerifyTestsTool(Tool):
         verify_types: list[str] | None = None,
         sol_name: str | None = None,
         enable_limit_ratio: bool = True,
+        answer_ext: str | None = None,
         timeout: int = 60,
     ) -> ToolResult:
         """执行测试数据验证。"""
@@ -112,6 +118,8 @@ class ProblemVerifyTestsTool(Tool):
         if not os.path.exists(tests_dir):
             return ToolResult.fail(f"Tests directory not found: {tests_dir}")
 
+        resolved_answer_ext = self._resolve_answer_ext(tests_dir, answer_ext)
+
         # 默认执行所有验证
         if not verify_types:
             verify_types = ["file_count", "answer_consistency", "validator", "no_empty"]
@@ -119,15 +127,17 @@ class ProblemVerifyTestsTool(Tool):
         if enable_limit_ratio:
             if "limit_ratio" not in verify_types:
                 verify_types.append("limit_ratio")
+            if "limit_semantics" not in verify_types:
+                verify_types.append("limit_semantics")
         else:
-            verify_types = [v for v in verify_types if v != "limit_ratio"]
+            verify_types = [v for v in verify_types if v not in {"limit_ratio", "limit_semantics"}]
 
         results = {}
         all_passed = True
 
         # 1. 文件完整性检查
         if "file_count" in verify_types:
-            result = self._check_file_count(tests_dir)
+            result = self._check_file_count(tests_dir, resolved_answer_ext)
             results["file_count"] = result
             if not result["passed"]:
                 all_passed = False
@@ -145,6 +155,7 @@ class ProblemVerifyTestsTool(Tool):
                 problem_dir,
                 tests_dir,
                 effective_sol_name,
+                resolved_answer_ext,
                 timeout,
             )
             results["answer_consistency"] = result
@@ -162,6 +173,11 @@ class ProblemVerifyTestsTool(Tool):
         if "limit_ratio" in verify_types:
             result = self._check_limit_ratio(tests_dir)
             results["limit_ratio"] = result
+            if not result["passed"]:
+                all_passed = False
+        if "limit_semantics" in verify_types:
+            result = self._check_limit_semantics(tests_dir)
+            results["limit_semantics"] = result
             if not result["passed"]:
                 all_passed = False
 
@@ -192,23 +208,26 @@ class ProblemVerifyTestsTool(Tool):
                 limit_ratio_enabled=enable_limit_ratio,
             )
 
-    def _check_file_count(self, tests_dir: str) -> dict:
-        """检查文件完整性：每个 .in 有对应的 .ans。"""
+    def _check_file_count(self, tests_dir: str, answer_ext: str) -> dict:
+        """检查文件完整性：每个 .in 有对应的 answer_ext。"""
         tests_path = Path(tests_dir)
         in_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
-        ans_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.suffix == ".ans")
+        ans_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.name.endswith(answer_ext))
         ans_file_set = set(ans_files)
         in_file_set = set(in_files)
 
         missing_ans = []
         for in_file in in_files:
-            ans_file = Path(in_file).with_suffix(".ans").name
+            ans_file = Path(in_file).with_suffix(answer_ext).name
             if ans_file not in ans_file_set:
                 missing_ans.append(in_file)
 
         orphan_ans = []
         for ans_file in ans_files:
-            in_file = Path(ans_file).with_suffix(".in").name
+            if not ans_file.endswith(answer_ext):
+                continue
+            base = ans_file[: -len(answer_ext)]
+            in_file = f"{base}.in"
             if in_file not in in_file_set:
                 orphan_ans.append(ans_file)
 
@@ -255,7 +274,7 @@ class ProblemVerifyTestsTool(Tool):
         }
 
     async def _check_answer_consistency(
-        self, problem_dir: str, tests_dir: str, sol_name: str, timeout: int
+        self, problem_dir: str, tests_dir: str, sol_name: str, answer_ext: str, timeout: int
     ) -> dict:
         """用 sol 重新运行 .in，对比输出与 .ans。"""
         exe_ext = get_exe_extension()
@@ -281,7 +300,7 @@ class ProblemVerifyTestsTool(Tool):
 
         for in_file in in_files:
             in_path = os.path.join(tests_dir, in_file)
-            ans_file = Path(in_file).with_suffix(".ans").name
+            ans_file = Path(in_file).with_suffix(answer_ext).name
             ans_path = os.path.join(tests_dir, ans_file)
 
             if not os.path.exists(ans_path):
@@ -444,3 +463,63 @@ class ProblemVerifyTestsTool(Tool):
             "limit_case_ratio": ratio,
             "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
         }
+
+    def _check_limit_semantics(self, tests_dir: str) -> dict:
+        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+        if not os.path.exists(manifest_path):
+            return {"passed": False, "error": f"manifest not found: {manifest_path}"}
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            return {"passed": False, "error": f"failed to read manifest: {exc}"}
+        tests = manifest.get("tests", [])
+        type3 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "3"]
+        type4 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "4"]
+        if not type4:
+            return {"passed": False, "error": "type=4 cases missing; update generator first"}
+        if not type3:
+            return {"passed": False, "error": "type=3 cases missing; update generator first"}
+        sig3 = {str(t.get("signature", "")) for t in type3}
+        sig4 = {str(t.get("signature", "")) for t in type4}
+        overlap_ratio = len(sig3 & sig4) / max(1, min(len(sig3), len(sig4)))
+        passed = overlap_ratio < 0.8
+        return {
+            "passed": passed,
+            "type3_count": len(type3),
+            "type4_count": len(type4),
+            "overlap_ratio": overlap_ratio,
+            "hint": "需要确保 type=4 不是仅放大参数，而是有独立卡法" if not passed else "",
+        }
+
+    def _resolve_answer_ext(self, tests_dir: str, answer_ext: str | None) -> str:
+        normalized = self._normalize_answer_ext(answer_ext)
+        if normalized:
+            return normalized
+        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    manifest = json.load(f)
+                ext = self._normalize_answer_ext(manifest.get("answer_ext"))
+                if ext:
+                    return ext
+            except (json.JSONDecodeError, OSError):
+                pass
+        return ".ans"
+
+    def _normalize_answer_ext(self, answer_ext: str | None) -> str | None:
+        if not isinstance(answer_ext, str):
+            return None
+        ext = answer_ext.strip()
+        if not ext:
+            return None
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        if not any(ch != "." for ch in ext[1:]):
+            return None
+        if any(ch in ext for ch in ('/', '\\', ':', '*', '?', '"', "<", ">", "|")):
+            return None
+        if ext == ".in":
+            return None
+        return ext

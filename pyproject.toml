@@ -80,6 +80,7 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
+    "twine>=6.2.0",
     "types-psutil>=7.2.2.20260402",
     "types-pywin32>=311.0.0.20260402",
     "types-pyyaml>=6.0.12.20250915",

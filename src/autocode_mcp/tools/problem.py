@@ -4,13 +4,17 @@ Problem 工具组 - 题目管理。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import shutil
+import signal
+import time
 from dataclasses import dataclass
+from xml.sax.saxutils import escape
 
-from ..utils.compiler import run_binary, run_binary_with_args
+from ..utils.compiler import RunResult, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 
@@ -28,6 +32,23 @@ class CandidateTest:
 # 最终测试集中「极限类」占比下限：至少一半来自 generator type 3/4（extreme + TLE 压力）
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
 _TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
+_GENERATE_STATE_FILENAME = ".autocode_generate_state.json"
+_POSIX_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+def _normalize_answer_ext_value(answer_ext: str | None) -> str | None:
+    ext = (answer_ext or "").strip()
+    if not ext:
+        return None
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    if not any(ch != "." for ch in ext[1:]):
+        return None
+    if any(ch in ext for ch in ('/', '\\', ':', '*', '?', '"', "<", ">", "|", "&")):
+        return None
+    if ext == ".in":
+        return None
+    return ext
 
 
 class ProblemCreateTool(Tool):
@@ -238,6 +259,25 @@ class ProblemGenerateTestsTool(Tool):
                     "description": "超额采样比例（生成候选数据 = test_count * ratio）",
                     "default": 1.5,
                 },
+                "answer_ext": {
+                    "type": "string",
+                    "description": "答案文件后缀，默认 .ans，可配置为 .out",
+                    "default": ".ans",
+                },
+                "resume": {
+                    "type": "boolean",
+                    "description": "是否尝试从状态文件恢复中断任务",
+                    "default": False,
+                },
+                "hard_timeout_seconds": {
+                    "type": "integer",
+                    "description": "工具级硬超时（秒），超时后保存状态并返回失败",
+                },
+                "checkpoint_every": {
+                    "type": "integer",
+                    "description": "每生成多少候选写一次 checkpoint，默认 10",
+                    "default": 10,
+                },
             },
             "required": ["problem_dir"],
         }
@@ -255,6 +295,10 @@ class ProblemGenerateTestsTool(Tool):
         enable_validator_filter: bool = True,
         enable_balance: bool = True,
         oversample_ratio: float = 1.5,
+        answer_ext: str = ".ans",
+        resume: bool = False,
+        hard_timeout_seconds: int | None = None,
+        checkpoint_every: int = 10,
     ) -> ToolResult:
         """执行测试数据生成。
 
@@ -319,6 +363,11 @@ class ProblemGenerateTestsTool(Tool):
 
         exe_ext = get_exe_extension()
         effective_sol_name = sol_name or "sol"
+        normalized_answer_ext, answer_ext_error = self._normalize_answer_ext(answer_ext)
+        if answer_ext_error:
+            return answer_ext_error
+        assert normalized_answer_ext is not None
+        checkpoint_every = max(1, checkpoint_every)
 
         # 检查必要文件
         gen_exe = os.path.join(problem_dir, "files", f"gen{exe_ext}")
@@ -346,10 +395,8 @@ class ProblemGenerateTestsTool(Tool):
         # Validator 是否可用
         validator_available = enable_validator_filter and os.path.exists(val_exe)
 
-        # 创建/清空 tests 目录。只移除旧的测试数据，避免误删用户源码或其他文件。
-        clear_error = self._clear_generated_tests(tests_dir)
-        if clear_error:
-            return clear_error
+        state_path = os.path.join(tests_dir, _GENERATE_STATE_FILENAME)
+        start_ts = time.time()
 
         # 获取测试配置
         if test_configs:
@@ -376,8 +423,63 @@ class ProblemGenerateTestsTool(Tool):
         signatures: set[str] = set()  # 用于去重
         errors: list[tuple[int, str]] = []
         seed = 1
+        progress_snapshot = {
+            "phase": "initializing",
+            "candidates_generated": 0,
+            "target_candidates": candidate_count,
+            "generated_tests": 0,
+            "test_count": test_count,
+            "state_path": state_path,
+        }
+        active_pids: set[int] = set()
+
+        if resume:
+            restored = self._load_state(state_path)
+            if restored:
+                seed = int(restored.get("next_seed", 1))
+                candidates = self._restore_candidates(restored.get("candidates", []))
+                signatures = {c.signature for c in candidates}
+                errors = [(int(e.get("seed", 0)), str(e.get("error", ""))) for e in restored.get("errors", []) if isinstance(e, dict)]
+                raw_active_pids = restored.get("active_pids", [])
+                if isinstance(raw_active_pids, list):
+                    active_pids = {int(pid) for pid in raw_active_pids if isinstance(pid, int)}
+                progress_snapshot["phase"] = str(restored.get("phase", "resumed"))
+                progress_snapshot["candidates_generated"] = len(candidates)
+            else:
+                # resume=true 但状态文件不存在/损坏时，回退到 fresh run，
+                # 避免与旧测试文件混合导致 manifest 覆盖不完整。
+                clear_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
+                if clear_error:
+                    return clear_error
+                progress_snapshot["phase"] = "resume_fallback_fresh"
+                progress_snapshot["resume_fallback"] = True
+        else:
+            # 创建/清空 tests 目录。只移除旧的测试数据，避免误删用户源码或其他文件。
+            clear_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
+            if clear_error:
+                return clear_error
 
         while len(candidates) < candidate_count and seed < candidate_count * 10:
+            elapsed = time.time() - start_ts
+            if hard_timeout_seconds and elapsed >= hard_timeout_seconds:
+                self._save_state(
+                    state_path,
+                    phase="timed_out",
+                    next_seed=seed,
+                    candidates=candidates,
+                    errors=errors,
+                    answer_ext=normalized_answer_ext,
+                    active_pids=active_pids,
+                    message="Hard timeout reached",
+                )
+                return ToolResult.fail(
+                    f"Generation timed out after {hard_timeout_seconds}s",
+                    generated_tests=[],
+                    errors=errors,
+                    sol_name=effective_sol_name,
+                    progress_snapshot=progress_snapshot,
+                    resume_hint="Set resume=true to continue from checkpoint",
+                )
             # 循环使用配置
             cfg_idx = (seed - 1) % len(test_configs_list)
             test_cfg = test_configs_list[cfg_idx]
@@ -394,7 +496,12 @@ class ProblemGenerateTestsTool(Tool):
 
             try:
                 # 生成输入
-                gen_result = await run_binary_with_args(gen_exe, cmd_args, timeout=timeout)
+                gen_result = await self._run_with_retry(
+                    gen_exe,
+                    cmd_args,
+                    timeout=timeout,
+                    active_pids=active_pids,
+                )
                 if gen_result.timed_out or not gen_result.stdout.strip():
                     errors.append((seed, f"Generator failed: {gen_result.stderr}"))
                     seed += 1
@@ -436,12 +543,37 @@ class ProblemGenerateTestsTool(Tool):
                     )
                 )
 
+            except asyncio.CancelledError:
+                self._save_state(
+                    state_path,
+                    phase="cancelled",
+                    next_seed=seed,
+                    candidates=candidates,
+                    errors=errors,
+                    answer_ext=normalized_answer_ext,
+                    active_pids=active_pids,
+                    message="Cancelled by upstream request",
+                )
+                raise
             except Exception as e:
                 errors.append((seed, str(e)))
 
+            progress_snapshot["phase"] = "candidate_generation"
+            progress_snapshot["candidates_generated"] = len(candidates)
+            if len(candidates) % checkpoint_every == 0:
+                self._save_state(
+                    state_path,
+                    phase="candidate_generation",
+                    next_seed=seed + 1,
+                    candidates=candidates,
+                    errors=errors,
+                    answer_ext=normalized_answer_ext,
+                    active_pids=active_pids,
+                )
             seed += 1
 
         # 极限占比 + 平衡/确定性采样
+        progress_snapshot["phase"] = "sampling"
         if len(candidates) > test_count:
             final_tests = self._balance_and_sample(
                 candidates, test_count, balance_remainder=enable_balance
@@ -449,12 +581,17 @@ class ProblemGenerateTestsTool(Tool):
         else:
             final_tests = candidates
 
+        # 最终写盘前清理历史生成产物，防止 resume 场景残留旧编号样例。
+        clear_before_write_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
+        if clear_before_write_error:
+            return clear_before_write_error
+
         # 写入文件
         generated_tests = []
         test_manifest: list[dict[str, str | int]] = []
         for i, candidate in enumerate(final_tests, 1):
             test_file = os.path.join(tests_dir, f"{i:02d}.in")
-            ans_file = os.path.join(tests_dir, f"{i:02d}.ans")
+            ans_file = os.path.join(tests_dir, f"{i:02d}{normalized_answer_ext}")
 
             with open(test_file, "w", encoding="utf-8") as f:
                 f.write(candidate.input_data)
@@ -466,7 +603,7 @@ class ProblemGenerateTestsTool(Tool):
                 {
                     "index": i,
                     "in_file": f"{i:02d}.in",
-                    "ans_file": f"{i:02d}.ans",
+                    "ans_file": f"{i:02d}{normalized_answer_ext}",
                     "type_param": candidate.type_param,
                     "signature": candidate.signature,
                 }
@@ -477,6 +614,7 @@ class ProblemGenerateTestsTool(Tool):
             json.dump(
                 {
                     "version": 1,
+                    "answer_ext": normalized_answer_ext,
                     "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
                     "tests": test_manifest,
                 },
@@ -485,6 +623,8 @@ class ProblemGenerateTestsTool(Tool):
                 indent=2,
             )
 
+        if os.path.exists(state_path):
+            os.remove(state_path)
         # 统计信息
         type_counts: dict[str, int] = {}
         for c in final_tests:
@@ -512,14 +652,29 @@ class ProblemGenerateTestsTool(Tool):
                 limit_case_quota_met=limit_quota_met,
                 candidates_generated=len(candidates),
                 sol_name=effective_sol_name,
+                answer_ext=normalized_answer_ext,
+                progress_snapshot=progress_snapshot,
                 message=f"Generated {len(generated_tests)} test cases (from {len(candidates)} candidates)",
             )
         else:
+            self._save_state(
+                state_path,
+                phase="partial",
+                next_seed=seed,
+                candidates=candidates,
+                errors=errors,
+                answer_ext=normalized_answer_ext,
+                active_pids=active_pids,
+                message="Partial generation result",
+            )
             return ToolResult.fail(
                 f"Partial generation: {len(generated_tests)}/{test_count}",
                 generated_tests=generated_tests,
                 errors=errors,
                 sol_name=effective_sol_name,
+                answer_ext=normalized_answer_ext,
+                progress_snapshot=progress_snapshot,
+                resume_hint="Set resume=true to continue from checkpoint",
                 limit_case_count=limit_in_final,
                 limit_case_minimum_required=limit_minimum,
                 limit_case_quota_met=limit_quota_met,
@@ -567,20 +722,128 @@ class ProblemGenerateTestsTool(Tool):
 
         return tests_dir, None
 
-    def _clear_generated_tests(self, tests_dir: str) -> ToolResult | None:
-        """创建测试目录并清理旧的 .in/.ans 文件。"""
+    def _clear_generated_tests(self, tests_dir: str, answer_ext: str = ".ans") -> ToolResult | None:
+        """创建测试目录并清理旧的 .in/.answer_ext 文件。"""
         os.makedirs(tests_dir, exist_ok=True)
         for filename in os.listdir(tests_dir):
             if not (
                 filename.endswith(".in")
-                or filename.endswith(".ans")
+                or filename.endswith(answer_ext)
                 or filename == _TEST_MANIFEST_FILENAME
+                or filename == _GENERATE_STATE_FILENAME
             ):
                 continue
             path = os.path.join(tests_dir, filename)
             if os.path.isfile(path):
                 os.remove(path)
         return None
+
+    def _normalize_answer_ext(self, answer_ext: str) -> tuple[str | None, ToolResult | None]:
+        ext = _normalize_answer_ext_value(answer_ext or ".ans")
+        if not ext:
+            return None, ToolResult.fail("invalid answer_ext")
+        return ext, None
+
+    async def _run_with_retry(
+        self,
+        binary_path: str,
+        args: list[str],
+        timeout: int,
+        active_pids: set[int],
+    ) -> RunResult:
+        last_result: RunResult | None = None
+        for attempt in range(3):
+            started_pid: int | None = None
+            cancelled = False
+
+            def _on_start(pid: int) -> None:
+                nonlocal started_pid
+                started_pid = pid
+                active_pids.add(pid)
+
+            try:
+                last_result = await run_binary_with_args(
+                    binary_path,
+                    args,
+                    timeout=timeout,
+                    process_start_hook=_on_start,
+                )
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                # 取消路径保留 PID 到状态文件，供 cleanup 精准回收。
+                if started_pid is not None and not cancelled:
+                    active_pids.discard(started_pid)
+            if last_result.success:
+                return last_result
+            await asyncio.sleep(0.1 * (2**attempt))
+        if last_result is not None:
+            return last_result
+        return RunResult(success=False, error="Generator execution returned no result")
+
+    def _save_state(
+        self,
+        state_path: str,
+        *,
+        phase: str,
+        next_seed: int,
+        candidates: list[CandidateTest],
+        errors: list[tuple[int, str]],
+        answer_ext: str,
+        active_pids: set[int] | None = None,
+        message: str | None = None,
+    ) -> None:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 1,
+                    "phase": phase,
+                    "next_seed": next_seed,
+                    "answer_ext": answer_ext,
+                    "message": message,
+                    "active_pids": sorted(active_pids or []),
+                    "candidates": [
+                        {
+                            "input_data": c.input_data,
+                            "output_data": c.output_data,
+                            "type_param": c.type_param,
+                            "signature": c.signature,
+                        }
+                        for c in candidates
+                    ],
+                    "errors": [{"seed": seed, "error": err} for seed, err in errors[-200:]],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    def _load_state(self, state_path: str) -> dict | None:
+        if not os.path.exists(state_path):
+            return None
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _restore_candidates(self, raw_candidates: list[dict]) -> list[CandidateTest]:
+        out: list[CandidateTest] = []
+        for item in raw_candidates:
+            if not isinstance(item, dict):
+                continue
+            out.append(
+                CandidateTest(
+                    input_data=str(item.get("input_data", "")),
+                    output_data=str(item.get("output_data", "")),
+                    type_param=str(item.get("type_param", "2")),
+                    signature=str(item.get("signature", "")),
+                )
+            )
+        return out
+
 
     def _balance_and_sample(
         self,
@@ -751,6 +1014,122 @@ class ProblemGenerateTestsTool(Tool):
         return configs
 
 
+class ProblemCleanupProcessesTool(Tool):
+    """清理 problem_generate_tests 残留状态和进程。"""
+
+    @property
+    def name(self) -> str:
+        return "problem_cleanup_processes"
+
+    @property
+    def description(self) -> str:
+        return "清理生成器残留进程与状态文件。"
+
+    @property
+    def input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "problem_dir": {"type": "string", "description": "题目目录路径"},
+                "kill_all_generators": {
+                    "type": "boolean",
+                    "description": "是否尝试清理当前问题任务记录的 generator PID（不会全局按进程名误杀）",
+                    "default": False,
+                },
+            },
+            "required": ["problem_dir"],
+        }
+
+    async def execute(self, problem_dir: str, kill_all_generators: bool = False) -> ToolResult:
+        tests_dir = os.path.join(problem_dir, "tests")
+        state_path = os.path.join(tests_dir, _GENERATE_STATE_FILENAME)
+        state = self._load_cleanup_state(state_path) or {}
+        removed_files: list[str] = []
+        pids = state.get("active_pids", []) if isinstance(state, dict) else []
+        if not isinstance(pids, list):
+            pids = []
+        if kill_all_generators:
+            try:
+                killed: list[int] = []
+                failed: list[dict[str, str | int]] = []
+                for pid in pids:
+                    if not isinstance(pid, int) or pid <= 0:
+                        continue
+                    if os.name == "nt":
+                        proc = await asyncio.create_subprocess_exec(
+                            "taskkill",
+                            "/PID",
+                            str(pid),
+                            "/F",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout, stderr = await proc.communicate()
+                        if proc.returncode == 0:
+                            killed.append(pid)
+                        else:
+                            failed.append(
+                                {
+                                    "pid": pid,
+                                    "stdout": stdout.decode("utf-8", errors="replace"),
+                                    "stderr": stderr.decode("utf-8", errors="replace"),
+                                }
+                            )
+                    else:
+                        try:
+                            os.kill(pid, _POSIX_KILL_SIGNAL)
+                            killed.append(pid)
+                        except OSError as exc:
+                            failed.append(
+                                {
+                                    "pid": pid,
+                                    "stdout": "",
+                                    "stderr": str(exc),
+                                }
+                            )
+                # 仅移除已成功清理的 PID；失败 PID 保留，支持后续重试。
+                remaining_pids = [pid for pid in pids if isinstance(pid, int) and pid not in killed]
+                self._write_cleanup_state(state_path, remaining_pids)
+                return ToolResult.ok(
+                    removed_files=removed_files,
+                    killed_pids=killed,
+                    failed_pids=failed,
+                    warning="No tracked generator PID found; skipped process termination" if not pids else "",
+                    message="Cleanup finished",
+                )
+            except Exception as exc:
+                return ToolResult.fail(f"cleanup failed: {exc}", removed_files=removed_files)
+        # 未请求 kill：不删除 checkpoint，仅返回状态。
+        return ToolResult.ok(
+            removed_files=removed_files,
+            killed_pids=[],
+            failed_pids=[],
+            warning="",
+            message="Cleanup finished",
+        )
+
+    def _load_cleanup_state(self, state_path: str) -> dict | None:
+        if not os.path.exists(state_path):
+            return None
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            return None
+        return None
+
+    def _write_cleanup_state(self, state_path: str, remaining_pids: list[int]) -> None:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        state = self._load_cleanup_state(state_path) or {}
+        if not isinstance(state, dict):
+            state = {}
+        state["active_pids"] = remaining_pids
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+
+
 class ProblemPackPolygonTool(Tool):
     """打包为 Polygon 格式。"""
 
@@ -855,14 +1234,26 @@ class ProblemPackPolygonTool(Tool):
             if os.path.exists(tests_dir):
                 test_files = [f for f in os.listdir(tests_dir) if f.endswith(".in")]
                 actual_test_count = len(test_files)
+                manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+                answer_ext = ".ans"
+                if os.path.exists(manifest_path):
+                    try:
+                        with open(manifest_path, encoding="utf-8") as mf:
+                            manifest = json.load(mf)
+                        answer_ext = _normalize_answer_ext_value(str(manifest.get("answer_ext", ".ans"))) or ".ans"
+                    except (OSError, json.JSONDecodeError):
+                        answer_ext = ".ans"
             else:
                 actual_test_count = 0
+                answer_ext = ".ans"
 
             problem_name = os.path.basename(problem_dir)
+            xml_problem_name = escape(problem_name, {'"': "&quot;"})
+            xml_answer_ext = escape(answer_ext, {'"': "&quot;"})
             xml_content = f'''<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<problem revision="1" short-name="{problem_name}">
+<problem revision="1" short-name="{xml_problem_name}">
     <names>
-        <name language="chinese" value="{problem_name}"/>
+        <name language="chinese" value="{xml_problem_name}"/>
     </names>
     <statements>
         <statement charset="UTF-8" language="chinese" mathjax="true" path="statements/README.md" type="application/x-tex"/>
@@ -873,7 +1264,7 @@ class ProblemPackPolygonTool(Tool):
             <memory-limit>{memory_limit_bytes}</memory-limit>
             <test-count>{actual_test_count}</test-count>
             <input-path-pattern>tests/%02d.in</input-path-pattern>
-            <answer-path-pattern>tests/%02d.ans</answer-path-pattern>
+            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>
         </testset>
     </judging>
     <files>

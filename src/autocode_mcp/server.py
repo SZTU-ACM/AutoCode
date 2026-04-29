@@ -32,7 +32,12 @@ from .tools.complexity import SolutionAnalyzeTool
 from .tools.file_ops import FileReadTool, FileSaveTool
 from .tools.generator import GeneratorBuildTool, GeneratorRunTool
 from .tools.interactor import InteractorBuildTool
-from .tools.problem import ProblemCreateTool, ProblemGenerateTestsTool, ProblemPackPolygonTool
+from .tools.problem import (
+    ProblemCleanupProcessesTool,
+    ProblemCreateTool,
+    ProblemGenerateTestsTool,
+    ProblemPackPolygonTool,
+)
 from .tools.solution import SolutionBuildTool, SolutionRunTool
 from .tools.stress_test import StressTestRunTool
 from .tools.test_verify import ProblemVerifyTestsTool
@@ -68,6 +73,7 @@ def register_all_tools() -> None:
     # Problem 工具组
     register_tool(ProblemCreateTool())
     register_tool(ProblemGenerateTestsTool())
+    register_tool(ProblemCleanupProcessesTool())
     register_tool(ProblemVerifyTestsTool())
     register_tool(ProblemPackPolygonTool())
     register_tool(ProblemValidateTool())
@@ -117,6 +123,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
             content=[TextContent(type="text", text=json.dumps(result_dict, ensure_ascii=False))],
             structuredContent=result_dict,
             isError=not result.success,
+        )
+    except asyncio.CancelledError:
+        cancel_result = ToolResult.fail(
+            "Tool call interrupted by cancellation",
+            interrupted=True,
+            resume_hint="Retry with resume=true if tool supports checkpoints",
+        )
+        cancel_dict = cancel_result.to_dict()
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(cancel_dict, ensure_ascii=False))],
+            structuredContent=cancel_dict,
+            isError=True,
         )
     except Exception as e:
         error_result = ToolResult.fail(str(e))
