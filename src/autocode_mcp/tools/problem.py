@@ -1243,6 +1243,95 @@ class ProblemPackPolygonTool(Tool):
         if not os.path.exists(problem_dir):
             return ToolResult.fail(f"Problem directory not found: {problem_dir}")
 
+        tests_dir = os.path.join(problem_dir, "tests")
+        if not os.path.isdir(tests_dir):
+            return ToolResult.fail("tests directory not found, run problem_generate_tests first")
+        in_files = sorted(f for f in os.listdir(tests_dir) if f.endswith(".in"))
+        if not in_files:
+            return ToolResult.fail("no test input files found, run problem_generate_tests first")
+
+        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+        answer_ext = ".ans"
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as mf:
+                    manifest = json.load(mf)
+                answer_ext = _normalize_answer_ext_value(str(manifest.get("answer_ext", ".ans"))) or ".ans"
+            except (OSError, json.JSONDecodeError):
+                answer_ext = ".ans"
+
+        missing_answers = [
+            in_file for in_file in in_files if not os.path.exists(
+                os.path.join(tests_dir, f"{os.path.splitext(in_file)[0]}{answer_ext}")
+            )
+        ]
+        if missing_answers:
+            return ToolResult.fail(
+                "missing answer files for some tests",
+                missing_answer_inputs=missing_answers,
+            )
+
+        statement_path = os.path.join(problem_dir, "statements", "README.md")
+        if not os.path.exists(statement_path):
+            return ToolResult.fail("statement file missing: statements/README.md")
+
+        sol_source = os.path.join(problem_dir, "solutions", "sol.cpp")
+        root_sol_source = os.path.join(problem_dir, "sol.cpp")
+        if not os.path.exists(sol_source) and not os.path.exists(root_sol_source):
+            return ToolResult.fail("main solution source missing: solutions/sol.cpp")
+
+        workflow_state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
+        require_tests_verified = True
+        min_limit_case_ratio = 0.5
+        problem_manifest_path = os.path.join(problem_dir, "autocode.json")
+        if os.path.exists(problem_manifest_path):
+            try:
+                with open(problem_manifest_path, encoding="utf-8") as pmf:
+                    problem_manifest = json.load(pmf)
+                quality_gates = problem_manifest.get("quality_gates", {})
+                if isinstance(quality_gates, dict):
+                    require_tests_verified = bool(quality_gates.get("require_tests_verified", True))
+                    min_limit_case_ratio = float(quality_gates.get("min_limit_case_ratio", 0.5))
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                require_tests_verified = True
+                min_limit_case_ratio = 0.5
+        min_limit_case_ratio = min(1.0, max(0.0, min_limit_case_ratio))
+
+        if os.path.exists(workflow_state_path):
+            try:
+                with open(workflow_state_path, encoding="utf-8") as sf:
+                    workflow_state = json.load(sf)
+                if require_tests_verified and not bool(workflow_state.get("tests_verified", False)):
+                    return ToolResult.fail(
+                        "tests are not verified, run problem_verify_tests first",
+                        tests_verified=False,
+                    )
+            except (OSError, json.JSONDecodeError):
+                return ToolResult.fail("invalid workflow state file, rerun verification steps")
+
+        limit_ratio_from_manifest = None
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as mf:
+                    tests_manifest = json.load(mf)
+                tests = tests_manifest.get("tests", [])
+                if isinstance(tests, list) and tests:
+                    total = len(tests)
+                    limit_count = sum(
+                        1
+                        for item in tests
+                        if isinstance(item, dict) and str(item.get("type_param")) in _LIMIT_STRATEGY_TYPES
+                    )
+                    limit_ratio_from_manifest = limit_count / total
+            except (OSError, json.JSONDecodeError):
+                limit_ratio_from_manifest = None
+        if limit_ratio_from_manifest is not None and limit_ratio_from_manifest < min_limit_case_ratio:
+            return ToolResult.fail(
+                "limit case ratio is below quality_gates.min_limit_case_ratio",
+                limit_case_ratio=limit_ratio_from_manifest,
+                min_limit_case_ratio=min_limit_case_ratio,
+            )
+
         # 转换单位：秒 -> 毫秒，MB -> 字节
         time_limit_ms = time_limit * 1000
         memory_limit_bytes = memory_limit * 1024 * 1024
@@ -1291,22 +1380,11 @@ class ProblemPackPolygonTool(Tool):
         problem_xml = os.path.join(problem_dir, "problem.xml")
         if not os.path.exists(problem_xml):
             # 动态计算测试数量
-            tests_dir = os.path.join(problem_dir, "tests")
             if os.path.exists(tests_dir):
                 test_files = [f for f in os.listdir(tests_dir) if f.endswith(".in")]
                 actual_test_count = len(test_files)
-                manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-                answer_ext = ".ans"
-                if os.path.exists(manifest_path):
-                    try:
-                        with open(manifest_path, encoding="utf-8") as mf:
-                            manifest = json.load(mf)
-                        answer_ext = _normalize_answer_ext_value(str(manifest.get("answer_ext", ".ans"))) or ".ans"
-                    except (OSError, json.JSONDecodeError):
-                        answer_ext = ".ans"
             else:
                 actual_test_count = 0
-                answer_ext = ".ans"
 
             problem_name = os.path.basename(problem_dir)
             xml_problem_name = escape(problem_name, {'"': "&quot;"})

@@ -18,6 +18,17 @@ def load_module():
     return module
 
 
+def write_manifest(problem_dir: Path, *, interactive: bool = False, quality_gates: dict | None = None) -> None:
+    manifest = {
+        "schema_version": "1.0",
+        "problem_name": "Test Problem",
+        "interactive": interactive,
+    }
+    if quality_gates is not None:
+        manifest["quality_gates"] = quality_gates
+    (problem_dir / "autocode.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_pre_tool_denies_generator_before_validator(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"
@@ -274,3 +285,191 @@ def test_post_tool_clears_tests_verified_after_regeneration(tmp_path):
     assert exit_code == 0
     assert state["tests_generated"] is True
     assert state["tests_verified"] is False
+
+
+def test_post_tool_failed_generate_tests_clears_verified_and_generated(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["tests_verified"] = True
+    state["tests_generated"] = True
+    state["generated_test_count"] = 7
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__problem_generate_tests",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": False,
+                "data": {},
+            }
+        },
+    }
+
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["tests_verified"] is False
+    assert state["tests_generated"] is False
+    assert state["generated_test_count"] == 0
+
+
+def test_post_tool_rolls_back_validator_ready_on_failure(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["validator_ready"] = True
+    state["validator_accuracy"] = 1.0
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__validator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {"structuredContent": {"success": False, "data": {}}},
+    }
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["validator_ready"] is False
+    assert state["validator_accuracy"] is None
+
+
+def test_infer_state_created_requires_valid_manifest(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    state_without_manifest = module.infer_state(str(problem_dir))
+    assert state_without_manifest["created"] is False
+
+    write_manifest(problem_dir)
+    state_with_manifest = module.infer_state(str(problem_dir))
+    assert state_with_manifest["created"] is True
+
+
+def test_pre_tool_enforces_solution_analyze_before_validator_build(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["created"] = True
+    state["sol_built"] = True
+    state["brute_built"] = True
+    state["solution_analyzed"] = False
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__validator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "solution_analyze" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_pre_tool_pack_respects_quality_gate_override(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(
+        problem_dir,
+        quality_gates={
+            "require_stress_passed": True,
+            "require_validation_passed": True,
+            "require_tests_verified": False,
+            "min_limit_case_ratio": 0.5,
+        },
+    )
+    state = module.infer_state(str(problem_dir))
+    state["tests_generated"] = True
+    state["generated_test_count"] = 1
+    state["tests_verified"] = False
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__problem_pack_polygon",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    assert exit_code == 0
+    assert captured.strip() == ""
+
+
+def test_post_tool_verify_tests_applies_min_limit_case_ratio(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(
+        problem_dir,
+        quality_gates={
+            "require_stress_passed": True,
+            "require_validation_passed": True,
+            "require_tests_verified": True,
+            "min_limit_case_ratio": 0.8,
+        },
+    )
+    payload = {
+        "tool_name": "mcp__autocode__problem_verify_tests",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {
+                    "passed": True,
+                    "results": {
+                        "limit_ratio": {
+                            "limit_case_ratio": 0.5,
+                        }
+                    },
+                },
+            }
+        },
+    }
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["tests_verified"] is False
+    assert state["limit_case_ratio"] == 0.5
+
+
+def test_pre_tool_pack_denies_when_limit_ratio_below_gate(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(
+        problem_dir,
+        quality_gates={
+            "require_stress_passed": True,
+            "require_validation_passed": True,
+            "require_tests_verified": False,
+            "min_limit_case_ratio": 0.8,
+        },
+    )
+    state = module.infer_state(str(problem_dir))
+    state["tests_generated"] = True
+    state["generated_test_count"] = 2
+    state["tests_verified"] = False
+    state["limit_case_ratio"] = 0.5
+    module.save_state(str(problem_dir), state)
+    payload = {
+        "tool_name": "mcp__autocode__problem_pack_polygon",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "min_limit_case_ratio" in parsed["hookSpecificOutput"]["permissionDecisionReason"]

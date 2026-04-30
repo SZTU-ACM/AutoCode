@@ -9,6 +9,12 @@ from typing import Any
 STATE_DIR_NAME = ".autocode-workflow"
 STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "autocode.json"
+DEFAULT_QUALITY_GATES = {
+    "require_stress_passed": True,
+    "require_validation_passed": True,
+    "require_tests_verified": True,
+    "min_limit_case_ratio": 0.5,
+}
 
 
 def load_payload() -> dict[str, Any]:
@@ -50,16 +56,43 @@ def load_manifest(problem_dir: str) -> dict[str, Any]:
         return {}
 
 
+def _is_manifest_valid_for_created(manifest: dict[str, Any]) -> bool:
+    problem_name = manifest.get("problem_name")
+    return isinstance(problem_name, str) and bool(problem_name.strip())
+
+
+def _extract_quality_gates(manifest: dict[str, Any]) -> dict[str, Any]:
+    configured = manifest.get("quality_gates")
+    if not isinstance(configured, dict):
+        configured = {}
+    gates = dict(DEFAULT_QUALITY_GATES)
+    for key in DEFAULT_QUALITY_GATES:
+        if key in configured:
+            gates[key] = configured[key]
+    try:
+        ratio = float(gates.get("min_limit_case_ratio", 0.5))
+    except (TypeError, ValueError):
+        ratio = 0.5
+    gates["min_limit_case_ratio"] = min(1.0, max(0.0, ratio))
+    return gates
+
+
 def infer_state(problem_dir: str) -> dict[str, Any]:
     root = Path(problem_dir)
     manifest = load_manifest(problem_dir)
     is_interactive = bool(manifest.get("interactive", False))
     return {
         "problem_dir": str(root),
-        "created": root.exists() and (root / "files").exists() and (root / "solutions").exists(),
+        "created": (
+            root.exists()
+            and (root / "files").exists()
+            and (root / "solutions").exists()
+            and _is_manifest_valid_for_created(manifest)
+        ),
         "interactive": is_interactive,
         "sol_built": False,
         "brute_built": False,
+        "solution_analyzed": False,
         "validator_ready": False,
         "validator_accuracy": None,
         "generator_built": False,
@@ -76,6 +109,7 @@ def infer_state(problem_dir: str) -> dict[str, Any]:
         "generated_test_count": 0,
         "tests_verified": False,
         "packaged": (root / "problem.xml").exists(),
+        "quality_gates": _extract_quality_gates(manifest),
     }
 
 
@@ -90,6 +124,7 @@ def load_state(problem_dir: str) -> dict[str, Any]:
         loaded = infer_state(problem_dir)
     manifest = load_manifest(problem_dir)
     loaded["interactive"] = bool(manifest.get("interactive", loaded.get("interactive", False)))
+    loaded["quality_gates"] = _extract_quality_gates(manifest)
     return loaded
 
 
@@ -152,6 +187,55 @@ def _interactor_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
     return not bool(state.get("interactive", False)) or bool(state.get("interactor_ready"))
 
 
+def _quality_gate_enabled(state: dict[str, Any], key: str, default: bool = True) -> bool:
+    gates = state.get("quality_gates", {})
+    if not isinstance(gates, dict):
+        return default
+    value = gates.get(key, default)
+    return bool(value)
+
+
+def _stress_required_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return (not _quality_gate_enabled(state, "require_stress_passed")) or bool(
+        state.get("stress_passed")
+    )
+
+
+def _validation_required_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    if not _quality_gate_enabled(state, "require_validation_passed"):
+        return True
+    return (
+        bool(state.get("validation_passed"))
+        and bool(state.get("statement_validated"))
+        and bool(state.get("sample_files_validated"))
+    )
+
+
+def _tests_verified_required_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return (not _quality_gate_enabled(state, "require_tests_verified")) or bool(
+        state.get("tests_verified")
+    )
+
+
+def _min_limit_ratio_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    gates = state.get("quality_gates", {})
+    if not isinstance(gates, dict):
+        return True
+    try:
+        required = float(gates.get("min_limit_case_ratio", 0.5))
+    except (TypeError, ValueError):
+        required = 0.5
+    required = min(1.0, max(0.0, required))
+    ratio = state.get("limit_case_ratio")
+    if ratio is None:
+        return True
+    try:
+        ratio_val = float(ratio)
+    except (TypeError, ValueError):
+        return False
+    return ratio_val >= required
+
+
 PRE_GATES: dict[str, list[Gate]] = {
     "solution_build": [
         (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。"),
@@ -169,6 +253,7 @@ PRE_GATES: dict[str, list[Gate]] = {
     "validator_build": [
         (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。"),
         (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。"),
+        (lambda s, i: bool(s.get("solution_analyzed")), "必须先运行 solution_analyze，再构建 validator。"),
         (_is_non_interactive, "交互题不应构建 validator，应改用 interactor_build。"),
         (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute，再构建 validator。"),
     ],
@@ -200,11 +285,11 @@ PRE_GATES: dict[str, list[Gate]] = {
         (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run（completed_rounds == total_rounds）。"),
     ],
     "problem_validate": [
-        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run，再进行题面与样例验证。"),
+        (_stress_required_gate_ok, "必须先通过 stress_test_run，再进行题面与样例验证。"),
     ],
     "problem_generate_tests": [
-        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run。"),
-        (lambda s, i: bool(s.get("validation_passed")), "必须先通过 problem_validate。"),
+        (_stress_required_gate_ok, "必须先通过 stress_test_run。"),
+        (_validation_required_gate_ok, "必须先通过 problem_validate（题面与样例均通过）。"),
         (
             lambda s, i: not bool(s.get("interactive")) or bool(s.get("interactor_ready")),
             "交互题必须先完成 interactor_build 并可用。",
@@ -221,7 +306,8 @@ PRE_GATES: dict[str, list[Gate]] = {
             lambda s, i: bool(s.get("tests_generated")) and int(s.get("generated_test_count", 0)) > 0,
             "必须先生成最终测试数据。",
         ),
-        (lambda s, i: bool(s.get("tests_verified")), "必须先通过 problem_verify_tests(passed=true)，再进行打包。"),
+        (_tests_verified_required_gate_ok, "必须先通过 problem_verify_tests(passed=true)，再进行打包。"),
+        (_min_limit_ratio_gate_ok, "最终测试中的极限样例占比未达到 quality_gates.min_limit_case_ratio。"),
     ],
 }
 
@@ -253,6 +339,20 @@ def post_tool(payload: dict[str, Any]) -> int:
     success, data = parse_tool_result(payload)
     state = load_state(problem_dir)
 
+    if short_name == "problem_generate_tests":
+        # 任何重新生成尝试都会让旧验证失效（无论成功还是失败）
+        state["tests_verified"] = False
+        if not success:
+            state["tests_generated"] = False
+            state["generated_test_count"] = 0
+            save_state(problem_dir, state)
+            return 0
+        generated_tests = data.get("generated_tests", [])
+        state["tests_generated"] = bool(generated_tests)
+        state["generated_test_count"] = len(generated_tests)
+        save_state(problem_dir, state)
+        return 0
+
     if short_name == "problem_validate":
         state["statement_validated"] = data.get("statement_samples", {}).get("validated", False)
         state["sample_files_validated"] = data.get("sample_files", {}).get("validated", False)
@@ -261,11 +361,46 @@ def post_tool(payload: dict[str, Any]) -> int:
         return 0
 
     if short_name == "problem_verify_tests":
+        limit_ratio = data.get("results", {}).get("limit_ratio", {})
+        if isinstance(limit_ratio, dict):
+            state["limit_case_ratio"] = limit_ratio.get("limit_case_ratio")
+        else:
+            state["limit_case_ratio"] = None
+        gates = state.get("quality_gates", {})
+        min_limit_ratio = 0.5
+        if isinstance(gates, dict):
+            try:
+                min_limit_ratio = float(gates.get("min_limit_case_ratio", 0.5))
+            except (TypeError, ValueError):
+                min_limit_ratio = 0.5
+        min_limit_ratio = min(1.0, max(0.0, min_limit_ratio))
+        ratio_ok = True
+        try:
+            if state.get("limit_case_ratio") is not None:
+                ratio_ok = float(state.get("limit_case_ratio")) >= min_limit_ratio
+        except (TypeError, ValueError):
+            ratio_ok = False
         state["tests_verified"] = success and bool(data.get("passed", False))
+        state["tests_verified"] = state["tests_verified"] and ratio_ok
         save_state(problem_dir, state)
         return 0
 
     if not success:
+        if short_name == "validator_build":
+            state["validator_ready"] = False
+            state["validator_accuracy"] = None
+        elif short_name == "generator_build":
+            state["generator_built"] = False
+        elif short_name == "stress_test_run":
+            state["stress_completed_rounds"] = 0
+            state["stress_total_rounds"] = 0
+            state["stress_passed"] = False
+        elif short_name == "checker_build":
+            state["checker_accuracy"] = None
+            state["checker_ready"] = False
+        elif short_name == "problem_pack_polygon":
+            state["packaged"] = False
+        save_state(problem_dir, state)
         return 0
 
     if short_name == "problem_create":
@@ -284,7 +419,7 @@ def post_tool(payload: dict[str, Any]) -> int:
         state["validator_accuracy"] = accuracy
         state["validator_ready"] = isinstance(accuracy, int | float) and accuracy >= 0.9
     elif short_name == "validator_select":
-        state["validator_selected"] = True
+        pass
     elif short_name == "generator_build":
         state["generator_built"] = True
     elif short_name == "stress_test_run":
@@ -294,16 +429,11 @@ def post_tool(payload: dict[str, Any]) -> int:
     elif short_name == "checker_build":
         accuracy = data.get("accuracy")
         state["checker_accuracy"] = accuracy
-        state["checker_ready"] = accuracy is None or accuracy >= 0.9
+        state["checker_ready"] = isinstance(accuracy, int | float) and accuracy >= 0.9
     elif short_name == "interactor_build":
         pass_rate = data.get("pass_rate", 0)
         fail_rate = data.get("fail_rate", 0)
         state["interactor_ready"] = pass_rate == 1.0 and fail_rate >= 0.8
-    elif short_name == "problem_generate_tests":
-        generated_tests = data.get("generated_tests", [])
-        state["tests_generated"] = bool(generated_tests)
-        state["generated_test_count"] = len(generated_tests)
-        state["tests_verified"] = False
     elif short_name == "problem_pack_polygon":
         state["packaged"] = True
 

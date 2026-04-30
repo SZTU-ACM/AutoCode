@@ -83,6 +83,10 @@ async def test_problem_pack_polygon():
             f.write("// sol.cpp")
         with open(os.path.join(problem_dir, "brute.cpp"), "w") as f:
             f.write("// brute.cpp")
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
 
         # 打包
         result = await pack_tool.execute(problem_dir=problem_dir)
@@ -98,7 +102,17 @@ async def test_problem_pack_polygon_creates_xml():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = os.path.join(tmpdir, "xml_test")
-        os.makedirs(problem_dir)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# Test\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
 
         result = await tool.execute(
             problem_dir=problem_dir,
@@ -910,6 +924,8 @@ async def test_problem_pack_polygon_dynamic_test_count():
                 f.write(f"test {i}\n")
             with open(os.path.join(tests_dir, f"{i:02d}.ans"), "w") as f:
                 f.write(f"answer {i}\n")
+        with open(os.path.join(problem_dir, "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
 
         await pack_tool.execute(problem_dir=problem_dir)
 
@@ -933,8 +949,12 @@ async def test_problem_pack_polygon_sanitizes_answer_ext_from_manifest():
         os.makedirs(tests_dir, exist_ok=True)
         with open(os.path.join(tests_dir, "01.in"), "w", encoding="utf-8") as f:
             f.write("1\n")
+        with open(os.path.join(tests_dir, "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
         with open(os.path.join(tests_dir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
             json.dump({"answer_ext": ".bad<ext>"}, f)
+        with open(os.path.join(problem_dir, "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
 
         result = await pack_tool.execute(problem_dir=problem_dir)
         assert result.success
@@ -942,6 +962,123 @@ async def test_problem_pack_polygon_sanitizes_answer_ext_from_manifest():
         with open(xml_path, encoding="utf-8") as f:
             content = f.read()
         assert "<answer-path-pattern>tests/%02d.ans</answer-path-pattern>" in content
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_fails_without_answers():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_missing_answer")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "missing answer files" in result.error
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_fails_when_workflow_state_unverified():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_unverified")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(
+            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"tests_verified": False}, f)
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "run problem_verify_tests first" in result.error
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_respects_require_tests_verified_override():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_override_verify_gate")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+            json.dump({"problem_name": "t", "quality_gates": {"require_tests_verified": False}}, f)
+        with open(
+            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"tests_verified": False}, f)
+        result = await tool.execute(problem_dir=problem_dir)
+        assert result.success
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_enforces_min_limit_case_ratio():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_limit_ratio_gate")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "02.in"), "w", encoding="utf-8") as f:
+            f.write("2\n")
+        with open(os.path.join(problem_dir, "tests", "02.ans"), "w", encoding="utf-8") as f:
+            f.write("2\n")
+        with open(os.path.join(problem_dir, "tests", ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tests": [
+                        {"in_file": "01.in", "ans_file": "01.ans", "type_param": "1"},
+                        {"in_file": "02.in", "ans_file": "02.ans", "type_param": "2"},
+                    ]
+                },
+                f,
+            )
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(
+            os.path.join(problem_dir, "autocode.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump({"problem_name": "t", "quality_gates": {"min_limit_case_ratio": 0.6}}, f)
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "min_limit_case_ratio" in result.error
 
 
 @pytest.mark.asyncio
