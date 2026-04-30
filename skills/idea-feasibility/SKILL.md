@@ -6,30 +6,39 @@ disable-model-invocation: false
 
 # Idea Feasibility Skill
 
-用于“立项前审题”。目标是尽早发现不可判题、不可验证、约束缺失等高风险问题，避免进入代码阶段后返工。
+Used for pre-implementation idea review. The goal is to detect high-risk issues early—such as non-judgeable tasks, unverifiable requirements, or missing constraints—so you avoid rework in the coding phase.
 
-## 触发条件
+## Trigger Conditions
 
-- 用户只给了题目想法，还没稳定输入输出协议。
-- 约束或判题方式模糊（尤其是多解题/交互题）。
-- 团队准备开始写 `sol/brute/generator/validator` 前。
+- The user only provides a problem idea and the input/output protocol is not yet stable.
+- Constraints or judging rules are unclear (especially for multi-answer or interactive problems).
+- Before the team starts implementing `sol/brute/generator/validator`.
 
-## 检查清单
+## Checklist
 
-1. **可判定性**：答案是否唯一；若不唯一，是否能用 checker 明确定义合法解。
-2. **约束完备性**：`n_max`、值域、组数、总规模（如 `sum_n`）是否明确。
-3. **可验证性**：是否能设计覆盖边界、极限、反例的测试；是否可复现（seed + type）。
-4. **实现可行性**：是否存在显然不可实现或超时风险的要求。
-5. **交互可行性（如适用）**：交互协议是否完整、是否可本地模拟。
+1. **Judgeability**: Is the answer unique? If not, can a checker define valid outputs precisely?
+2. **Constraint Completeness**: Are `n_max`, value ranges, number of groups, and total scale (e.g., `sum_n`) clearly defined?
+3. **Verifiability**: Can tests cover boundaries, extremes, and counterexamples? Is generation reproducible (seed + type)?
+4. **Implementation Feasibility**: Are there obviously infeasible or timeout-prone requirements?
+5. **Interactive Feasibility (if applicable)**: Is the interaction protocol complete and locally simulatable?
 
-## 禁止行为
+## Forbidden Actions
 
-- 不要直接进入代码生成。
-- 不要用“后续补充”替代关键约束。
+- Do not jump directly into code generation.
+- Do not use "to be added later" in place of critical constraints.
 
-## 必做输出
+## Required Output
 
 - `decision`: `go` / `no_go`
-- `blocking_issues`: 阻塞问题列表（必须修复）
-- `required_clarifications`: 需向用户确认的关键问题（最多 3 条，按优先级）
-- `next_actions`: 进入实现前的最小动作清单
+- `blocking_issues`: list of blocking issues that must be fixed
+- `required_clarifications`: key questions to confirm with the user (max 3, prioritized)
+- `next_actions`: minimal action checklist before implementation
+
+## Go / No-Go Rules
+
+Return `decision=no_go` if any of the following is true:
+
+- legality of output cannot be judged deterministically (or checker rules are missing);
+- core constraints are incomplete or contradictory;
+- reproducible generation/verification cannot be defined;
+- interactive protocol is incomplete for interactive tasks.

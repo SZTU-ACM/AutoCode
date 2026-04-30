@@ -40,7 +40,7 @@ Use this skill after:
 
 Validates samples embedded in the problem statement (README.md).
 
-**Supported formats:**
+**Supported formats (both localized labels and English labels are accepted):**
 
 ```markdown
 **样例输入 1**
@@ -55,7 +55,7 @@ Validates samples embedded in the problem statement (README.md).
 ```
 ```
 
-Or English format:
+Or standard English labels:
 
 ```markdown
 **Sample Input 1**
@@ -215,3 +215,8 @@ You cannot skip validation - it must pass before generating final tests.
 3. **Keep samples simple**: Use small, easy-to-verify examples
 4. **Include edge cases**: Add boundary samples that test limits
 5. **Match format**: Ensure sample format matches actual input/output format
+
+## Decision Rules
+
+- `go`: all selected validation types pass without unresolved mismatches.
+- `no_go`: any selected validation type fails, or validation evidence is incomplete.

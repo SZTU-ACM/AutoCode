@@ -6,22 +6,27 @@ disable-model-invocation: false
 
 # Test Data Quality Skill
 
-最终测试数据必须通过：
+Final test data must pass:
 
-1. `problem_verify_tests` 的 `file_count` / `answer_consistency` / `validator` / `no_empty`。
-2. `limit_ratio` 与 `limit_semantics`（type=3 与 type=4 不可语义重合）。
-3. `wrong_solution_kill`：每个错解至少被一个测试点杀掉。
+1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`.
+2. `limit_ratio` and `limit_semantics` (type=3 and type=4 must not be semantically overlapping).
+3. `wrong_solution_kill`: every wrong solution must be killed by at least one test.
 
-## 必查补充
+## Additional Required Checks
 
-- 测试点是否有明显重复（低信息增益）。
-- type=3 与 type=4 是否语义区分，而非仅参数放大。
-- 参考解/错解的通过与失败是否符合预期角色。
+- Whether test points contain obvious duplicates (low information gain).
+- Whether type=3 and type=4 are semantically distinct rather than simple parameter scaling.
+- Whether pass/fail behavior of reference/wrong solutions matches expected roles.
 
-## 输出模板
+## Output Template
 
 - `decision`: `go` / `no_go`
-- `failed_checks`: 失败项列表（含原因）
-- `coverage_report`: 规模分布、极限比例、错解杀伤统计
-- `repair_priority`: 修复优先级（P0/P1/P2）
-- `reverify_plan`: 修复后重验顺序
+- `failed_checks`: list of failed checks (with reasons)
+- `coverage_report`: scale distribution, limit-case ratio, and wrong-solution kill statistics
+- `repair_priority`: fix priority (`P0` / `P1` / `P2`)
+- `reverify_plan`: re-validation order after fixes
+
+## Decision Rules
+
+- `go`: all required checks pass, limit semantics are valid, and wrong-solution kill is effective.
+- `no_go`: any required check fails or coverage quality is insufficient.

@@ -6,22 +6,27 @@ disable-model-invocation: false
 
 # Stress Strategy Skill
 
-目标：根据 brute 复杂度和约束自动形成“可复现、可解释”的多轮对拍方案，而不是只跑单一随机轮次。
+Goal: build a reproducible and explainable multi-profile stress strategy from brute complexity and constraints, instead of running a single random profile.
 
-## 规则
+## Rules
 
-- 至少包含 3 个 profile：`tiny_exhaustive`、`random_small`、`edge_small`。
-- `tiny_exhaustive` 用 `type=1`；`random_small` 用 `type=2`；`edge_small` 用 `type=3/4`。
-- 当 brute 复杂度高于 `O(n^2)` 时，自动下调 `n_max` 与 `trials`。
-- 每个 profile 必须可复现（固定 seed 规则、参数可回放）。
+- Include at least 3 profiles: `tiny_exhaustive`, `random_small`, and `edge_small`.
+- Use `type=1` for `tiny_exhaustive`, `type=2` for `random_small`, and `type=3/4` for `edge_small`.
+- When brute complexity is higher than `O(n^2)`, automatically lower `n_max` and `trials`.
+- Every profile must be reproducible (fixed seed rules and replayable parameters).
 
-## 执行
+## Execution
 
-调用 `stress_test_run` 时传 `stress_profiles`，并记录每个 profile 的完成轮数与失败点。
+When calling `stress_test_run`, pass `stress_profiles` and record completed rounds and failure points for each profile.
 
-## 输出要求
+## Output Requirements
 
 - `decision`: `go` / `no_go`
-- `stress_profiles`: 每个 profile 的 `name/trials/types/generator_args`
-- `execution_summary`: 每个 profile 的完成情况与失败轮次
-- `next_fix_hint`: 若失败，给出优先修复方向（std/brute/generator/validator）
+- `stress_profiles`: each profile's `name/trials/types/generator_args`
+- `execution_summary`: completion status and failed rounds per profile
+- `next_fix_hint`: if failed, provide prioritized fix direction (`std/brute/generator/validator`)
+
+## Decision Rules
+
+- `go`: all required profiles complete and no correctness mismatch remains.
+- `no_go`: any required profile is incomplete, or mismatches remain unresolved.
