@@ -38,26 +38,16 @@ Also report:
 
 ## Canonical Workflow
 
-Use this sequence unless the user request is explicitly outside problem creation.
+Use the canonical sequence defined in `skills/autocode-workflow/SKILL.md`.
+This agent is responsible for orchestration and gate handling, not for duplicating the full workflow reference.
 
-Non-interactive:
+Orchestration requirements:
 
-1. `problem_create`
-2. `solution_build(solution_type="sol")`
-3. `solution_build(solution_type="brute")`
-4. `solution_analyze`, `solution_audit_std`, `solution_audit_brute`
-5. `validator_build(accuracy >= 0.9)`
-6. `generator_build`
-7. `stress_test_run`
-8. `checker_build` when non-exact output is required
-9. `problem_validate`
-10. `problem_generate_tests`
-11. `problem_verify_tests`
-12. `problem_pack_polygon`
-
-Interactive:
-
-- replace `validator_build` and `checker_build` with `interactor_build`.
+1. identify current workflow position;
+2. select the next valid MCP call;
+3. block or reroute when prerequisites are missing;
+4. delegate deep checks to dedicated auditors/skills;
+5. continue only after gate evidence is satisfied.
 
 ## Gate Discipline
 
@@ -69,10 +59,8 @@ Interactive:
 
 ## Test-Quality Requirements
 
-During `problem_generate_tests` and `problem_verify_tests`:
-
-- target at least 50% limit-oriented cases (`type=3` + `type=4`) when candidate availability allows;
-- require semantic difference between `type=3` and `type=4` (`type=4` is targeted worst-case/TLE, not only max-parameter scaling).
+Enforce test-quality gates using `testdata-quality` and `problem-validate` skills.
+Do not restate tool reference details here; use skill contracts as the source of truth.
 
 ## Long-Running Generation
 

@@ -32,3 +32,9 @@ Use `problem_validate` to check statement and sample files, ensuring the problem
 
 - `go`: statement protocol is complete and all validated samples match expected behavior.
 - `no_go`: any ambiguity, mismatch, or missing checker/interactor rule remains.
+
+## Forbidden Behavior
+
+- Do not approve statements with ambiguous I/O protocol.
+- Do not approve when sample evidence is missing or inconsistent with `sol`.
+- Do not approve interactive statements without complete protocol semantics.

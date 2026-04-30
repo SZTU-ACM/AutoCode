@@ -23,12 +23,6 @@ Call tools in this order and record the results:
 - Whether complexity conclusions match statement constraints (especially `n_max` and total scale).
 - Whether executable `stress_profiles` recommendations are produced.
 
-## Pass Criteria (all required)
-
-- std has no high-risk `high_tle_risk`.
-- brute provides explicit `recommended_stress_params`.
-- Stress parameters are written into the follow-up `stress_test_run` plan.
-
 ## Output Format
 
 - `decision`: `go` / `no_go`
@@ -42,5 +36,5 @@ Call tools in this order and record the results:
 
 ## Decision Rules
 
-- `go`: no unresolved `critical` findings and stress parameters are explicit and executable.
+- `go`: no unresolved `critical` findings, `high_tle_risk` is `false` or `low`, and stress parameters are explicit and executable.
 - `no_go`: any unresolved `critical` finding, or brute is not a trustworthy stress oracle.

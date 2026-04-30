@@ -30,3 +30,9 @@ Final test data must pass:
 
 - `go`: all required checks pass, limit semantics are valid, and wrong-solution kill is effective.
 - `no_go`: any required check fails or coverage quality is insufficient.
+
+## Forbidden Behavior
+
+- Do not approve final tests if any required check fails.
+- Do not accept type=3 and type=4 when semantics are effectively identical.
+- Do not skip wrong-solution-kill validation when wrong solutions are available.

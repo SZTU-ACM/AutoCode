@@ -44,6 +44,7 @@ Must include:
 3. Step-by-step execution guidance.
 4. Required output format.
 5. Decision rules (`go` vs `no_go`).
+6. Forbidden behavior.
 
 ## Workflow Consistency Rules
 
@@ -66,8 +67,11 @@ Before finalizing edits:
 Use this checklist when updating any `agents/` or `skills/` file:
 
 - [ ] Role/scope is explicit.
+- [ ] Trigger conditions are explicit (skills).
 - [ ] Output contract is explicit.
 - [ ] Gate behavior is explicit.
 - [ ] Decision rules are explicit.
 - [ ] Forbidden behavior is explicit.
 - [ ] Terminology is consistent with project standards.
+
+Project-specific constraints such as maximum clarification count are allowed as long as they are explicit and non-contradictory.

@@ -12,6 +12,9 @@ Goal: build a reproducible and explainable multi-profile stress strategy from br
 
 - Include at least 3 profiles: `tiny_exhaustive`, `random_small`, and `edge_small`.
 - Use `type=1` for `tiny_exhaustive`, `type=2` for `random_small`, and `type=3/4` for `edge_small`.
+- Keep semantic boundaries explicit:
+  - `type=3`: boundary and extreme constraints coverage.
+  - `type=4`: targeted worst-case/TLE-inducing patterns, not simple max-parameter scaling.
 - When brute complexity is higher than `O(n^2)`, automatically lower `n_max` and `trials`.
 - Every profile must be reproducible (fixed seed rules and replayable parameters).
 
@@ -30,3 +33,9 @@ When calling `stress_test_run`, pass `stress_profiles` and record completed roun
 
 - `go`: all required profiles complete and no correctness mismatch remains.
 - `no_go`: any required profile is incomplete, or mismatches remain unresolved.
+
+## Forbidden Behavior
+
+- Do not run only a single random profile.
+- Do not treat `type=4` as a duplicate of `type=3`.
+- Do not continue after unresolved mismatches.
