@@ -238,6 +238,18 @@ async def test_problem_generate_tests_constraints_validation():
     assert "Generator not found" in result.error  # 验证通过，但找不到 generator
 
 
+def test_problem_generate_tests_default_configs_are_valid_for_small_constraints():
+    """smart mode 在小 n_max 下不应生成 n_min > n_max 或 0 边界。"""
+    tool = ProblemGenerateTestsTool()
+
+    for n_max in (1, 10, 50, 100):
+        configs = tool._get_default_configs({"n_max": n_max, "t_max": 1})
+        assert configs
+        for _, _, n_min, cfg_n_max, t_min, t_max, _ in configs:
+            assert 1 <= int(n_min) <= int(cfg_n_max) <= n_max
+            assert 1 <= int(t_min) <= int(t_max)
+
+
 @pytest.mark.asyncio
 async def test_problem_generate_tests_test_configs_validation():
     """测试 test_configs 参数验证。"""

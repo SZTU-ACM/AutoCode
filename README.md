@@ -1,161 +1,261 @@
-# AutoCode MCP Server
+# AutoCode
 
 [![PyPI version](https://img.shields.io/pypi/v/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
-**基于论文《AutoCode: LLMs as Problem Setters for Competitive Programming》实现的竞赛编程出题辅助 MCP Server。**
+**AutoCode 是面向竞赛编程出题人的 Claude Code plugin。**
 
-AutoCode MCP Server 提供 20 个原子工具，让 AI 助手能够创建、验证和测试竞赛编程题目。它负责编译、执行、压力测试和测试数据生成——让 AI 专注于题目设计和解法逻辑。
+它不是单纯让 AI “写一道题”，而是把 AI 生成的题面、解法、校验器、生成器、对拍、测试数据和打包流程放进一条可验证、可审计、会阻止跳步的出题流水线。
 
-## 特性
+仓库内部包含 `autocode-mcp` 这个 MCP server 实现，但默认分发和使用形态是 Claude Code plugin：安装后会同时获得工作流 Agent、Skills、Hooks 和 20 个 MCP 原子工具。
 
-- **Validator-Generator-Checker 框架** — 基于论文实现输入正确性自动验证、多策略测试生成和输出验证
-- **20 个原子工具** — 文件操作、解法构建、复杂度分析、解法审计、压力测试、题目校验与打包等
-- **testlib.h 支持** — 完整集成竞赛编程标准库，用于校验器、生成器和检查器
-- **多策略生成** — 四种生成策略：tiny（穷举）、random（随机）、extreme（边界情况）、tle（诱导超时）
-- **压力测试** — 自动比较最优解和暴力解，可配置测试轮数
-- **MCP 协议** — 原生支持 Claude Code、Cursor 等 MCP 兼容的 AI 工具
-- **执行控制** — 超时控制、内存限制（Linux）、临时目录隔离（仅限本地可信环境）
-- **Polygon 打包** — 导出为 Polygon 格式，适用于 Codeforces 等平台
+## 为什么需要 AutoCode
 
-## 安装
+AI 可以快速给出题目想法和代码，但竞赛题真正难的是“可信”。常见翻车点通常不在第一眼能看出来的地方：
 
-### 1. Claude Code 市场安装（推荐）
+- 题面描述含糊，输入输出协议不完整，样例和题意对不上。
+- 样例输出算错，或者题面样例没有经过标准解实际验证。
+- 标准解看起来合理，但边界条件有 bug。
+- 时间复杂度判断过于乐观，`O(n^2)` 被误当成能过大数据。
+- 暴力解和标准解同类实现，不能作为可靠 oracle 对拍。
+- Generator 只有随机数据，覆盖不到边界、构造、极限和 TLE 场景。
+- extreme 和 tle 样例只是“把参数放大”，没有语义差异。
+- 错解没有被最终测试杀掉，数据强度不够。
+- 打包前才发现题面、题解、manifest、样例和最终数据不一致。
 
-本仓库已经按官方 Claude Code plugin 结构组织：
+AutoCode 的目标是把这些风险前置暴露，而不是等到出题完成后人工返工。
 
-- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
-- [`settings.json`](settings.json)
-- [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
-- [`hooks/hooks.json`](hooks/hooks.json)
-- [`scripts/workflow_guard.py`](scripts/workflow_guard.py)
-- [`.mcp.json`](.mcp.json)
+## AutoCode 如何兜底
 
-这个插件不只是暴露 MCP server，还会一起安装：
+AutoCode 把“AI 出题”拆成一组必须通过的质量门禁：
 
-- 默认工作流 agent
-- AutoCode 工作流 skill
-- 用于阻止跳步的 hooks
+| 风险 | AutoCode 的处理方式 |
+|------|---------------------|
+| 题意不可判定、约束缺失 | `autocode-idea-auditor` 和 `idea-feasibility` 在实现前做只读审计 |
+| 题面样例错误 | `problem_validate` 用解法验证题面样例与样例文件 |
+| 标准解复杂度误判 | `solution_analyze` 输出复杂度、内存估计、风险提示和对拍建议 |
+| 标准解或暴力解不可信 | `solution_audit_std` / `solution_audit_brute` 审计解法假设与 brute 能力 |
+| std 有隐藏 bug | `stress_test_run` 用 sol/brute 多 profile 对拍 |
+| 测试数据覆盖弱 | `problem_generate_tests` 生成 tiny/random/extreme/tle 多策略测试，并优先保证极限类比例 |
+| type=3/type=4 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限/TLE 数据差异 |
+| 错解未被杀 | `problem_verify_tests` 的 `wrong_solution_kill` 验证错解杀伤 |
+| 工作流跳步 | Claude hooks 调用 `scripts/workflow_guard.py`，缺少前置步骤会直接拒绝工具调用 |
+| 打包前状态不清 | `autocode.json` 记录题目契约，`autocode-verify` 可快速检查基础完整性 |
 
-推荐通过 Claude Code marketplace 安装，这样会同时安装 plugin manifest、agent、skills 和 workflow hooks。
+核心原则：**AI 负责生成候选内容，AutoCode 负责让每一步必须被验证。**
 
-```bash
-claude plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git
-claude plugin install autocode@autocode-marketplace
-```
+## 适合谁
 
-注意：marketplace 默认从 `https://github.com/SummerOneTwo/AutoCode.git` 远程安装，所以测试远程安装前需要先把插件改动 push 到 GitHub。
+AutoCode 适合：
 
-### 2. 从 PyPI 安装
-
-```bash
-pip install autocode-mcp
-```
-
-### 3. 其它通用安装方式
-
-#### 使用 uv 安装
-
-```bash
-uv tool install autocode-mcp
-```
-
-#### 从源码安装
-
-```bash
-git clone https://github.com/SummerOneTwo/AutoCode.git
-cd AutoCode
-uv sync
-```
-
-### 前置要求
-
-- **Python 3.10+**
-- **g++ 编译器**，支持 C++20（推荐 GCC 10+）
-- **testlib.h**（已内置在 `src/autocode_mcp/templates/`）
-
-验证安装：
-
-```bash
-# 检查 Python 版本
-python --version
-
-# 检查 g++ 版本
-g++ --version
-
-# 运行测试
-uv run pytest tests/ -v
-```
+- 想用 AI 加速出题，但担心题面、样例、数据和复杂度不可靠的出题人。
+- 需要把题目从 idea 推到可打包 Polygon 结构的竞赛组织者。
+- 希望 AI 严格遵守 Validator-Generator-Checker 流程的团队。
+- 想在 Claude Code 中获得“完整出题工作流 Agent + 工具”的用户。
 
 ## 快速开始
 
-### 1. 安装插件
+### 前置要求
 
-推荐直接通过 Claude Code marketplace 安装：
+- Python 3.10+
+- 支持 C++20 的 `g++`，推荐 GCC 10+
+- Claude Code
+
+`testlib.h` 已内置在 `src/autocode_mcp/templates/`，无需额外下载。
+
+### 安装 Claude Code plugin
+
+推荐通过 Claude Code marketplace 安装：
 
 ```bash
 claude plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git
 claude plugin install autocode@autocode-marketplace
 ```
 
-如果你只是想把 MCP server 作为通用组件使用，再选择 PyPI、`uv` 或源码安装。
+安装后插件会启用：
 
-### 2. 创建你的第一个题目
+- 默认 Agent：`autocode-workflow`
+- 审计 Agent：`autocode-idea-auditor`、`autocode-solution-auditor`、`autocode-package-auditor`
+- 工作流 Skills：`autocode-workflow`、`idea-feasibility`、`solution-complexity-audit`、`stress-strategy`、`statement-audit`、`testdata-quality`
+- Hooks：`SessionStart`、`PreToolUse`、`PostToolUse`
+- MCP server：`autocode-mcp`
 
-在 Claude Code 中，只需说：
+### 在 Claude Code 中使用
 
-> "创建一道竞赛编程题目：给定两个整数 A 和 B，输出它们的和。"
+安装完成后，可以直接描述你的出题目标：
 
-Claude 将使用 AutoCode 工具：
-1. 生成题目描述
-2. 实现解法（最优解 + 暴力解）
-3. 构建校验器和生成器
-4. 运行压力测试
-5. 生成最终测试数据
+```text
+用 AutoCode 创建一道竞赛编程题：给定数组，要求支持若干次区间查询。请先审计题意可行性，再按完整工作流生成题包。
+```
 
-## 客户端配置
+工作流 Agent 会按门禁推进。如果你直接要求后置步骤，例如“现在打包”，但前置测试还没验证通过，hook 会拒绝并提示缺少哪一步。
 
-### 传输层与兼容性
+## 工作流总览
 
-**推荐方式**：直接作为 Claude Code plugin 安装。
+非交互题主路径：
 
-**当前支持**：仅支持本地 stdio 传输。服务器通过标准输入/输出流通信，适用于本地可信环境。
+```text
+problem_create
+  -> solution_build(sol)
+  -> solution_build(brute)
+  -> solution_analyze / solution_audit_std / solution_audit_brute
+  -> validator_build(accuracy >= 0.9)
+  -> generator_build
+  -> stress_test_run(completed_rounds == total_rounds)
+  -> checker_build(需要特殊判题时)
+  -> problem_validate
+  -> problem_generate_tests
+  -> problem_verify_tests(passed)
+  -> problem_pack_polygon
+```
 
-| 客户端 |
-|--------|
-| Claude Code |
-| Cursor |
-| OpenCode |
+交互题差异：
 
-**不支持**：HTTP/SSE 传输、远程连接或多租户环境。
+```text
+validator_build / checker_build
+  替换为 interactor_build
+```
 
-### Claude Code Plugin
+关键门禁：
 
-推荐的插件文件：
+- `brute` 必须在 `sol` 之后构建。
+- 非交互题必须通过 `validator_build`，且 `accuracy >= 0.9`。
+- 交互题必须先完成可用的 `interactor_build`。
+- `stress_test_run` 必须完整跑完所有轮次。
+- `problem_generate_tests` 前必须通过 `problem_validate`。
+- `problem_pack_polygon` 前必须通过 `problem_verify_tests`。
+- 生成最终测试后会自动清除旧的 `tests_verified` 状态，必须重新验证。
 
-- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
-- [`settings.json`](settings.json)
-- [`agents/autocode-workflow.md`](agents/autocode-workflow.md)
-- [`hooks/hooks.json`](hooks/hooks.json)
-- [`scripts/workflow_guard.py`](scripts/workflow_guard.py)
+## 题目目录和 manifest
 
+`problem_create` 会初始化标准题目目录：
 
-### 其他 MCP 客户端
+```text
+<problem_dir>/
+├── autocode.json
+├── solutions/
+│   ├── sol.cpp
+│   └── brute.cpp
+├── files/
+│   ├── gen.cpp
+│   ├── val.cpp
+│   ├── checker.cpp
+│   ├── interactor.cpp
+│   └── testlib.h
+├── statements/
+│   ├── README.md
+│   └── tutorial.md
+└── tests/
+    ├── 01.in
+    ├── 01.ans / 01.out
+    └── .autocode_tests_manifest.json
+```
 
-同一个 MCP server 也可用于其他本地 MCP 客户端，但工作流强制约束的 agent 和 hooks 是 Claude Code plugin 能力。
+`autocode.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。示例：
+
+```json
+{
+  "schema_version": "1.0",
+  "problem_name": "Example Problem",
+  "interactive": false,
+  "time_limit_ms": 2000,
+  "memory_limit_mb": 256,
+  "statement_path": "statements/README.md",
+  "tutorial_path": "statements/tutorial.md",
+  "solutions": [
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
+    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"}
+  ],
+  "case_plan": [
+    {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},
+    {"name": "random-1", "type": "2", "seed": 2, "group": "coverage"},
+    {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit"},
+    {"name": "tle-1", "type": "4", "seed": 4, "group": "limit"}
+  ]
+}
+```
+
+可用 CLI 快速检查：
+
+```bash
+uv run autocode-verify examples/exact-sample
+```
+
+## 测试数据质量
+
+最终测试数据不是“生成了就算完成”。AutoCode 会要求 `problem_verify_tests` 通过，默认检查：
+
+- `file_count`：每个 `.in` 都有对应答案文件，编号连续。
+- `answer_consistency`：重新运行 `sol`，确认答案一致。
+- `validator`：用 `val` 检查所有输入合法性。
+- `no_empty`：没有空文件。
+- `limit_ratio`：最终数据中 `type=3/4` 至少占一半。
+- `limit_semantics`：`type=3` 和 `type=4` 不能高度重合。
+- `wrong_solution_kill`：配置错解时，错解必须至少被一个测试点杀掉。
+
+`problem_generate_tests` 支持：
+
+- `answer_ext`：答案后缀，如 `.ans` 或 `.out`。
+- `resume=true`：长任务中断后从 checkpoint 续跑。
+- `hard_timeout_seconds`：工具级硬超时。
+- `problem_cleanup_processes`：清理残留 generator PID 和状态。
+
+## 工具列表
+
+AutoCode 暴露 20 个 MCP 工具。一般用户不需要手动调用它们，`autocode-workflow` Agent 会按门禁顺序调用。
+
+| 分组 | 工具 |
+|------|------|
+| 文件 | `file_read`, `file_save` |
+| 解法 | `solution_build`, `solution_run`, `solution_analyze`, `solution_audit_std`, `solution_audit_brute` |
+| 校验器 | `validator_build`, `validator_select` |
+| 生成器 | `generator_build`, `generator_run` |
+| 检查器/交互器 | `checker_build`, `interactor_build` |
+| 对拍 | `stress_test_run` |
+| 题目管理 | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_pack_polygon` |
+
+所有工具返回统一结构：
+
+```json
+{
+  "success": true,
+  "data": {},
+  "error": null
+}
+```
+
+## 示例目录
+
+仓库包含三个用于验证 manifest 和文档结构的样例：
+
+- `examples/exact-sample`：标准精确输出题。
+- `examples/checker-sample`：特殊判题题。
+- `examples/interactive-sample`：交互题。
+
+这些样例主要用于展示 `autocode.json` 契约和 `autocode-verify` 检查，不是完整比赛题包。
+
+## 直接使用 MCP server
+
+Claude Code plugin 是推荐入口。如果你只想把 `autocode-mcp` 当作本地 MCP server 使用，可以用下面方式。
+
+### 本地开发
+
+```bash
+uv sync
+uv run autocode-mcp
+```
 
 ### Cursor
-
-添加到 Cursor 设置（Settings → MCP）：
 
 ```json
 {
   "mcp": {
     "servers": {
       "autocode": {
-        "command": "autocode-mcp"
+        "command": "uvx",
+        "args": ["autocode-mcp"]
       }
     }
   }
@@ -163,8 +263,6 @@ Claude 将使用 AutoCode 工具：
 ```
 
 ### OpenCode
-
-编辑 `~/.config/opencode/opencode.json`：
 
 ```json
 {
@@ -179,404 +277,7 @@ Claude 将使用 AutoCode 工具：
 }
 ```
 
-### 验证安装
-
-配置完成后，重启 MCP 客户端并检查工具是否可用。你应该能看到 20 个工具，包括 `solution_build`、`solution_audit_std`、`problem_verify_tests`、`problem_cleanup_processes` 等。
-
-## 工具参考
-
-AutoCode 提供 20 个原子工具，分为 8 组。所有工具返回统一格式：
-
-```json
-{
-  "success": true,
-  "error": null,
-  "data": { ... }
-}
-```
-
-### 文件操作
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `file_save` | 保存内容到文件 | `path`, `content` |
-| `file_read` | 读取文件内容 | `path` |
-
-### 解法工具
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `solution_build` | 编译解法代码 | `problem_dir`, `solution_type` ("sol"/"brute"), `code` |
-| `solution_run` | 执行已编译的解法 | `problem_dir`, `solution_type`, `input_data`, `timeout` |
-| `solution_analyze` | 分析解法复杂度与风险 | `problem_dir`, `solution_type`, `claimed_complexity` |
-| `solution_audit_std` | 审计标准解正确性与质量 | `problem_dir`, `source_path/code`, `constraints` |
-| `solution_audit_brute` | 审计暴力解可作为对拍基准 | `problem_dir`, `source_path/code`, `constraints` |
-
-### 校验器工具
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `validator_build` | 构建并测试校验器 | `problem_dir`, `code`, `test_cases` |
-| `validator_select` | 从候选中选择最佳校验器 | `candidates` |
-
-### 生成器工具
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `generator_build` | 编译生成器 | `problem_dir`, `code` |
-| `generator_run` | 生成测试输入 | `problem_dir`, `strategies`, `test_count`, `validator_path` |
-
-### 检查器工具
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `checker_build` | 构建输出检查器 | `problem_dir`, `code`, `test_scenarios` |
-
-### 交互器工具
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `interactor_build` | 构建交互题的交互器 | `problem_dir`, `code`, `reference_solution_path`, `mutant_solutions` |
-
-### 压力测试
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `stress_test_run` | 比较 sol 和 brute 输出 | `problem_dir`, `trials`, `n_max`, `timeout` |
-
-### 题目管理
-
-| 工具 | 描述 | 关键参数 |
-|------|------|----------|
-| `problem_create` | 初始化题目目录 | `problem_dir`, `problem_name` |
-| `problem_validate` | 验证题面样例与答案一致性 | `problem_dir`, `statement_path`, `sol_name` |
-| `problem_generate_tests` | 生成最终测试数据（最终数据集中 extreme/tle 至少占一半，候选不足时尽量满足） | `problem_dir`, `test_count`, `answer_ext`, `resume`, `hard_timeout_seconds` |
-| `problem_verify_tests` | 验证测试数据质量（含 extreme/tle 占比硬校验） | `problem_dir`, `tests_dir`, `verify_types` |
-| `problem_cleanup_processes` | 清理生成任务残留进程与状态 | `problem_dir`, `kill_all_generators` |
-| `problem_pack_polygon` | 打包为 Polygon 格式 | `problem_dir`, `time_limit`, `memory_limit` |
-
-## 工作流教程：A+B 问题
-
-本教程演示如何使用 AutoCode 工具创建一道简单的 A+B 问题。
-
-### 步骤 1：初始化题目
-
-```python
-problem_create(
-    problem_dir="problems/ab",
-    problem_name="A + B"
-)
-```
-
-### 步骤 2：实现解法
-
-**最优解（sol.cpp）：**
-```cpp
-#include <iostream>
-int main() {
-    int a, b;
-    std::cin >> a >> b;
-    std::cout << a + b << std::endl;
-    return 0;
-}
-```
-
-**暴力解（brute.cpp）：**
-```cpp
-#include <iostream>
-int main() {
-    int a, b;
-    std::cin >> a >> b;
-    // 对于 A+B 问题与最优解相同，但复杂问题可能更慢
-    std::cout << a + b << std::endl;
-    return 0;
-}
-```
-
-构建两个解法：
-```python
-solution_build(problem_dir="problems/ab", solution_type="sol", code="...")
-solution_build(problem_dir="problems/ab", solution_type="brute", code="...")
-```
-
-### 步骤 3：构建校验器
-
-```cpp
-#include "testlib.h"
-int main(int argc, char* argv[]) {
-    registerValidation(argc, argv);
-    int a = inf.readInt(-1000, 1000, "a");
-    inf.readSpace();
-    int b = inf.readInt(-1000, 1000, "b");
-    inf.readEoln();
-    inf.readEof();
-    return 0;
-}
-```
-
-构建并测试：
-```python
-validator_build(
-    problem_dir="problems/ab",
-    code="...",
-    test_cases=[
-        {"input": "1 2\n", "expected_valid": True},
-        {"input": "0 0\n", "expected_valid": True},
-        {"input": "-1000 1000\n", "expected_valid": True},
-        {"input": "1001 0\n", "expected_valid": False},  # 超出范围
-        {"input": "1 2 3\n", "expected_valid": False},   # 多余数字
-    ]
-)
-```
-
-### 步骤 4：构建生成器
-
-```cpp
-#include "testlib.h"
-#include <iostream>
-int main(int argc, char* argv[]) {
-    registerGen(argc, argv, 1);
-    int seed = atoi(argv[1]);
-    int type = atoi(argv[2]);
-    rnd.setSeed(seed);
-    
-    int a = rnd.next(-1000, 1000);
-    int b = rnd.next(-1000, 1000);
-    std::cout << a << " " << b << std::endl;
-    return 0;
-}
-```
-
-构建并运行：
-```python
-generator_build(problem_dir="problems/ab", code="...")
-
-generator_run(
-    problem_dir="problems/ab",
-    strategies=["random", "extreme"],
-    test_count=20,
-    validator_path="problems/ab/val.exe"
-)
-```
-
-### 步骤 5：压力测试
-
-```python
-stress_test_run(
-    problem_dir="problems/ab",
-    trials=1000,
-    n_max=100,
-    timeout=30
-)
-```
-
-预期输出：
-```
-All 1000 rounds passed
-```
-
-### 步骤 6：生成最终测试
-
-```python
-problem_generate_tests(
-    problem_dir="problems/ab",
-    test_count=50,
-    answer_ext=".out",      # 可选，默认 .ans
-    hard_timeout_seconds=600
-)
-```
-
-说明：最终写入的测试中，`extreme`（type=3）与 `tle`（type=4）合计不少于一半；若候选里极限类不足，则会在可用候选范围内尽量满足并返回对应统计字段。若长任务被中断，可使用 `resume=true` 从 checkpoint 续跑。
-
-### 步骤 7：打包为 Polygon 格式
-
-```python
-problem_pack_polygon(
-    problem_dir="problems/ab",
-    time_limit=1,
-    memory_limit=256
-)
-```
-
-## 架构
-
-### Validator-Generator-Checker 框架
-
-```
-┌─────────────────┐
-│   题面设计      │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐     ┌──────────────┐
-│  解法构建       │────►│  Validator   │ 验证输入约束
-│  (sol + brute)  │     └──────────────┘
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐     ┌──────────────┐
-│  Generator      │────►│  Stress Test │ 比较 sol 和 brute
-│  多策略生成     │     └──────────────┘
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Checker        │ 验证输出正确性
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Polygon 打包   │ 导出为平台格式
-└─────────────────┘
-```
-
-### 设计原则
-
-1. **纯工具模式，无 LLM** — Server 提供编译、执行和验证。所有代码生成由客户端 LLM 完成。
-
-2. **无状态设计** — 每次工具调用独立。状态通过 `problem_dir` 参数管理。
-
-3. **统一返回格式** — 所有工具返回 `{success, error, data}`，便于一致的错误处理。
-
-4. **安全执行** — 超时控制、内存限制（Linux 通过 prlimit）、临时目录隔离。
-
-### 安全边界
-
-⚠️ **重要提示：本工具仅适用于本地可信环境**
-
-#### 文件操作
-
-- **指定 `problem_dir` 参数时**：`file_read` 和 `file_save` 限制在指定目录内访问
-- **不指定 `problem_dir` 参数时**：这些工具可以读写**任意路径**的文件
-- **建议**：调用文件操作时始终指定 `problem_dir` 以限制访问范围
-
-#### 代码执行
-
-- 编译并执行 AI 生成的 C++ 代码，仅提供时间/内存限制
-- 无沙箱隔离（Linux 上仅通过 `prlimit` 限制内存）
-- **风险**：畸形或恶意代码可能影响系统
-
-#### 适用场景
-
-✅ **适用于**：
-- 本地开发机器
-- 竞赛编程出题
-- 可信环境下的 AI 辅助编程
-- 有定期备份的个人工作站
-
-❌ **不适用于**：
-- 多租户环境
-- 不可信代码执行
-- 生产级代码运行平台
-- 无隔离的共享服务器
-
-#### 安全加固建议
-
-如需更强的安全隔离，建议：
-- 在 Docker 容器中运行
-- 使用虚拟机
-- 在操作系统层面限制文件系统权限
-- 以非特权用户身份运行
-
-### 生成策略
-
-| 策略 | 类型码 | 用途 |
-|------|--------|------|
-| `tiny` | 1 | 小数据穷举测试（N ≤ 10） |
-| `random` | 2 | 约束范围内的随机数据 |
-| `extreme` | 3 | 边界情况：溢出、精度、hash 碰撞 |
-| `tle` | 4 | 诱导 TLE 的性能测试数据 |
-
-`problem_generate_tests` 的默认采样策略会优先保证最终测试集中 `extreme` + `tle` 至少占 50%，剩余名额再按配置平衡分配（或按确定性顺序填充）。
-
-### 文件结构
-
-```
-problems/your-problem/
-├── files/
-│   ├── testlib.h       # 竞赛编程标准库
-│   ├── gen.cpp         # 测试生成器
-│   ├── val.cpp         # 输入校验器
-│   ├── checker.cpp     # 输出检查器（可选）
-│   └── interactor.cpp  # 交互器（交互题）
-├── solutions/
-│   ├── sol.cpp         # 最优解
-│   └── brute.cpp       # 暴力解（用于验证）
-├── statements/
-│   └── README.md       # 题目描述
-├── tests/
-│   ├── 01.in           # 测试输入
-│   ├── 01.ans/.out     # 期望输出（由 answer_ext 控制）
-│   └── ...
-└── problem.xml         # Polygon 配置
-```
-
-## 开发
-
-### 环境搭建
-
-```bash
-git clone https://github.com/SummerOneTwo/AutoCode.git
-cd AutoCode
-uv sync
-```
-
-### 运行测试
-
-```bash
-# 运行所有测试
-uv run pytest tests/ -v
-
-# 运行并生成覆盖率报告
-uv run pytest tests/ --cov=src/autocode_mcp --cov-report=html
-
-# 运行特定测试文件
-uv run pytest tests/test_compiler.py -v
-```
-
-### 代码质量
-
-```bash
-# Lint 检查
-uv run ruff check .
-
-# 类型检查
-uv run mypy src/
-
-# 格式化
-uv run ruff format .
-```
-
-### 项目结构
-
-```
-autocode-mcp/
-├── src/autocode_mcp/
-│   ├── tools/           # MCP 工具实现
-│   │   ├── base.py      # 工具基类
-│   │   ├── solution.py  # 解法工具
-│   │   ├── validator.py # 校验器工具
-│   │   ├── generator.py # 生成器工具
-│   │   ├── checker.py   # 检查器工具
-│   │   ├── stress_test.py
-│   │   └── ...
-│   ├── utils/
-│   │   ├── compiler.py  # C++ 编译工具
-│   │   └── platform.py  # 平台相关辅助函数
-│   ├── prompts/         # 工作流提示词模板
-│   ├── resources/       # 模板资源
-│   └── server.py        # MCP server 入口
-├── tests/               # 测试套件
-└── pyproject.toml
-```
-
-### 添加新工具
-
-1. 在 `src/autocode_mcp/tools/` 创建新文件
-2. 继承 `Tool` 基类
-3. 实现 `name`、`description`、`input_schema` 和 `execute()`
-4. 在 `server.py` 中注册
-5. 在 `tests/` 中添加测试
+当前仅支持本地 stdio 传输，不支持 HTTP/SSE、远程连接。
 
 ## 贡献
 
@@ -594,7 +295,6 @@ MIT License - 详见 [LICENSE](LICENSE)。
 
 - 基于论文 ["AutoCode: LLMs as Problem Setters for Competitive Programming"](https://arxiv.org/abs/2510.12803)
 - 使用 [testlib.h](https://github.com/MikeMirzayanov/testlib) 竞赛编程工具库
-- 基于 [Model Context Protocol](https://modelcontextprotocol.io/) 构建
 
 ## 链接
 

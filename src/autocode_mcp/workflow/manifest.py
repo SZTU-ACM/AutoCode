@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .models import AutoCodeManifest
+from .models import AutoCodeManifest, CasePlanItem, SolutionEntry
 
 MANIFEST_NAME = "autocode.json"
 
@@ -17,14 +17,38 @@ def default_manifest(problem_name: str, interactive: bool = False) -> AutoCodeMa
         problem_name=problem_name,
         interactive=interactive,
         solutions=[
-            {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
-            {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"},
+            SolutionEntry(name="sol", role="main", language="cpp", path="solutions/sol.cpp"),
+            SolutionEntry(name="brute", role="brute", language="cpp", path="solutions/brute.cpp"),
         ],
         case_plan=[
-            {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity", "purpose": "basic correctness"},
-            {"name": "random-1", "type": "2", "seed": 2, "group": "coverage", "purpose": "random coverage"},
-            {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit", "purpose": "edge constraints"},
-            {"name": "tle-1", "type": "4", "seed": 4, "group": "limit", "purpose": "performance pressure"},
+            CasePlanItem(
+                name="tiny-1",
+                type="1",
+                seed=1,
+                group="sanity",
+                purpose="basic correctness",
+            ),
+            CasePlanItem(
+                name="random-1",
+                type="2",
+                seed=2,
+                group="coverage",
+                purpose="random coverage",
+            ),
+            CasePlanItem(
+                name="extreme-1",
+                type="3",
+                seed=3,
+                group="limit",
+                purpose="edge constraints",
+            ),
+            CasePlanItem(
+                name="tle-1",
+                type="4",
+                seed=4,
+                group="limit",
+                purpose="performance pressure",
+            ),
         ],
     )
 

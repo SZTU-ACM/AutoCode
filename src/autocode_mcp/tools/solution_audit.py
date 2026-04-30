@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from .base import Tool, ToolResult
 from .complexity import ComplexityLevel, analyze_loop_complexity
+from .mixins import resolve_source
 
 
 class SolutionAuditStdTool(Tool):
@@ -23,18 +24,30 @@ class SolutionAuditStdTool(Tool):
             "type": "object",
             "properties": {
                 "code": {"type": "string"},
+                "source_path": {"type": "string"},
+                "problem_dir": {"type": "string"},
                 "constraints": {"type": "object"},
                 "claimed_complexity": {"type": "string"},
             },
-            "required": ["code"],
+            "anyOf": [
+                {"required": ["code"]},
+                {"required": ["source_path"]},
+            ],
         }
 
     async def execute(
         self,
-        code: str,
+        code: str | None = None,
+        source_path: str | None = None,
+        problem_dir: str = ".",
         constraints: dict | None = None,
         claimed_complexity: str | None = None,
     ) -> ToolResult:
+        resolved, err = resolve_source(problem_dir, code, source_path)
+        if err is not None:
+            return err
+        assert resolved is not None
+        code = resolved.code
         estimated = analyze_loop_complexity(code)
         findings: list[dict] = []
         passed = True
@@ -84,12 +97,30 @@ class SolutionAuditBruteTool(Tool):
             "type": "object",
             "properties": {
                 "code": {"type": "string"},
+                "source_path": {"type": "string"},
+                "problem_dir": {"type": "string"},
                 "std_complexity": {"type": "string"},
+                "constraints": {"type": "object"},
             },
-            "required": ["code"],
+            "anyOf": [
+                {"required": ["code"]},
+                {"required": ["source_path"]},
+            ],
         }
 
-    async def execute(self, code: str, std_complexity: str | None = None) -> ToolResult:
+    async def execute(
+        self,
+        code: str | None = None,
+        source_path: str | None = None,
+        problem_dir: str = ".",
+        std_complexity: str | None = None,
+        constraints: dict | None = None,
+    ) -> ToolResult:
+        resolved, err = resolve_source(problem_dir, code, source_path)
+        if err is not None:
+            return err
+        assert resolved is not None
+        code = resolved.code
         brute_complexity = analyze_loop_complexity(code)
         findings: list[dict] = []
         if std_complexity and brute_complexity == std_complexity:
@@ -110,6 +141,7 @@ class SolutionAuditBruteTool(Tool):
             passed=True,
             brute_complexity=brute_complexity,
             findings=findings,
+            constraints=constraints or {},
             recommended_stress_params={
                 "trials": recommended_trials,
                 "n_max": recommended_n_max,

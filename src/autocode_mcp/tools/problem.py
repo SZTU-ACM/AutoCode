@@ -1039,7 +1039,40 @@ class ProblemGenerateTestsTool(Tool):
                 ]
             )
 
-        return configs
+        return self._sanitize_default_configs(configs, n_limit=n_limit, t_limit=t_limit)
+
+    def _sanitize_default_configs(
+        self,
+        configs: list[tuple[str, str, str, str, str, str, list[str]]],
+        *,
+        n_limit: int,
+        t_limit: int,
+    ) -> list[tuple[str, str, str, str, str, str, list[str]]]:
+        """Clamp generated defaults so smart mode never emits invalid generator ranges."""
+        safe_configs: list[tuple[str, str, str, str, str, str, list[str]]] = []
+        for seed_offset, type_param, n_min, n_max, t_min, t_max, extra_args in configs:
+            raw_n_min = int(n_min)
+            raw_n_max = int(n_max)
+            raw_t_min = int(t_min)
+            raw_t_max = int(t_max)
+
+            safe_n_max = min(max(raw_n_max, 1), max(n_limit, 1))
+            safe_n_min = min(max(raw_n_min, 1), safe_n_max)
+            safe_t_max = min(max(raw_t_max, 1), max(t_limit, 1))
+            safe_t_min = min(max(raw_t_min, 1), safe_t_max)
+
+            safe_configs.append(
+                (
+                    seed_offset,
+                    type_param,
+                    str(safe_n_min),
+                    str(safe_n_max),
+                    str(safe_t_min),
+                    str(safe_t_max),
+                    extra_args,
+                )
+            )
+        return safe_configs
 
 
 class ProblemCleanupProcessesTool(Tool):

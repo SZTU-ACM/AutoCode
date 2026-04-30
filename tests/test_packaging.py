@@ -1,5 +1,6 @@
 """测试打包配置、模板访问和基础功能。"""
 
+import json
 import os
 
 import pytest
@@ -165,6 +166,49 @@ def test_all_prompts_exist():
         content = get_prompt(name)
         assert content, f"Prompt '{name}' is empty"
         assert len(content) > 100, f"Prompt '{name}' seems too short"
+
+
+def test_autocode_verify_reports_missing_manifest(monkeypatch, capsys, tmp_path):
+    """CLI 在 manifest 缺失时输出稳定 JSON。"""
+    from autocode_mcp.cli.verify import main
+
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert "not found" in parsed["error"]
+
+
+def test_autocode_verify_reports_invalid_manifest(monkeypatch, capsys, tmp_path):
+    """CLI 在 manifest 损坏时不应抛 traceback。"""
+    from autocode_mcp.cli.verify import main
+
+    (tmp_path / "autocode.json").write_text("{invalid", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert "invalid autocode.json" in parsed["error"]
+
+
+def test_autocode_verify_accepts_valid_manifest(monkeypatch, capsys, tmp_path):
+    """CLI 正常路径校验 statement/tutorial 路径。"""
+    from autocode_mcp.cli.verify import main
+    from autocode_mcp.workflow import default_manifest, save_manifest
+
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "README.md").write_text("# Statement\n", encoding="utf-8")
+    (statements_dir / "tutorial.md").write_text("# Tutorial\n", encoding="utf-8")
+    save_manifest(str(tmp_path), default_manifest("CLI Test"))
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["missing_paths"] == []
 
 
 # ============== MCP 类型测试 ==============
@@ -392,6 +436,33 @@ async def test_solution_build_neither_code_nor_source_path():
         assert result.isError is True
         error = result.structuredContent.get("error", "").lower()
         assert "either" in error or "must be provided" in error
+
+
+@pytest.mark.asyncio
+async def test_solution_audit_accepts_source_path():
+    """solution_audit_* 应与文档一致支持 source_path。"""
+    from autocode_mcp.server import call_tool, register_all_tools
+
+    register_all_tools()
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_file = os.path.join(tmpdir, "sol.cpp")
+        with open(source_file, "w", encoding="utf-8") as f:
+            f.write("int main() { for (int i = 0; i < 10; ++i) {} return 0; }")
+
+        std_result = await call_tool(
+            "solution_audit_std",
+            {"problem_dir": tmpdir, "source_path": source_file, "constraints": {"n_max": 100}},
+        )
+        brute_result = await call_tool(
+            "solution_audit_brute",
+            {"problem_dir": tmpdir, "source_path": source_file, "constraints": {"n_max": 100}},
+        )
+
+        assert std_result.isError is False
+        assert brute_result.isError is False
 
 
 # ============== stress_test 错误诊断测试 ==============

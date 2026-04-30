@@ -1,6 +1,6 @@
 ---
 name: testdata-quality
-description: Verify final tests with hard quality gates: integrity, consistency, validator, limit semantics, and wrong-solution kill.
+description: "Verify final tests with hard quality gates: integrity, consistency, validator, limit semantics, and wrong-solution kill."
 disable-model-invocation: false
 ---
 

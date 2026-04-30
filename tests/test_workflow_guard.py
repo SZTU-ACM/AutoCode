@@ -74,7 +74,7 @@ def test_post_tool_marks_stress_passed(tmp_path):
     assert state["stress_passed"] is True
 
 
-def test_pre_tool_allows_generator_when_validator_accuracy_absent(tmp_path, capsys):
+def test_pre_tool_denies_generator_when_validator_accuracy_absent(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"
     (problem_dir / "files").mkdir(parents=True)
@@ -99,10 +99,11 @@ def test_pre_tool_allows_generator_when_validator_accuracy_absent(tmp_path, caps
     captured = capsys.readouterr().out
 
     assert exit_code == 0
-    assert captured == ""
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_pre_tool_allows_stress_when_validator_accuracy_absent(tmp_path, capsys):
+def test_pre_tool_denies_stress_when_validator_accuracy_absent(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"
     (problem_dir / "files").mkdir(parents=True)
@@ -128,7 +129,38 @@ def test_pre_tool_allows_stress_when_validator_accuracy_absent(tmp_path, capsys)
     captured = capsys.readouterr().out
 
     assert exit_code == 0
-    assert captured == ""
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    (problem_dir / "autocode.json").write_text('{"interactive": true}', encoding="utf-8")
+    state = {
+        "problem_dir": str(problem_dir),
+        "created": True,
+        "interactive": True,
+        "sol_built": True,
+        "brute_built": True,
+        "interactor_ready": False,
+    }
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_pre_tool_denies_pack_before_tests_verified(tmp_path, capsys):
@@ -190,6 +222,30 @@ def test_post_tool_marks_tests_verified(tmp_path):
 
     assert exit_code == 0
     assert state["tests_verified"] is True
+
+
+def test_post_tool_does_not_mark_validator_ready_without_accuracy(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__validator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {},
+            }
+        },
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["validator_ready"] is False
 
 
 def test_post_tool_clears_tests_verified_after_regeneration(tmp_path):

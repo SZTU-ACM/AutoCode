@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ..workflow import load_manifest
 
 
@@ -23,7 +25,20 @@ def main() -> int:
     args = parser.parse_args()
 
     problem_dir = Path(args.problem_dir).resolve()
-    manifest_model = load_manifest(str(problem_dir))
+    try:
+        manifest_model = load_manifest(str(problem_dir))
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "problem_dir": str(problem_dir),
+                    "error": f"invalid autocode.json: {exc}",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
     if manifest_model is None:
         print(json.dumps({"success": False, "error": "autocode.json not found"}, ensure_ascii=False))
         return 1

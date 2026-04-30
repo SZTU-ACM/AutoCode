@@ -145,7 +145,11 @@ def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
     if not bool(state.get("validator_ready")):
         return False
     accuracy = state.get("validator_accuracy")
-    return accuracy is None or accuracy >= 0.9
+    return isinstance(accuracy, int | float) and accuracy >= 0.9
+
+
+def _interactor_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return not bool(state.get("interactive", False)) or bool(state.get("interactor_ready"))
 
 
 PRE_GATES: dict[str, list[Gate]] = {
@@ -176,6 +180,10 @@ PRE_GATES: dict[str, list[Gate]] = {
         (
             _validator_gate_ok,
             "必须先完成 validator_build，并且 validator accuracy >= 0.9。",
+        ),
+        (
+            _interactor_gate_ok,
+            "交互题必须先完成 interactor_build 并可用。",
         ),
     ],
     "stress_test_run": [
@@ -274,7 +282,7 @@ def post_tool(payload: dict[str, Any]) -> int:
     elif short_name == "validator_build":
         accuracy = data.get("accuracy")
         state["validator_accuracy"] = accuracy
-        state["validator_ready"] = accuracy is None or accuracy >= 0.9
+        state["validator_ready"] = isinstance(accuracy, int | float) and accuracy >= 0.9
     elif short_name == "validator_select":
         state["validator_selected"] = True
     elif short_name == "generator_build":
