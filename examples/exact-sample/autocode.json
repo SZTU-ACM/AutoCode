@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "problem_name": "Exact Sample",
+  "interactive": false,
+  "time_limit_ms": 1000,
+  "memory_limit_mb": 256,
+  "statement_path": "statements/README.md",
+  "tutorial_path": "statements/tutorial.md",
+  "constraints": {
+    "n_max": 100000
+  },
+  "solutions": [
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
+    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"}
+  ],
+  "case_plan": [
+    {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},
+    {"name": "random-1", "type": "2", "seed": 2, "group": "coverage"},
+    {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit"},
+    {"name": "tle-1", "type": "4", "seed": 4, "group": "limit"}
+  ]
+}

@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .models import AutoCodeManifest
+
+MANIFEST_NAME = "autocode.json"
+
+
+def manifest_path(problem_dir: str) -> Path:
+    return Path(problem_dir) / MANIFEST_NAME
+
+
+def default_manifest(problem_name: str, interactive: bool = False) -> AutoCodeManifest:
+    return AutoCodeManifest(
+        problem_name=problem_name,
+        interactive=interactive,
+        solutions=[
+            {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
+            {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"},
+        ],
+        case_plan=[
+            {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity", "purpose": "basic correctness"},
+            {"name": "random-1", "type": "2", "seed": 2, "group": "coverage", "purpose": "random coverage"},
+            {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit", "purpose": "edge constraints"},
+            {"name": "tle-1", "type": "4", "seed": 4, "group": "limit", "purpose": "performance pressure"},
+        ],
+    )
+
+
+def load_manifest(problem_dir: str) -> AutoCodeManifest | None:
+    path = manifest_path(problem_dir)
+    if not path.exists():
+        return None
+    content = path.read_text(encoding="utf-8")
+    return AutoCodeManifest.model_validate_json(content)
+
+
+def save_manifest(problem_dir: str, manifest: AutoCodeManifest) -> Path:
+    path = manifest_path(problem_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path

@@ -57,6 +57,8 @@ AutoCode/
 | solution_build | 构建解法 |
 | solution_run | 执行解法 |
 | solution_analyze | 分析解法复杂度 |
+| solution_audit_std | 审计标准解实现质量 |
+| solution_audit_brute | 审计暴力解实现质量 |
 | validator_build | 构建校验器 |
 | validator_select | 选择最佳校验器 |
 | generator_build | 构建生成器 |
@@ -66,6 +68,7 @@ AutoCode/
 | stress_test_run | 压力测试 |
 | problem_create | 初始化题目 |
 | problem_generate_tests | 生成测试数据 |
+| problem_cleanup_processes | 清理生成残留进程 |
 | problem_verify_tests | 验证测试数据质量 |
 | problem_validate | 验证题面样例 |
 | problem_pack_polygon | 打包为 Polygon 格式 |

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 STATE_DIR_NAME = ".autocode-workflow"
 STATE_FILE_NAME = "state.json"
+MANIFEST_FILE_NAME = "autocode.json"
 
 
 def load_payload() -> dict[str, Any]:
@@ -34,51 +36,61 @@ def state_file(problem_dir: str) -> Path:
     return Path(problem_dir) / STATE_DIR_NAME / STATE_FILE_NAME
 
 
+def manifest_file(problem_dir: str) -> Path:
+    return Path(problem_dir) / MANIFEST_FILE_NAME
+
+
+def load_manifest(problem_dir: str) -> dict[str, Any]:
+    path = manifest_file(problem_dir)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def infer_state(problem_dir: str) -> dict[str, Any]:
     root = Path(problem_dir)
-    solutions_dir = root / "solutions"
+    manifest = load_manifest(problem_dir)
+    is_interactive = bool(manifest.get("interactive", False))
     return {
         "problem_dir": str(root),
         "created": root.exists() and (root / "files").exists() and (root / "solutions").exists(),
-        "sol_built": _has_solution(solutions_dir, "sol"),
-        "brute_built": _has_solution(solutions_dir, "brute"),
-        "validator_ready": (root / "files" / "val.cpp").exists() or any(root.glob("files/val.*")),
+        "interactive": is_interactive,
+        "sol_built": False,
+        "brute_built": False,
+        "validator_ready": False,
         "validator_accuracy": None,
-        "generator_built": (root / "files" / "gen.cpp").exists() or any(root.glob("files/gen.*")),
+        "generator_built": False,
         "stress_passed": False,
         "stress_completed_rounds": 0,
         "stress_total_rounds": 0,
-        "checker_ready": (root / "files" / "checker.cpp").exists() or any(root.glob("files/checker.*")),
+        "checker_ready": False,
         "checker_accuracy": None,
+        "interactor_ready": False,
         "statement_validated": False,
         "sample_files_validated": False,
         "validation_passed": False,
-        "tests_generated": any((root / "tests").glob("*.in")) if (root / "tests").exists() else False,
-        "generated_test_count": len(list((root / "tests").glob("*.in"))) if (root / "tests").exists() else 0,
+        "tests_generated": False,
+        "generated_test_count": 0,
         "tests_verified": False,
         "packaged": (root / "problem.xml").exists(),
     }
 
 
-def _has_solution(solutions_dir: Path, prefix: str) -> bool:
-    """检查 solutions/ 下是否有指定前缀的解法文件（支持自定义命名）。"""
-    if not solutions_dir.exists():
-        return False
-    # 精确匹配（如 sol.cpp, brute.cpp）
-    if (solutions_dir / f"{prefix}.cpp").exists():
-        return True
-    # 前缀匹配（如 brute_force.cpp）
-    for f in solutions_dir.iterdir():
-        if f.is_file() and f.stem.startswith(prefix) and f.suffix == ".cpp":
-            return True
-    return False
-
-
 def load_state(problem_dir: str) -> dict[str, Any]:
     path = state_file(problem_dir)
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return infer_state(problem_dir)
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = infer_state(problem_dir)
+    else:
+        loaded = infer_state(problem_dir)
+    manifest = load_manifest(problem_dir)
+    loaded["interactive"] = bool(manifest.get("interactive", loaded.get("interactive", False)))
+    return loaded
 
 
 def save_state(problem_dir: str, state: dict[str, Any]) -> None:
@@ -116,80 +128,111 @@ def deny(reason: str) -> None:
     print(json.dumps(output, ensure_ascii=False))
 
 
+Gate = tuple[Callable[[dict[str, Any], dict[str, Any]], bool], str]
+
+
+def _is_non_interactive(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return not bool(state.get("interactive", False))
+
+
+def _is_interactive(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return bool(state.get("interactive", False))
+
+
+def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    if bool(state.get("interactive", False)):
+        return True
+    if not bool(state.get("validator_ready")):
+        return False
+    accuracy = state.get("validator_accuracy")
+    return accuracy is None or accuracy >= 0.9
+
+
+PRE_GATES: dict[str, list[Gate]] = {
+    "solution_build": [
+        (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。"),
+        (
+            lambda s, i: i.get("solution_type") != "brute" or bool(s.get("sol_built")),
+            "必须先构建标准解 sol，再构建 brute。",
+        ),
+    ],
+    "solution_analyze": [
+        (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol，再进行复杂度分析。"),
+    ],
+    "validator_select": [
+        (lambda s, i: bool(s.get("validator_ready")), "必须先完成 validator_build 才能选择校验器版本。"),
+    ],
+    "validator_build": [
+        (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。"),
+        (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。"),
+        (_is_non_interactive, "交互题不应构建 validator，应改用 interactor_build。"),
+        (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute，再构建 validator。"),
+    ],
+    "interactor_build": [
+        (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。"),
+        (_is_interactive, "只有交互题可运行 interactor_build。请在 problem_create 设 interactive=true。"),
+    ],
+    "generator_build": [
+        (
+            _validator_gate_ok,
+            "必须先完成 validator_build，并且 validator accuracy >= 0.9。",
+        ),
+    ],
+    "stress_test_run": [
+        (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。"),
+        (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute。"),
+        (
+            _validator_gate_ok,
+            "必须先完成 validator_build(accuracy >= 0.9)，再进行 stress_test_run。",
+        ),
+        (lambda s, i: bool(s.get("generator_built")), "必须先完成 generator_build，再进行 stress_test_run。"),
+    ],
+    "checker_build": [
+        (_is_non_interactive, "交互题不应构建 checker，请使用 interactor_build。"),
+        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run（completed_rounds == total_rounds）。"),
+    ],
+    "problem_validate": [
+        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run，再进行题面与样例验证。"),
+    ],
+    "problem_generate_tests": [
+        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run。"),
+        (lambda s, i: bool(s.get("validation_passed")), "必须先通过 problem_validate。"),
+        (
+            lambda s, i: not bool(s.get("interactive")) or bool(s.get("interactor_ready")),
+            "交互题必须先完成 interactor_build 并可用。",
+        ),
+    ],
+    "problem_verify_tests": [
+        (
+            lambda s, i: bool(s.get("tests_generated")) and int(s.get("generated_test_count", 0)) > 0,
+            "必须先运行 problem_generate_tests 生成最终测试数据。",
+        ),
+    ],
+    "problem_pack_polygon": [
+        (
+            lambda s, i: bool(s.get("tests_generated")) and int(s.get("generated_test_count", 0)) > 0,
+            "必须先生成最终测试数据。",
+        ),
+        (lambda s, i: bool(s.get("tests_verified")), "必须先通过 problem_verify_tests(passed=true)，再进行打包。"),
+    ],
+}
+
+
 def pre_tool(payload: dict[str, Any]) -> int:
     short_name = tool_short_name(payload.get("tool_name", ""))
-    problem_dir = get_problem_dir(payload)
-
     if short_name == "problem_create":
         return 0
 
+    problem_dir = get_problem_dir(payload)
     if not problem_dir:
         return 0
 
     state = load_state(problem_dir)
-    reasons = {
-        "solution_build_brute": "必须先构建标准解 sol，再构建 brute。",
-        "solution_build": "必须先运行 problem_create 创建题目目录。",
-        "validator_build": "必须先完成 problem_create、solution_build(sol)、solution_build(brute)。",
-        "generator_build": "必须先完成 validator_build，并且 validator accuracy >= 0.9。",
-        "stress_test_run": "必须先完成 validator_build(accuracy >= 0.9) 和 generator_build，然后再进行 stress_test_run。",
-        "checker_build": "必须先通过 stress_test_run（completed_rounds == total_rounds），再构建 checker。",
-        "problem_validate": "必须先通过 stress_test_run（completed_rounds == total_rounds），再进行验证。",
-        "problem_generate_tests": "必须先通过 problem_validate（验证通过），才能生成最终测试数据。",
-        "problem_pack_polygon": "必须先生成最终测试数据并通过 problem_verify_tests(passed)，再进行打包。",
-    }
-
     tool_input = payload.get("tool_input", {})
-    if short_name == "solution_build":
-        solution_type = tool_input.get("solution_type")
-        if not state["created"]:
-            deny(reasons["solution_build"])
+    for predicate, reason in PRE_GATES.get(short_name, []):
+        if not predicate(state, tool_input):
+            deny(reason)
             return 0
-        if solution_type == "brute" and not state["sol_built"]:
-            deny(reasons["solution_build_brute"])
-        return 0
-
-    if short_name == "validator_build" and not (state["created"] and state["sol_built"] and state["brute_built"]):
-        deny(reasons["validator_build"])
-        return 0
-
-    if short_name == "generator_build" and not (
-        state["validator_ready"] and (state.get("validator_accuracy") is None or state.get("validator_accuracy", 0) >= 0.9)
-    ):
-        deny(reasons["generator_build"])
-        return 0
-
-    if short_name == "stress_test_run" and not (
-        state["sol_built"]
-        and state["brute_built"]
-        and state["validator_ready"]
-        and state.get("validator_accuracy", 0) >= 0.9
-        and state["generator_built"]
-    ):
-        deny(reasons["stress_test_run"])
-        return 0
-
-    if short_name == "checker_build" and not state["stress_passed"]:
-        deny(reasons["checker_build"])
-        return 0
-
-    if short_name == "problem_validate" and not state["stress_passed"]:
-        deny(reasons["problem_validate"])
-        return 0
-
-    if short_name == "problem_generate_tests" and not (
-        state["stress_passed"] and state.get("validation_passed", False)
-    ):
-        deny(reasons["problem_generate_tests"])
-        return 0
-
-    if short_name == "problem_pack_polygon" and not (
-        state["tests_generated"] and state.get("generated_test_count", 0) > 0
-        and state.get("tests_verified", False)
-    ):
-        deny(reasons["problem_pack_polygon"])
-        return 0
-
     return 0
 
 
@@ -200,40 +243,40 @@ def post_tool(payload: dict[str, Any]) -> int:
         return 0
 
     success, data = parse_tool_result(payload)
+    state = load_state(problem_dir)
 
-    # 特殊处理：problem_validate 失败时也需要更新状态
-    # 确保重新验证失败后清除旧的 validation_passed 状态
-    if short_name == "problem_validate" and not success:
-        state = load_state(problem_dir)
+    if short_name == "problem_validate":
         state["statement_validated"] = data.get("statement_samples", {}).get("validated", False)
         state["sample_files_validated"] = data.get("sample_files", {}).get("validated", False)
-        state["validation_passed"] = False
+        state["validation_passed"] = success
         save_state(problem_dir, state)
         return 0
 
-    if short_name == "problem_verify_tests" and not success:
-        state = load_state(problem_dir)
-        state["tests_verified"] = False
+    if short_name == "problem_verify_tests":
+        state["tests_verified"] = success and bool(data.get("passed", False))
         save_state(problem_dir, state)
         return 0
 
     if not success:
         return 0
 
-    state = load_state(problem_dir)
-
     if short_name == "problem_create":
         state["created"] = True
+        state["interactive"] = bool(payload.get("tool_input", {}).get("interactive", False))
     elif short_name == "solution_build":
         solution_type = payload.get("tool_input", {}).get("solution_type")
         if solution_type == "sol":
             state["sol_built"] = True
         elif solution_type == "brute":
             state["brute_built"] = True
+    elif short_name == "solution_analyze":
+        state["solution_analyzed"] = True
     elif short_name == "validator_build":
         accuracy = data.get("accuracy")
         state["validator_accuracy"] = accuracy
         state["validator_ready"] = accuracy is None or accuracy >= 0.9
+    elif short_name == "validator_select":
+        state["validator_selected"] = True
     elif short_name == "generator_build":
         state["generator_built"] = True
     elif short_name == "stress_test_run":
@@ -244,17 +287,15 @@ def post_tool(payload: dict[str, Any]) -> int:
         accuracy = data.get("accuracy")
         state["checker_accuracy"] = accuracy
         state["checker_ready"] = accuracy is None or accuracy >= 0.9
-    elif short_name == "problem_validate":
-        state["statement_validated"] = data.get("statement_samples", {}).get("validated", False)
-        state["sample_files_validated"] = data.get("sample_files", {}).get("validated", False)
-        state["validation_passed"] = success
+    elif short_name == "interactor_build":
+        pass_rate = data.get("pass_rate", 0)
+        fail_rate = data.get("fail_rate", 0)
+        state["interactor_ready"] = pass_rate == 1.0 and fail_rate >= 0.8
     elif short_name == "problem_generate_tests":
         generated_tests = data.get("generated_tests", [])
         state["tests_generated"] = bool(generated_tests)
         state["generated_test_count"] = len(generated_tests)
         state["tests_verified"] = False
-    elif short_name == "problem_verify_tests":
-        state["tests_verified"] = bool(data.get("passed", False))
     elif short_name == "problem_pack_polygon":
         state["packaged"] = True
 
@@ -266,14 +307,13 @@ def session_start() -> int:
     additional_context = (
         "AutoCode plugin active. Enforce this workflow with quality gates: "
         "problem_create -> solution_build(sol) -> solution_build(brute) -> "
-        "validator_build(accuracy >= 0.9) -> generator_build -> "
-        "stress_test_run(completed_rounds == total_rounds) -> "
-        "checker_build if needed (accuracy >= 0.9) -> "
+        "validator_build(accuracy >= 0.9, non-interactive only) -> interactor_build(interactive only) -> "
+        "generator_build -> stress_test_run(completed_rounds == total_rounds) -> "
+        "checker_build if needed (non-interactive) -> "
         "problem_validate(validation_passed) -> "
         "problem_generate_tests(generated_test_count > 0, and prefer >=50% type3/type4 in final tests when candidates are sufficient) -> "
         "problem_verify_tests(passed) -> problem_pack_polygon. "
         "When running long problem_generate_tests tasks, avoid sending new chat messages because that can interrupt MCP calls; if interrupted, resume with checkpoint state (resume=true). "
-        "Generator quality gate: ensure type=3 and type=4 branches are semantically different, and type=4 includes targeted worst-case patterns rather than only max parameters. "
         "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )
     print(

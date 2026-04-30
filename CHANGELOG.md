@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- 新增题目契约 `autocode.json`（manifest）与 `src/autocode_mcp/workflow/` 读写模型，`problem_create` 自动初始化 manifest 与 `tutorial.md` 草稿。
+- `workflow_guard.py` 重构为表驱动门禁，补充 `problem_verify_tests`、`interactor_build`、`solution_analyze`、`validator_select` 的流程约束，并识别交互题路径。
+- 新增审计工具：
+  - `solution_audit_std`
+  - `solution_audit_brute`
+- `solution_analyze` 增强输出：`claimed_complexity`、worst/average、`memory_estimate`、`risk_notes`、`recommended_stress_params`。
+- `stress_test_run` 支持 `stress_profiles` 多轮对拍配置并返回 profile 报告。
+- `problem_verify_tests` 支持 `wrong_solution_kill` 检查类型，验证错解是否被测试点杀掉。
+- 新增 CLI：`autocode-verify`，用于快速校验题目 manifest 基础完整性。
+- 新增验证技能与只读审计 Agent：
+  - skills: `idea-feasibility`、`solution-complexity-audit`、`stress-strategy`、`testdata-quality`、`statement-audit`
+  - agents: `autocode-idea-auditor`、`autocode-solution-auditor`、`autocode-package-auditor`
+- 新增 `examples/` 下三个金样例目录：`exact-sample`、`checker-sample`、`interactive-sample`。
+
 ## [0.9.0] - 2026-04-29
 
 ### Features

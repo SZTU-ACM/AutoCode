@@ -74,6 +74,63 @@ def test_post_tool_marks_stress_passed(tmp_path):
     assert state["stress_passed"] is True
 
 
+def test_pre_tool_allows_generator_when_validator_accuracy_absent(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    state = {
+        "problem_dir": str(problem_dir),
+        "created": True,
+        "interactive": False,
+        "sol_built": True,
+        "brute_built": True,
+        "validator_ready": True,
+        "validator_accuracy": None,
+    }
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert captured == ""
+
+
+def test_pre_tool_allows_stress_when_validator_accuracy_absent(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    state = {
+        "problem_dir": str(problem_dir),
+        "created": True,
+        "interactive": False,
+        "sol_built": True,
+        "brute_built": True,
+        "validator_ready": True,
+        "validator_accuracy": None,
+        "generator_built": True,
+    }
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__stress_test_run",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert captured == ""
+
+
 def test_pre_tool_denies_pack_before_tests_verified(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"

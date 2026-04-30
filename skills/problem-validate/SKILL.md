@@ -8,6 +8,14 @@ disable-model-invocation: false
 
 This skill guides the validation of problem statement samples and sample files to ensure correctness before generating final test data.
 
+Hard rule:
+- Validation failure is a release blocker. Do not proceed to final test generation or packaging until all sample validations pass.
+
+Output contract:
+- `decision`: `go` / `no_go`
+- `blocking_issues`: validation blockers that must be fixed
+- `next_actions`: exact re-validation steps after fixes
+
 ## Overview
 
 The `problem_validate` tool verifies that:

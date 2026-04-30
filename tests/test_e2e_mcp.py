@@ -126,7 +126,7 @@ async def test_mcp_list_tools(mcp_client: MCPClient):
 
     tools = await mcp_client.list_tools()
 
-    assert len(tools) == 18
+    assert len(tools) == 20
 
     tool_names = {t["name"] for t in tools}
     expected_tools = {
@@ -134,16 +134,24 @@ async def test_mcp_list_tools(mcp_client: MCPClient):
         "file_save",
         "solution_build",
         "solution_run",
+        "solution_analyze",
+        "solution_audit_std",
+        "solution_audit_brute",
         "validator_build",
+        "validator_select",
         "generator_build",
+        "generator_run",
         "checker_build",
+        "interactor_build",
         "stress_test_run",
         "problem_create",
         "problem_generate_tests",
         "problem_cleanup_processes",
+        "problem_verify_tests",
         "problem_validate",
+        "problem_pack_polygon",
     }
-    assert expected_tools.issubset(tool_names)
+    assert tool_names == expected_tools
 
 
 @pytest.mark.asyncio
@@ -274,10 +282,10 @@ async def test_packaged_console_script_list_tools(packaged_mcp_client: MCPClient
 
     tools = await packaged_mcp_client.list_tools()
 
-    assert len(tools) == 18
+    assert len(tools) == 20
     tool_names = {t["name"] for t in tools}
-    assert "solution_build" in tool_names
-    assert "validator_build" in tool_names
+    assert "solution_audit_std" in tool_names
+    assert "problem_cleanup_processes" in tool_names
 
 
 @pytest.mark.packaging

@@ -1,7 +1,7 @@
 """
 MCP Server 入口。
 
-提供 17 个原子工具，基于 AutoCode 论文框架。
+提供 20 个原子工具，基于 AutoCode 论文框架。
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from .tools.problem import (
     ProblemPackPolygonTool,
 )
 from .tools.solution import SolutionBuildTool, SolutionRunTool
+from .tools.solution_audit import SolutionAuditBruteTool, SolutionAuditStdTool
 from .tools.stress_test import StressTestRunTool
 from .tools.test_verify import ProblemVerifyTestsTool
 from .tools.validation import ProblemValidateTool
@@ -66,6 +67,8 @@ def register_all_tools() -> None:
     register_tool(SolutionBuildTool())
     register_tool(SolutionRunTool())
     register_tool(SolutionAnalyzeTool())
+    register_tool(SolutionAuditStdTool())
+    register_tool(SolutionAuditBruteTool())
 
     # Stress Test 工具组
     register_tool(StressTestRunTool())

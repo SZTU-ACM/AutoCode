@@ -114,6 +114,19 @@ class StressTestRunTool(Tool):
                         },
                     },
                 },
+                "stress_profiles": {
+                    "type": "array",
+                    "description": "多轮对拍配置，每个 profile 可覆盖 trials/types/generator_args",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "trials": {"type": "integer"},
+                            "types": {"type": "array", "items": {"type": "string", "enum": ["1", "2", "3", "4"]}},
+                            "generator_args": {"type": "object"},
+                        },
+                    },
+                },
             },
             "required": ["problem_dir"],
         }
@@ -128,6 +141,7 @@ class StressTestRunTool(Tool):
         brute_name: str | None = None,
         types: list[str] | None = None,
         generator_args: dict | None = None,
+        stress_profiles: list[dict] | None = None,
     ) -> ToolResult:
         """执行对拍测试。"""
         exe_ext = get_exe_extension()
@@ -159,8 +173,12 @@ class StressTestRunTool(Tool):
         if not os.path.exists(val_exe):
             val_exe = os.path.join(problem_dir, f"val{exe_ext}")
 
-        # 计算实际使用的 n_max
-        effective_n_max = generator_args.get("n_max", n_max) if generator_args else n_max
+        profiles = stress_profiles or [
+            {"name": "default", "trials": trials, "types": types, "generator_args": generator_args}
+        ]
+        total_rounds = sum(max(1, int(p.get("trials", trials))) for p in profiles)
+        first_profile_args = profiles[0].get("generator_args") or generator_args
+        effective_n_max = first_profile_args.get("n_max", n_max) if first_profile_args else n_max
 
         failed_round = None
         last_input = None
@@ -170,96 +188,120 @@ class StressTestRunTool(Tool):
 
         # 统计信息收集
         round_stats: list[dict] = []
+        profile_reports: list[dict] = []
 
         with tempfile.TemporaryDirectory(dir=problem_dir) as temp_dir:
             input_path = os.path.join(temp_dir, "input.txt")
 
-            for i in range(1, trials + 1):
-                # 1. 生成输入数据
-                gen_result = await self._generate_input(
-                    gen_exe, input_path, i, seed=i, timeout=timeout, n_max=n_max,
-                    generator_args=generator_args, types=types,
-                )
-                if not gen_result["success"]:
-                    error_detail = gen_result.get("error", "Unknown error")
-                    if "timed out" in error_detail:
-                        hint = "Generator may contain an infinite loop or be too slow. Try increasing the timeout parameter."
-                    elif "no output" in error_detail:
-                        hint = "Check that the generator follows the protocol: gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max> [extra_args...]"
-                    else:
-                        hint = "Generator crashed unexpectedly. Check stderr for details."
-                    return ToolResult.fail(
-                        f"Generator failed at round {i}: {error_detail}. {hint}",
-                        round=i,
-                        seed=gen_result.get("seed", i),
-                        stderr=gen_result.get("stderr", ""),
-                        stdout=gen_result.get("stdout", ""),
-                        cmd_args=gen_result.get("cmd_args", []),
-                        last_input=last_input,
-                        statistics=self._compute_summary(round_stats),
-                    )
+            global_round = 0
+            for profile in profiles:
+                profile_name = str(profile.get("name", f"profile-{len(profile_reports) + 1}"))
+                profile_trials = max(1, int(profile.get("trials", trials)))
+                profile_types = profile.get("types", types)
+                profile_generator_args = profile.get("generator_args", generator_args)
+                start_count = len(round_stats)
+                profile_failed_round = None
 
-                # 2. 验证输入（如果有 validator）
-                if os.path.exists(val_exe):
+                for _ in range(profile_trials):
+                    global_round += 1
+                    # 1. 生成输入数据
+                    gen_result = await self._generate_input(
+                        gen_exe, input_path, global_round, seed=global_round, timeout=timeout, n_max=n_max,
+                        generator_args=profile_generator_args, types=profile_types,
+                    )
+                    if not gen_result["success"]:
+                        error_detail = gen_result.get("error", "Unknown error")
+                        if "timed out" in error_detail:
+                            hint = "Generator may contain an infinite loop or be too slow. Try increasing the timeout parameter."
+                        elif "no output" in error_detail:
+                            hint = "Check that the generator follows the protocol: gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max> [extra_args...]"
+                        else:
+                            hint = "Generator crashed unexpectedly. Check stderr for details."
+                        return ToolResult.fail(
+                            f"Generator failed at round {global_round}: {error_detail}. {hint}",
+                            round=global_round,
+                            seed=gen_result.get("seed", global_round),
+                            stderr=gen_result.get("stderr", ""),
+                            stdout=gen_result.get("stdout", ""),
+                            cmd_args=gen_result.get("cmd_args", []),
+                            last_input=last_input,
+                            statistics=self._compute_summary(round_stats),
+                        )
+
+                    # 2. 验证输入（如果有 validator）
+                    if os.path.exists(val_exe):
+                        with open(input_path, encoding="utf-8") as f:
+                            input_data = f.read()
+                        val_result = await run_binary(val_exe, input_data, timeout=timeout)
+                        if val_result.return_code != 0:
+                            validator_failed = True
+                            last_input = input_data
+                            failed_round = global_round
+                            profile_failed_round = global_round
+                            break
+
+                    # 3. 运行 sol 和 brute，比较输出
                     with open(input_path, encoding="utf-8") as f:
                         input_data = f.read()
-                    val_result = await run_binary(val_exe, input_data, timeout=timeout)
-                    if val_result.return_code != 0:
-                        validator_failed = True
+                    last_input = input_data
+
+                    # 运行 sol
+                    sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
+                    if sol_result.timed_out or not sol_result.success:
+                        return ToolResult.fail(
+                            f"{effective_sol_name} failed at round {global_round}",
+                            round=global_round,
+                            input_data=input_data,
+                            stderr=sol_result.stderr,
+                            statistics=self._compute_summary(round_stats),
+                        )
+                    sol_output = sol_result.stdout
+
+                    # 运行 brute
+                    brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
+                    if brute_result.timed_out:
+                        return ToolResult.fail(
+                            f"{effective_brute_name} timed out at round {global_round} (N may be too large)",
+                            round=global_round,
+                            input_data=input_data,
+                            suggestion="Try reducing n_max parameter",
+                            statistics=self._compute_summary(round_stats),
+                        )
+                    if not brute_result.success:
+                        return ToolResult.fail(
+                            f"{effective_brute_name} failed at round {global_round}",
+                            round=global_round,
+                            input_data=input_data,
+                            stderr=brute_result.stderr,
+                            statistics=self._compute_summary(round_stats),
+                        )
+                    brute_output = brute_result.stdout
+
+                    # 收集统计信息
+                    round_stats.append({
+                        "round": global_round,
+                        "sol_time_ms": sol_result.time_ms,
+                        "brute_time_ms": brute_result.time_ms,
+                        "input_size": len(input_data),
+                        "n_value": self._extract_n_value(input_data),
+                    })
+
+                    # 5. 比较输出
+                    if sol_output.strip() != brute_output.strip():
                         last_input = input_data
-                        failed_round = i
+                        failed_round = global_round
+                        profile_failed_round = global_round
                         break
 
-                # 3. 运行 sol 和 brute，比较输出
-                with open(input_path, encoding="utf-8") as f:
-                    input_data = f.read()
-                last_input = input_data
-
-                # 运行 sol
-                sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
-                if sol_result.timed_out or not sol_result.success:
-                    return ToolResult.fail(
-                        f"{effective_sol_name} failed at round {i}",
-                        round=i,
-                        input_data=input_data,
-                        stderr=sol_result.stderr,
-                        statistics=self._compute_summary(round_stats),
-                    )
-                sol_output = sol_result.stdout
-
-                # 运行 brute
-                brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
-                if brute_result.timed_out:
-                    return ToolResult.fail(
-                        f"{effective_brute_name} timed out at round {i} (N may be too large)",
-                        round=i,
-                        input_data=input_data,
-                        suggestion="Try reducing n_max parameter",
-                        statistics=self._compute_summary(round_stats),
-                    )
-                if not brute_result.success:
-                    return ToolResult.fail(
-                        f"{effective_brute_name} failed at round {i}",
-                        round=i,
-                        input_data=input_data,
-                        stderr=brute_result.stderr,
-                        statistics=self._compute_summary(round_stats),
-                    )
-                brute_output = brute_result.stdout
-
-                # 收集统计信息
-                round_stats.append({
-                    "round": i,
-                    "sol_time_ms": sol_result.time_ms,
-                    "brute_time_ms": brute_result.time_ms,
-                    "input_size": len(input_data),
-                    "n_value": self._extract_n_value(input_data),
-                })
-
-                # 5. 比较输出
-                if sol_output.strip() != brute_output.strip():
-                    last_input = input_data
-                    failed_round = i
+                profile_reports.append(
+                    {
+                        "name": profile_name,
+                        "trials": profile_trials,
+                        "completed_rounds": len(round_stats) - start_count,
+                        "failed_round": profile_failed_round,
+                    }
+                )
+                if failed_round:
                     break
 
         return self._format_result(
@@ -268,9 +310,10 @@ class StressTestRunTool(Tool):
             last_input,
             sol_output,
             brute_output,
-            trials,
+            total_rounds,
             effective_n_max,
             round_stats,
+            profile_reports,
         )
 
     async def _generate_input(
@@ -429,6 +472,7 @@ class StressTestRunTool(Tool):
         total_rounds: int,
         effective_n_max: int = 100,
         round_stats: list[dict] | None = None,
+        stress_profiles: list[dict] | None = None,
     ) -> ToolResult:
         """格式化测试结果。"""
         statistics = self._compute_summary(round_stats or [])
@@ -445,6 +489,7 @@ class StressTestRunTool(Tool):
                 completed_rounds=failed_round - 1,
                 total_rounds=total_rounds,
                 statistics=statistics,
+                stress_profiles=stress_profiles or [],
             )
 
         return ToolResult.ok(
@@ -452,5 +497,6 @@ class StressTestRunTool(Tool):
             total_rounds=total_rounds,
             effective_n_max=effective_n_max,
             statistics=statistics,
+            stress_profiles=stress_profiles or [],
             message=f"All {total_rounds} rounds passed",
         )

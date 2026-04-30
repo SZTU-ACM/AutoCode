@@ -182,6 +182,56 @@ int main() {
 
 
 @pytest.mark.asyncio
+async def test_stress_test_profiles_execute_all_trials():
+    """stress_profiles 的每个 profile 都应按 trials 真正执行。"""
+    tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int a = rnd.next(1, 10);
+    int b = rnd.next(1, 10);
+    std::cout << a << " " << b << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            stress_profiles=[
+                {"name": "p1", "trials": 2, "types": ["1"]},
+                {"name": "p2", "trials": 3, "types": ["2"]},
+            ],
+        )
+
+        assert result.success
+        assert result.data["total_rounds"] == 5
+        assert result.data["completed_rounds"] == 5
+        assert len(result.data["stress_profiles"]) == 2
+        assert result.data["stress_profiles"][0]["completed_rounds"] == 2
+        assert result.data["stress_profiles"][1]["completed_rounds"] == 3
+
+
+@pytest.mark.asyncio
 async def test_generate_input_different_seeds():
     """验证不同 seed 生成不同的输入数据。"""
     import shutil

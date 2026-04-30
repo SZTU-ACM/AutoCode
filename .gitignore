@@ -50,6 +50,7 @@ dmypy.json
 .claude/
 .codex/
 .opencode/
+.cursor/
 
 # Project specific
 *.exe

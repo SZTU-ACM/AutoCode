@@ -16,6 +16,7 @@ from xml.sax.saxutils import escape
 
 from ..utils.compiler import RunResult, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
+from ..workflow import default_manifest, save_manifest
 from .base import Tool, ToolResult
 
 
@@ -84,6 +85,11 @@ class ProblemCreateTool(Tool):
                     "type": "string",
                     "description": "题目名称",
                 },
+                "interactive": {
+                    "type": "boolean",
+                    "description": "是否为交互题",
+                    "default": False,
+                },
             },
             "required": ["problem_dir", "problem_name"],
         }
@@ -92,6 +98,7 @@ class ProblemCreateTool(Tool):
         self,
         problem_dir: str,
         problem_name: str,
+        interactive: bool = False,
     ) -> ToolResult:
         """执行题目目录创建。"""
         # 创建目录结构
@@ -127,11 +134,32 @@ class ProblemCreateTool(Tool):
         readme_path = os.path.join(problem_dir, "statements", "README.md")
         if not os.path.exists(readme_path):
             with open(readme_path, "w", encoding="utf-8") as f:
-                f.write(f"# {problem_name}\n\n题目描述待补充...\n")
+                f.write(
+                    f"# {problem_name}\n\n"
+                    "## 题目描述\n\n请补充题目背景与目标。\n\n"
+                    "## 输入格式\n\n请补充输入格式。\n\n"
+                    "## 输出格式\n\n请补充输出格式。\n\n"
+                    "## 样例\n\n请补充样例输入输出。\n"
+                )
+
+        tutorial_path = os.path.join(problem_dir, "statements", "tutorial.md")
+        if not os.path.exists(tutorial_path):
+            with open(tutorial_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"# {problem_name} 题解\n\n"
+                    "## 思路概述\n\n请补充核心思路。\n\n"
+                    "## 正确性说明\n\n请补充关键证明。\n\n"
+                    "## 复杂度分析\n\n请补充时间与空间复杂度。\n"
+                )
+
+        manifest = default_manifest(problem_name=problem_name, interactive=interactive)
+        manifest_file = save_manifest(problem_dir, manifest)
 
         return ToolResult.ok(
             problem_dir=problem_dir,
             problem_name=problem_name,
+            interactive=interactive,
+            manifest_path=str(manifest_file),
             created_directories=created_dirs,
             message=f"Created problem directory: {problem_dir}",
         )

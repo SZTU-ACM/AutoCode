@@ -69,6 +69,7 @@ class ProblemVerifyTestsTool(Tool):
                             "no_empty",
                             "limit_ratio",
                             "limit_semantics",
+                            "wrong_solution_kill",
                         ],
                     },
                     "description": "要执行的验证类型，默认全部执行",
@@ -91,6 +92,11 @@ class ProblemVerifyTestsTool(Tool):
                     "description": "单次执行超时（秒）",
                     "default": 60,
                 },
+                "wrong_solution_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "需要验证必须被杀掉的错解名称列表（不含扩展名）",
+                },
             },
             "required": ["problem_dir"],
         }
@@ -104,6 +110,7 @@ class ProblemVerifyTestsTool(Tool):
         enable_limit_ratio: bool = True,
         answer_ext: str | None = None,
         timeout: int = 60,
+        wrong_solution_names: list[str] | None = None,
     ) -> ToolResult:
         """执行测试数据验证。"""
         effective_sol_name = sol_name or "sol"
@@ -178,6 +185,18 @@ class ProblemVerifyTestsTool(Tool):
         if "limit_semantics" in verify_types:
             result = self._check_limit_semantics(tests_dir)
             results["limit_semantics"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "wrong_solution_kill" in verify_types:
+            result = await self._check_wrong_solution_kill(
+                problem_dir=problem_dir,
+                tests_dir=tests_dir,
+                wrong_solution_names=wrong_solution_names or [],
+                answer_ext=resolved_answer_ext,
+                timeout=timeout,
+            )
+            results["wrong_solution_kill"] = result
             if not result["passed"]:
                 all_passed = False
 
@@ -523,3 +542,48 @@ class ProblemVerifyTestsTool(Tool):
         if ext == ".in":
             return None
         return ext
+
+    async def _check_wrong_solution_kill(
+        self,
+        problem_dir: str,
+        tests_dir: str,
+        wrong_solution_names: list[str],
+        answer_ext: str,
+        timeout: int,
+    ) -> dict:
+        if not wrong_solution_names:
+            return {"passed": True, "validated": False, "message": "No wrong solutions configured"}
+
+        exe_ext = get_exe_extension()
+        tests_path = Path(tests_dir)
+        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        details = []
+        all_killed = True
+
+        for wrong_name in wrong_solution_names:
+            binary_path = Path(problem_dir) / "solutions" / f"{wrong_name}{exe_ext}"
+            if not binary_path.exists():
+                details.append({"name": wrong_name, "killed": False, "reason": "binary not found"})
+                all_killed = False
+                continue
+            killed = False
+            for in_file in in_files:
+                ans_file = in_file.with_suffix(answer_ext)
+                if not ans_file.exists():
+                    continue
+                input_data = in_file.read_text(encoding="utf-8")
+                expected = ans_file.read_text(encoding="utf-8").strip()
+                run = await run_binary(str(binary_path), input_data, timeout=timeout)
+                if run.timed_out or not run.success or run.stdout.strip() != expected:
+                    killed = True
+                    break
+            details.append({"name": wrong_name, "killed": killed})
+            if not killed:
+                all_killed = False
+
+        return {
+            "passed": all_killed,
+            "validated": True,
+            "details": details,
+            "message": "All wrong solutions were killed" if all_killed else "Some wrong solutions survived all tests",
+        }

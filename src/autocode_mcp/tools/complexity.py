@@ -7,6 +7,7 @@ Complexity 分析工具 - 分析解法复杂度。
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .base import Tool, ToolResult
 
@@ -157,6 +158,31 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
     return complexity, patterns
 
 
+def extract_claimed_complexity(code: str) -> str | None:
+    match = re.search(r"O\([^)]*\)", code)
+    if not match:
+        return None
+    return match.group(0)
+
+
+def build_risk_notes(
+    estimated: str, constraints: dict[str, Any] | None, warnings: list[str]
+) -> list[str]:
+    notes = list(warnings)
+    if estimated in {ComplexityLevel.QUADRATIC, ComplexityLevel.CUBIC}:
+        notes.append("高复杂度实现对 n 上限敏感，建议强化 type=4(TLE) 对拍。")
+    if estimated in {ComplexityLevel.EXPONENTIAL, ComplexityLevel.FACTORIAL}:
+        notes.append("指数级/阶乘级复杂度通常不适合作为标准解，请核对题面约束。")
+    if constraints and constraints.get("n_max", 0) >= 10**6 and estimated not in {
+        ComplexityLevel.LINEAR,
+        ComplexityLevel.N_LOG_N,
+        ComplexityLevel.LOG_N,
+        ComplexityLevel.CONSTANT,
+    }:
+        notes.append("n_max 较大但复杂度偏高，存在明显超时风险。")
+    return notes
+
+
 def estimate_memory_usage(code: str) -> tuple[str, int]:
     """估算内存使用。
 
@@ -288,6 +314,7 @@ class SolutionAnalyzeTool(Tool):
         # 5. 生成推荐参数
         recommended_n_max = COMPLEXITY_TO_N_MAX.get(final_complexity, 10000)
         recommended_time_ms = COMPLEXITY_TO_TIME_LIMIT.get(final_complexity, 1000)
+        claimed_complexity = extract_claimed_complexity(code)
 
         # 如果有题目约束，验证是否合理
         warnings = []
@@ -305,17 +332,30 @@ class SolutionAnalyzeTool(Tool):
                         f"for {final_complexity} algorithm. Recommended: {recommended_time_ms}ms"
                     )
 
+        risk_notes = build_risk_notes(final_complexity, constraints, warnings)
+        suggested_test_configs = self._generate_test_configs(recommended_n_max, constraints)
+        stress_profiles = self._recommended_stress_profiles(
+            final_complexity=final_complexity,
+            recommended_n_max=recommended_n_max,
+            constraints=constraints,
+        )
+
         return ToolResult.ok(
+            claimed_complexity=claimed_complexity,
+            estimated_complexity=final_complexity,
+            worst_case_complexity=final_complexity,
+            average_case_complexity=final_complexity,
             time_complexity=final_complexity,
             space_complexity=space_complexity,
+            memory_estimate={"space_complexity": space_complexity, "estimated_memory_mb": memory_mb},
             estimated_memory_mb=memory_mb,
             detected_patterns=patterns,
             recommended_n_max=recommended_n_max,
             recommended_time_limit_ms=recommended_time_ms,
             warnings=warnings,
-            suggested_test_configs=self._generate_test_configs(
-                recommended_n_max, constraints
-            ),
+            risk_notes=risk_notes,
+            suggested_test_configs=suggested_test_configs,
+            recommended_stress_params=stress_profiles,
             message=f"Analyzed complexity: {final_complexity}",
         )
 
@@ -347,3 +387,33 @@ class SolutionAnalyzeTool(Tool):
         ]
 
         return configs
+
+    def _recommended_stress_profiles(
+        self,
+        final_complexity: str,
+        recommended_n_max: int,
+        constraints: dict | None,
+    ) -> list[dict]:
+        n_cap = constraints.get("n_max", recommended_n_max) if constraints else recommended_n_max
+        brute_n = min(max(20, n_cap // 50), 2000)
+        trials = 300 if final_complexity in {ComplexityLevel.QUADRATIC, ComplexityLevel.CUBIC} else 1000
+        return [
+            {
+                "name": "tiny_exhaustive",
+                "trials": min(200, trials),
+                "types": ["1"],
+                "generator_args": {"type": "1", "n_min": 1, "n_max": 8, "t_min": 1, "t_max": 1},
+            },
+            {
+                "name": "random_small",
+                "trials": trials,
+                "types": ["2"],
+                "generator_args": {"type": "2", "n_min": 1, "n_max": brute_n, "t_min": 1, "t_max": 1},
+            },
+            {
+                "name": "edge_small",
+                "trials": max(100, trials // 3),
+                "types": ["3", "4"],
+                "generator_args": {"type": "3", "n_min": max(1, brute_n // 2), "n_max": brute_n, "t_min": 1, "t_max": 1},
+            },
+        ]

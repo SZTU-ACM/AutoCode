@@ -8,6 +8,17 @@ disable-model-invocation: false
 
 Based on the paper "AutoCode: LLMs as Problem Setters for Competitive Programming", this workflow ensures rigorous problem creation with proper validation at each step.
 
+Output contract for workflow checkpoints:
+- `decision`: `go` / `no_go`
+- `blocking_issues`: unmet gates
+- `next_actions`: exact MCP calls to unblock
+
+Core gated sequence (authoritative with hooks):
+`problem_create` -> `solution_build(sol)` -> `solution_build(brute)` -> `validator_build` (non-interactive) / `interactor_build` (interactive) -> `generator_build` -> `stress_test_run` -> `problem_validate` -> `problem_generate_tests` -> `problem_verify_tests` -> `problem_pack_polygon`.
+
+Manifest requirement:
+- Each workspace should maintain `autocode.json` as human/CI readable contract.
+
 ## Workflow Overview
 
 ```
@@ -271,9 +282,13 @@ Generate 3-5 mutant solutions with common bugs:
 - Wrong algorithm
 - Missing edge cases
 
+Interactive gate notes:
+- Interactive problems should use `interactor_build` instead of `validator_build` / `checker_build`.
+- Continue with `generator_build` -> `stress_test_run` -> `problem_validate` -> `problem_generate_tests` -> `problem_verify_tests` -> `problem_pack_polygon`.
+
 ## Enforcement Rules
 
-### MANDATORY Sequence
+### MANDATORY Sequence (aligned with workflow_guard.py)
 
 | Step | Tool | Prerequisites | Must Verify Before Next |
 |------|------|---------------|-------------------------|
@@ -286,7 +301,8 @@ Generate 3-5 mutant solutions with common bugs:
 | 6 | `checker_build` (optional) | Step 5 | `accuracy >= 0.9` |
 | 7 | `problem_validate` | Step 5 or 6 | `success=true`, all samples passed |
 | 8 | `problem_generate_tests` | Step 7 | `generated_tests == test_count` and `type3+type4 >= ceil(test_count/2)` (if candidates sufficient) |
-| 9 | `problem_pack_polygon` | Step 8 | `success=true` |
+| 9 | `problem_verify_tests` | Step 8 | `passed=true` |
+| 10 | `problem_pack_polygon` | Step 9 | `success=true` |
 
 ### FORBIDDEN Actions
 
@@ -294,8 +310,9 @@ Generate 3-5 mutant solutions with common bugs:
 2. **NEVER** call `stress_test_run` before building BOTH sol AND brute
 3. **NEVER** call `problem_validate` before stress test passes
 4. **NEVER** call `problem_generate_tests` before validation passes
-5. **NEVER** skip stress test verification
-6. **NEVER** proceed if any step returns `success=false`
+5. **NEVER** call `problem_pack_polygon` before `problem_verify_tests` passes
+6. **NEVER** skip stress test verification
+7. **NEVER** proceed if any step returns `success=false`
 
 ## Error Recovery
 

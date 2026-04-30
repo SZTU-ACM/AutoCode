@@ -42,10 +42,15 @@ def test_all_tools_registered():
         GeneratorBuildTool,
         GeneratorRunTool,
         InteractorBuildTool,
+        ProblemCleanupProcessesTool,
         ProblemCreateTool,
         ProblemGenerateTestsTool,
         ProblemPackPolygonTool,
+        ProblemValidateTool,
+        ProblemVerifyTestsTool,
         SolutionAnalyzeTool,
+        SolutionAuditBruteTool,
+        SolutionAuditStdTool,
         SolutionBuildTool,
         SolutionRunTool,
         StressTestRunTool,
@@ -59,10 +64,15 @@ def test_all_tools_registered():
         SolutionBuildTool(),
         SolutionRunTool(),
         SolutionAnalyzeTool(),
+        SolutionAuditStdTool(),
+        SolutionAuditBruteTool(),
         StressTestRunTool(),
         ProblemCreateTool(),
         ProblemGenerateTestsTool(),
+        ProblemCleanupProcessesTool(),
+        ProblemVerifyTestsTool(),
         ProblemPackPolygonTool(),
+        ProblemValidateTool(),
         ValidatorBuildTool(),
         ValidatorSelectTool(),
         GeneratorBuildTool(),
@@ -70,6 +80,30 @@ def test_all_tools_registered():
         CheckerBuildTool(),
         InteractorBuildTool(),
     ]
+
+    expected_tool_names = {
+        "file_read",
+        "file_save",
+        "solution_build",
+        "solution_run",
+        "solution_analyze",
+        "solution_audit_std",
+        "solution_audit_brute",
+        "stress_test_run",
+        "problem_create",
+        "problem_generate_tests",
+        "problem_cleanup_processes",
+        "problem_verify_tests",
+        "problem_pack_polygon",
+        "problem_validate",
+        "validator_build",
+        "validator_select",
+        "generator_build",
+        "generator_run",
+        "checker_build",
+        "interactor_build",
+    }
+    assert {tool.name for tool in tools} == expected_tool_names
 
     for tool in tools:
         assert hasattr(tool, "name")
@@ -111,6 +145,8 @@ def test_all_template_files_exist():
         "generator_template.cpp",
         "checker_template.cpp",
         "interactor_template.cpp",
+        "autocode.json",
+        "tutorial_template.md",
     ]
 
     for template in expected_templates:
