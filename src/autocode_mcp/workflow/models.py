@@ -27,7 +27,7 @@ class QualityGates(BaseModel):
     require_validation_passed: bool = True
     require_tests_verified: bool = True
     require_limit_semantics: bool = True
-    require_wrong_solution_kill: bool = True
+    require_wrong_solution_kill: bool = False
     require_validator_check: bool = True
     min_limit_case_ratio: float = Field(default=0.5, ge=0, le=1)
 

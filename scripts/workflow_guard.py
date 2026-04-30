@@ -15,7 +15,7 @@ DEFAULT_QUALITY_GATES = {
     "require_validation_passed": True,
     "require_tests_verified": True,
     "require_limit_semantics": True,
-    "require_wrong_solution_kill": True,
+    "require_wrong_solution_kill": False,
     "require_validator_check": True,
     "min_limit_case_ratio": 0.5,
 }

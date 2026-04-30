@@ -156,6 +156,9 @@ def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsy
         "interactive": True,
         "sol_built": True,
         "brute_built": True,
+        "solution_analyzed": True,
+        "std_audited": True,
+        "brute_audited": True,
         "interactor_ready": False,
     }
     module.save_state(str(problem_dir), state)
@@ -171,10 +174,7 @@ def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsy
     assert exit_code == 0
     parsed = json.loads(captured)
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert (
-        "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
-        or "solution_analyze" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
-    )
+    assert "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_pre_tool_denies_pack_before_tests_verified(tmp_path, capsys):
@@ -430,7 +430,7 @@ def test_pre_tool_enforces_solution_audits_before_generator_build(tmp_path, caps
     captured = capsys.readouterr().out
     parsed = json.loads(captured)
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "solution_audit_std" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "solution_audit_brute" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_pre_tool_pack_respects_quality_gate_override(tmp_path, capsys):

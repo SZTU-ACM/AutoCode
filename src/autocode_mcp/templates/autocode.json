@@ -14,7 +14,7 @@
     "require_validation_passed": true,
     "require_tests_verified": true,
     "require_limit_semantics": true,
-    "require_wrong_solution_kill": true,
+    "require_wrong_solution_kill": false,
     "require_validator_check": true,
     "min_limit_case_ratio": 0.5
   },

@@ -245,6 +245,8 @@ class ProblemVerifyTestsTool(Tool):
         for verify_name, signal_name in signal_map.items():
             result = results.get(verify_name)
             executed = verify_name in verify_set and isinstance(result, dict)
+            if executed and bool(result.get("skipped", False)):
+                executed = False
             signals[signal_name] = {
                 "executed": executed,
                 "passed": bool(result.get("passed")) if executed else False,
