@@ -183,6 +183,19 @@ validator_build / checker_build
 uv run autocode-verify examples/exact-sample
 ```
 
+## 题面格式规范
+
+默认题面 `statements/README.md` 应遵循固定顺序：
+
+1. 题目
+2. 时间/空间限制
+3. 题目背景（可选）
+4. 题目描述
+5. 输入格式（必须包含所有变量范围与总规模约束）
+6. 输出格式
+7. 样例（多组样例按编号递增）
+8. 说明（样例解释统一放在此处；只解释有代表性的样例即可）
+
 ## 测试数据质量
 
 最终测试数据不是“生成了就算完成”。AutoCode 会要求 `problem_verify_tests` 通过，默认检查：

@@ -78,6 +78,14 @@ async def test_problem_create_readme():
         with open(readme_path, encoding="utf-8") as f:
             content = f.read()
             assert "README Test" in content
+            assert "## 时间限制与空间限制" in content
+            assert "## 题目背景（可选）" in content
+            assert "## 题目描述" in content
+            assert "## 输入格式" in content
+            assert "## 输出格式" in content
+            assert "### 样例输入 #1" in content
+            assert "### 样例输出 #1" in content
+            assert "## 说明" in content
 
 
 @pytest.mark.asyncio

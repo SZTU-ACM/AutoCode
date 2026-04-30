@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -586,6 +586,7 @@ def session_start() -> int:
         "problem_validate(validation_passed) -> "
         "problem_generate_tests(generated_test_count > 0, and prefer >=50% type3/type4 in final tests when candidates are sufficient) -> "
         "problem_verify_tests(passed) -> problem_pack_polygon. "
+        "Statement format must follow: title -> time/memory limits -> optional background -> problem description -> input format (all variable ranges included) -> output format -> numbered samples -> explanation; sample explanations belong in the explanation section. "
         "When running long problem_generate_tests tasks, avoid sending new chat messages because that can interrupt MCP calls; if interrupted, resume with checkpoint state (resume=true). "
         "If a hook blocks a step, complete the missing prerequisite instead of retrying blindly."
     )

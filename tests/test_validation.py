@@ -164,6 +164,42 @@ class TestExtractSamplesFromReadme:
         finally:
             os.unlink(temp_path)
 
+    def test_heading_style_samples(self):
+        """测试标题样式样例提取（### 样例输入 #k / ### 样例输出 #k）。"""
+        tool = ProblemValidateTool()
+        readme_content = """# 测试题目
+
+## 样例
+
+### 样例输入 #1
+
+```text
+2
+1 2
+```
+
+### 样例输出 #1
+
+```text
+3
+```
+
+## 说明
+
+这里只解释代表性样例。
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+            f.write(readme_content)
+            temp_path = f.name
+
+        try:
+            samples = tool._extract_samples_from_readme(temp_path)
+            assert len(samples) == 1
+            assert samples[0]["input"] == "2\n1 2"
+            assert samples[0]["expected_output"] == "3"
+        finally:
+            os.unlink(temp_path)
+
 
 class TestProblemValidateTool:
     """测试 ProblemValidateTool 工具属性。"""

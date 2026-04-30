@@ -62,6 +62,19 @@ Orchestration requirements:
 Enforce test-quality gates using `testdata-quality` and `problem-validate` skills.
 Do not restate tool reference details here; use skill contracts as the source of truth.
 
+## Statement Format Requirement
+
+When creating or revising `statements/README.md`, enforce this fixed order:
+
+1. title
+2. time/memory limits
+3. optional background
+4. problem description
+5. input format (must include all variable ranges and aggregate constraints)
+6. output format
+7. numbered samples (ascending)
+8. explanation section (sample explanations must be placed here)
+
 ## Long-Running Generation
 
 For long `problem_generate_tests` runs:

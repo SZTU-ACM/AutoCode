@@ -9,6 +9,17 @@ Detailed reference for the `problem_validate` skill.
 1. statement samples in `README.md`;
 2. sample files in `tests/` (for example `01.in` + `01.ans`).
 
+Recommended statement layout for `statements/README.md`:
+
+1. title
+2. time/memory limits
+3. optional background
+4. problem description
+5. input format (include all variable ranges and aggregate constraints)
+6. output format
+7. numbered samples (ascending)
+8. explanation (put sample explanations here, not next to sample blocks)
+
 ## Validation Types
 
 - `statement_samples`: validate embedded statement examples.

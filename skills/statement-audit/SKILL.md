@@ -10,8 +10,10 @@ Use `problem_validate` to check statement and sample files, ensuring the problem
 
 ## Checkpoints
 
+- Statement section order follows this sequence: title -> time/memory limits -> optional background -> problem description -> input format (with all variable constraints) -> output format -> samples (numbered ascending) -> explanation.
 - Input/output protocol is complete and unambiguous.
 - Sample input/output matches actual execution of `sol`.
+- All sample explanations appear only in the explanation section (not embedded under individual samples); only representative samples need explanation.
 - `tutorial.md` includes approach, correctness, and complexity (not placeholder text).
 - Special judging rules (checker/interactor) are explicitly documented in the statement.
 

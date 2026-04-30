@@ -103,6 +103,17 @@ Creates:
 - `statements/tutorial.md`
 - `tests/`
 
+Statement format requirement for `statements/README.md`:
+
+- title;
+- time/memory limits;
+- optional background;
+- problem description;
+- input format (must include all variable ranges and aggregate constraints);
+- output format;
+- samples (numbered in ascending order when multiple);
+- explanation (sample explanations must be placed here, not mixed into sample blocks; only representative samples need explanation).
+
 Do not infer that a problem is ready from file presence alone. Prefer structured tool results and workflow state.
 
 ### `solution_build`
