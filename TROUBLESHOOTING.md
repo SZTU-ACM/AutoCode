@@ -203,4 +203,4 @@ PermissionError: [Errno 13] Permission denied
 1. 查看测试用例：`tests/` 目录
 2. 检查工具文档：`src/autocode_mcp/tools/` 源代码注释
 3. 运行测试验证环境：`pytest tests/ -v`
-4. 提交 Issue：[GitHub Issues](https://github.com/SummerOneTwo/AutoCode/issues)
+4. 提交 Issue：[GitHub Issues](https://github.com/SZTU-ACM/AutoCode/issues)

@@ -1,13 +1,13 @@
 {
   "name": "autocode",
-  "version": "0.9.0",
+  "version": "1.0.1",
   "description": "Claude Code plugin for competitive programming problem-setting workflows.",
   "author": {
     "name": "SummerOneTwo",
     "url": "https://github.com/SummerOneTwo"
   },
-  "homepage": "https://github.com/SummerOneTwo/AutoCode",
-  "repository": "https://github.com/SummerOneTwo/AutoCode",
+  "homepage": "https://github.com/SZTU-ACM/AutoCode",
+  "repository": "https://github.com/SZTU-ACM/AutoCode",
   "license": "MIT",
   "keywords": ["claude-code", "plugin", "competitive-programming", "mcp", "autocode"]
 }

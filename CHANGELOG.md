@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-04-30
+
+### Bug Fixes
+
+- **质量门禁默认契约对齐**
+  - 将 `require_wrong_solution_kill` 默认值调整为 `false`（`workflow/models`、模板与 hook 同步），避免默认流程在未显式启用错解杀伤门禁时被错误阻断。
+- **validator 信号语义修复**
+  - `problem_verify_tests` 生成 `quality_signals` 时，若 `validator` 检查为 `skipped`，不再标记为 `executed=true/passed=true`，避免“未执行校验却通过门禁”的旁路。
+- **回归测试精度增强**
+  - 收紧交互题 `generator_build` 门禁测试断言，确保命中 `interactor_build` 前置约束。
+  - 修正审计门禁测试断言目标，与缺失项一致，降低文案细化导致的伪回归噪音。
+
 ## [1.0.0] - 2026-04-30
 
 ### Features

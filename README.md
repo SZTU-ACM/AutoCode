@@ -298,7 +298,7 @@ MIT License - 详见 [LICENSE](LICENSE)。
 
 ## 链接
 
-- [文档](https://github.com/SummerOneTwo/AutoCode#readme)
+- [文档](https://github.com/SZTU-ACM/AutoCode#readme)
 - [PyPI](https://pypi.org/project/autocode-mcp/)
-- [GitHub](https://github.com/SummerOneTwo/AutoCode)
-- [Issue Tracker](https://github.com/SummerOneTwo/AutoCode/issues)
+- [GitHub](https://github.com/SZTU-ACM/AutoCode)
+- [Issue Tracker](https://github.com/SZTU-ACM/AutoCode/issues)

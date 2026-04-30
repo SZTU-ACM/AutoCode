@@ -11,7 +11,7 @@ def test_claude_plugin_manifest_links_mcp_config():
     manifest = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
 
     assert manifest["name"] == "autocode"
-    assert manifest["version"] == "0.9.0"
+    assert manifest["version"] == "1.0.1"
 
 
 def test_claude_plugin_manifest_has_interface_metadata():
@@ -19,7 +19,7 @@ def test_claude_plugin_manifest_has_interface_metadata():
     manifest = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
 
     assert manifest["description"]
-    assert manifest["homepage"] == "https://github.com/SummerOneTwo/AutoCode"
+    assert manifest["homepage"] == "https://github.com/SZTU-ACM/AutoCode"
     assert "autocode" in manifest["keywords"]
 
 
