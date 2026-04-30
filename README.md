@@ -125,7 +125,7 @@ validator_build / checker_build
 - 交互题必须先完成可用的 `interactor_build`。
 - `stress_test_run` 必须完整跑完所有轮次。
 - `problem_generate_tests` 前必须通过 `problem_validate`。
-- `problem_pack_polygon` 前必须通过 `problem_verify_tests`。
+- `problem_pack_polygon` 前必须通过 `problem_verify_tests`，并满足门禁要求的结构化质量信号（如 `limit_semantics`、`wrong_solution_kill`、`validator_check`）。
 - 生成最终测试后会自动清除旧的 `tests_verified` 状态，必须重新验证。
 
 ## 题目目录和 manifest

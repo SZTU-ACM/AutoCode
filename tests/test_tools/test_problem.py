@@ -23,6 +23,23 @@ from autocode_mcp.utils.compiler import RunResult
 from autocode_mcp.utils.platform import get_exe_extension
 
 
+def write_verified_workflow_state(problem_dir: str) -> None:
+    workflow_dir = os.path.join(problem_dir, ".autocode-workflow")
+    os.makedirs(workflow_dir, exist_ok=True)
+    with open(os.path.join(workflow_dir, "state.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "tests_verified": True,
+                "verify_signals": {
+                    "limit_semantics": {"executed": True, "passed": True},
+                    "wrong_solution_kill": {"executed": True, "passed": True},
+                    "validator_check": {"executed": True, "passed": True},
+                },
+            },
+            f,
+        )
+
+
 @pytest.mark.asyncio
 async def test_problem_create():
     """测试题目目录创建。"""
@@ -87,6 +104,7 @@ async def test_problem_pack_polygon():
             f.write("1\n")
         with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
             f.write("1\n")
+        write_verified_workflow_state(problem_dir)
 
         # 打包
         result = await pack_tool.execute(problem_dir=problem_dir)
@@ -113,6 +131,7 @@ async def test_problem_pack_polygon_creates_xml():
             f.write("1\n")
         with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
             f.write("1\n")
+        write_verified_workflow_state(problem_dir)
 
         result = await tool.execute(
             problem_dir=problem_dir,
@@ -926,6 +945,7 @@ async def test_problem_pack_polygon_dynamic_test_count():
                 f.write(f"answer {i}\n")
         with open(os.path.join(problem_dir, "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
+        write_verified_workflow_state(problem_dir)
 
         await pack_tool.execute(problem_dir=problem_dir)
 
@@ -955,6 +975,7 @@ async def test_problem_pack_polygon_sanitizes_answer_ext_from_manifest():
             json.dump({"answer_ext": ".bad<ext>"}, f)
         with open(os.path.join(problem_dir, "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
+        write_verified_workflow_state(problem_dir)
 
         result = await pack_tool.execute(problem_dir=problem_dir)
         assert result.success
@@ -1012,6 +1033,27 @@ async def test_problem_pack_polygon_fails_when_workflow_state_unverified():
 
 
 @pytest.mark.asyncio
+async def test_problem_pack_polygon_fails_when_workflow_state_missing():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_state_missing")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "workflow state missing" in result.error
+
+
+@pytest.mark.asyncio
 async def test_problem_pack_polygon_respects_require_tests_verified_override():
     tool = ProblemPackPolygonTool()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1029,7 +1071,18 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
         with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
-            json.dump({"problem_name": "t", "quality_gates": {"require_tests_verified": False}}, f)
+            json.dump(
+                {
+                    "problem_name": "t",
+                    "quality_gates": {
+                        "require_tests_verified": False,
+                        "require_limit_semantics": False,
+                        "require_wrong_solution_kill": False,
+                        "require_validator_check": False,
+                    },
+                },
+                f,
+            )
         with open(
             os.path.join(problem_dir, ".autocode-workflow", "state.json"),
             "w",
@@ -1038,6 +1091,30 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
             json.dump({"tests_verified": False}, f)
         result = await tool.execute(problem_dir=problem_dir)
         assert result.success
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_fails_when_required_verify_signal_missing():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_signal_missing")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, ".autocode-workflow", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"tests_verified": True, "verify_signals": {}}, f)
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "verification signal" in result.error
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1147,7 @@ async def test_problem_pack_polygon_enforces_min_limit_case_ratio():
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
+        write_verified_workflow_state(problem_dir)
         with open(
             os.path.join(problem_dir, "autocode.json"),
             "w",

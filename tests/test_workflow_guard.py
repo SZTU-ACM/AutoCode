@@ -171,7 +171,10 @@ def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsy
     assert exit_code == 0
     parsed = json.loads(captured)
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+    assert (
+        "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        or "solution_analyze" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+    )
 
 
 def test_pre_tool_denies_pack_before_tests_verified(tmp_path, capsys):
@@ -377,6 +380,59 @@ def test_pre_tool_enforces_solution_analyze_before_validator_build(tmp_path, cap
     assert "solution_analyze" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def test_pre_tool_enforces_solution_audits_before_validator_build(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["created"] = True
+    state["sol_built"] = True
+    state["brute_built"] = True
+    state["solution_analyzed"] = True
+    state["std_audited"] = False
+    state["brute_audited"] = False
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__validator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "solution_audit_std" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_pre_tool_enforces_solution_audits_before_generator_build(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["created"] = True
+    state["sol_built"] = True
+    state["brute_built"] = True
+    state["solution_analyzed"] = True
+    state["validator_ready"] = True
+    state["validator_accuracy"] = 1.0
+    state["std_audited"] = True
+    state["brute_audited"] = False
+    module.save_state(str(problem_dir), state)
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "solution_audit_std" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 def test_pre_tool_pack_respects_quality_gate_override(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"
@@ -388,6 +444,9 @@ def test_pre_tool_pack_respects_quality_gate_override(tmp_path, capsys):
             "require_stress_passed": True,
             "require_validation_passed": True,
             "require_tests_verified": False,
+            "require_limit_semantics": False,
+            "require_wrong_solution_kill": False,
+            "require_validator_check": False,
             "min_limit_case_ratio": 0.5,
         },
     )
@@ -395,6 +454,7 @@ def test_pre_tool_pack_respects_quality_gate_override(tmp_path, capsys):
     state["tests_generated"] = True
     state["generated_test_count"] = 1
     state["tests_verified"] = False
+    state["verify_signals"] = {}
     module.save_state(str(problem_dir), state)
 
     payload = {
@@ -442,6 +502,59 @@ def test_post_tool_verify_tests_applies_min_limit_case_ratio(tmp_path):
     state = module.load_state(str(problem_dir))
     assert state["tests_verified"] is False
     assert state["limit_case_ratio"] == 0.5
+
+
+def test_post_tool_verify_tests_persists_quality_signals_and_history(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    payload = {
+        "tool_name": "mcp__autocode__problem_verify_tests",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {
+                    "passed": True,
+                    "quality_signals": {
+                        "limit_semantics": {"executed": True, "passed": True},
+                        "wrong_solution_kill": {"executed": True, "passed": True},
+                        "validator_check": {"executed": True, "passed": True},
+                    },
+                },
+            }
+        },
+    }
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["verify_signals"]["limit_semantics"]["passed"] is True
+    assert isinstance(state.get("history"), list)
+    assert state["history"][-1]["tool"] == "problem_verify_tests"
+
+
+def test_pre_tool_pack_denies_when_required_verify_signal_missing(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir)
+    state = module.infer_state(str(problem_dir))
+    state["tests_generated"] = True
+    state["generated_test_count"] = 2
+    state["tests_verified"] = True
+    state["verify_signals"] = {"limit_semantics": {"executed": True, "passed": False}}
+    module.save_state(str(problem_dir), state)
+    payload = {
+        "tool_name": "mcp__autocode__problem_pack_polygon",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+    module.pre_tool(payload)
+    captured = capsys.readouterr().out
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "limit_semantics" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_pre_tool_pack_denies_when_limit_ratio_below_gate(tmp_path, capsys):

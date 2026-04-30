@@ -9,6 +9,15 @@
   "constraints": {
     "n_max": 100000
   },
+  "quality_gates": {
+    "require_stress_passed": true,
+    "require_validation_passed": true,
+    "require_tests_verified": true,
+    "require_limit_semantics": true,
+    "require_wrong_solution_kill": true,
+    "require_validator_check": true,
+    "min_limit_case_ratio": 0.5
+  },
   "solutions": [
     {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
     {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"}
