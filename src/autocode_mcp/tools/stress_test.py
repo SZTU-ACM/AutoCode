@@ -6,6 +6,7 @@ Stress Test 工具 - 对拍测试。
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -179,12 +180,15 @@ class StressTestRunTool(Tool):
         total_rounds = sum(max(1, int(p.get("trials", trials))) for p in profiles)
         first_profile_args = profiles[0].get("generator_args") or generator_args
         effective_n_max = first_profile_args.get("n_max", n_max) if first_profile_args else n_max
+        complexity_context = self._load_complexity_context(problem_dir)
 
         failed_round = None
         last_input = None
         sol_output = None
         brute_output = None
         validator_failed = False
+        validator_failure_detail: dict[str, object] = {}
+        n_max_advisory = self._build_n_max_advisory(effective_n_max, complexity_context)
 
         # 统计信息收集
         round_stats: list[dict] = []
@@ -226,23 +230,30 @@ class StressTestRunTool(Tool):
                             cmd_args=gen_result.get("cmd_args", []),
                             last_input=last_input,
                             statistics=self._compute_summary(round_stats),
+                            n_max_warning=n_max_advisory,
+                            n_max_advisory=n_max_advisory,
                         )
 
                     # 2. 验证输入（如果有 validator）
+                    input_data = str(gen_result["input_data"])
+                    if os.path.exists(input_path):
+                        with open(input_path, "w", encoding="utf-8", newline="") as f:
+                            f.write(input_data)
                     if os.path.exists(val_exe):
-                        with open(input_path, encoding="utf-8") as f:
-                            input_data = f.read()
                         val_result = await run_binary(val_exe, input_data, timeout=timeout)
                         if val_result.return_code != 0:
                             validator_failed = True
                             last_input = input_data
                             failed_round = global_round
                             profile_failed_round = global_round
+                            validator_failure_detail = {
+                                "validator_return_code": val_result.return_code,
+                                "validator_stderr": (val_result.stderr or "")[:2000],
+                                "validator_stdout": (val_result.stdout or "")[:2000],
+                            }
                             break
 
                     # 3. 运行 sol 和 brute，比较输出
-                    with open(input_path, encoding="utf-8") as f:
-                        input_data = f.read()
                     last_input = input_data
 
                     # 运行 sol
@@ -265,6 +276,8 @@ class StressTestRunTool(Tool):
                             round=global_round,
                             input_data=input_data,
                             suggestion="Try reducing n_max parameter",
+                            n_max_warning=n_max_advisory,
+                            n_max_advisory=n_max_advisory,
                             statistics=self._compute_summary(round_stats),
                         )
                     if not brute_result.success:
@@ -314,6 +327,9 @@ class StressTestRunTool(Tool):
             effective_n_max,
             round_stats,
             profile_reports,
+            validator_failure_detail,
+            n_max_advisory,
+            complexity_context,
         )
 
     async def _generate_input(
@@ -394,10 +410,15 @@ class StressTestRunTool(Tool):
                     "seed": seed,
                 }
 
-            with open(input_path, "w", encoding="utf-8") as f:
+            with open(input_path, "w", encoding="utf-8", newline="") as f:
                 f.write(gen_result.stdout)
 
-            return {"success": True, "cmd_args": cmd_args, "seed": seed}
+            return {
+                "success": True,
+                "cmd_args": cmd_args,
+                "seed": seed,
+                "input_data": gen_result.stdout,
+            }
 
         except Exception as e:
             return {
@@ -484,6 +505,9 @@ class StressTestRunTool(Tool):
         effective_n_max: int = 100,
         round_stats: list[dict] | None = None,
         stress_profiles: list[dict] | None = None,
+        validator_failure_detail: dict[str, object] | None = None,
+        n_max_advisory: str | None = None,
+        complexity_context: dict[str, object] | None = None,
     ) -> ToolResult:
         """格式化测试结果。"""
         statistics = self._compute_summary(round_stats or [])
@@ -501,6 +525,10 @@ class StressTestRunTool(Tool):
                 total_rounds=total_rounds,
                 statistics=statistics,
                 stress_profiles=stress_profiles or [],
+                validator_failure_detail=validator_failure_detail or {},
+                n_max_warning=n_max_advisory,
+                n_max_advisory=n_max_advisory,
+                complexity_context=complexity_context or {},
             )
 
         return ToolResult.ok(
@@ -509,5 +537,37 @@ class StressTestRunTool(Tool):
             effective_n_max=effective_n_max,
             statistics=statistics,
             stress_profiles=stress_profiles or [],
+            n_max_warning=n_max_advisory,
+            n_max_advisory=n_max_advisory,
+            complexity_context=complexity_context or {},
             message=f"All {total_rounds} rounds passed",
         )
+
+    def _build_n_max_advisory(self, n_max: int, complexity_context: dict[str, object] | None) -> str:
+        context = complexity_context or {}
+        brute_complexity = context.get("brute_complexity")
+        recommended = context.get("recommended_stress_params")
+        return (
+            "Review n_max against brute complexity evidence instead of fixed thresholds. "
+            f"Current n_max={n_max}. "
+            f"brute_complexity={brute_complexity if brute_complexity else 'unknown'}. "
+            f"recommended_stress_params={recommended if recommended else 'unavailable'}. "
+            "Let the LLM decide final stress parameters based on this context."
+        )
+
+    def _load_complexity_context(self, problem_dir: str) -> dict[str, object]:
+        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
+        if not os.path.exists(state_path):
+            return {}
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(state, dict):
+            return {}
+        context: dict[str, object] = {}
+        for key in ("brute_complexity", "std_complexity", "recommended_stress_params"):
+            if key in state:
+                context[key] = state[key]
+        return context

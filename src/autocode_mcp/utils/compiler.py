@@ -32,6 +32,17 @@ _logger = logging.getLogger(__name__)
 _cache = CompileCache()
 
 
+def _normalize_windows_stdin(stdin: str) -> str:
+    """规范化 Windows 下传入程序的文本换行。
+
+    先将 CRLF/CR 统一成 LF，再一次性转为 CRLF，避免重复转换导致的异常输入形态。
+    """
+    if not stdin:
+        return stdin
+    normalized = stdin.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\n", "\r\n")
+
+
 @dataclass
 class CompileResult:
     """编译结果。"""
@@ -337,8 +348,7 @@ async def _run_process(
             # 将 LF 转换为 CRLF 以满足 validator 的 readEoln() 要求
             processed_stdin = stdin
             if sys.platform == "win32" and stdin:
-                # 避免重复转换：先还原已有的 CRLF，再将所有 LF 转为 CRLF
-                processed_stdin = stdin.replace("\r\n", "\n").replace("\n", "\r\n")
+                processed_stdin = _normalize_windows_stdin(stdin)
 
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(input=processed_stdin.encode("utf-8") if processed_stdin else None),

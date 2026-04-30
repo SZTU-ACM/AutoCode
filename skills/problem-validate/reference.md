@@ -127,3 +127,11 @@ The tool supports:
 `stress_test_run -> problem_validate -> problem_generate_tests`
 
 Validation must pass before final test generation.
+
+## Validator EOF Notes
+
+For testlib-based validators:
+
+1. end validator with `inf.readEof()`;
+2. if trailing whitespace should be tolerated, use `inf.seekEof(); inf.readEof();`;
+3. do not stop at `seekEof()` only.

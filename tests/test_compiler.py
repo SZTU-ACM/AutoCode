@@ -13,6 +13,7 @@ import pytest
 import autocode_mcp.utils.compiler as compiler_module
 from autocode_mcp.utils.compiler import (
     CompileResult,
+    _normalize_windows_stdin,
     cleanup_work_dir,
     compile_all,
     compile_cpp,
@@ -401,3 +402,10 @@ async def test_run_binary_with_args_cancelled_force_terminates(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await run_binary_with_args(binary_path, ["1"], timeout=1)
         assert killed["value"] is True
+
+
+def test_normalize_windows_stdin_handles_mixed_newlines():
+    """Windows stdin 规范化应只做一次稳定转换。"""
+    raw = "1 2\n3 4\r\n5 6\r7 8\n"
+    normalized = _normalize_windows_stdin(raw)
+    assert normalized == "1 2\r\n3 4\r\n5 6\r\n7 8\r\n"

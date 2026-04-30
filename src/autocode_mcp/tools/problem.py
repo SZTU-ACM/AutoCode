@@ -478,6 +478,7 @@ class ProblemGenerateTestsTool(Tool):
             "state_path": state_path,
         }
         active_pids: set[int] = set()
+        generator_tle_extra_args_fallbacks = 0
 
         if resume:
             restored = self._load_state(state_path)
@@ -525,20 +526,22 @@ class ProblemGenerateTestsTool(Tool):
                     sol_name=effective_sol_name,
                     progress_snapshot=progress_snapshot,
                     resume_hint="Set resume=true to continue from checkpoint",
+                    generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
                 )
             # 循环使用配置
             cfg_idx = (seed - 1) % len(test_configs_list)
             test_cfg = test_configs_list[cfg_idx]
 
             seed_offset, type_param, n_min, n_max, t_min, t_max, extra_args = test_cfg
-            cmd_args = [
+            base_cmd = [
                 str(seed + int(seed_offset)),
                 type_param,
                 str(n_min),
                 str(n_max),
                 str(t_min),
                 str(t_max),
-            ] + extra_args
+            ]
+            cmd_args = base_cmd + extra_args
 
             try:
                 # 生成输入
@@ -548,8 +551,23 @@ class ProblemGenerateTestsTool(Tool):
                     timeout=timeout,
                     active_pids=active_pids,
                 )
+                if (
+                    self._generator_run_failed(gen_result)
+                    and type_param == "4"
+                    and extra_args
+                ):
+                    fb_result = await self._run_with_retry(
+                        gen_exe,
+                        base_cmd,
+                        timeout=timeout,
+                        active_pids=active_pids,
+                    )
+                    if not self._generator_run_failed(fb_result):
+                        generator_tle_extra_args_fallbacks += 1
+                        gen_result = fb_result
+
                 return_code = gen_result.return_code
-                if gen_result.timed_out or not gen_result.success or not gen_result.stdout.strip():
+                if self._generator_run_failed(gen_result):
                     errors.append(
                         (
                             seed,
@@ -708,6 +726,7 @@ class ProblemGenerateTestsTool(Tool):
                 sol_name=effective_sol_name,
                 answer_ext=normalized_answer_ext,
                 progress_snapshot=progress_snapshot,
+                generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
                 message=f"Generated {len(generated_tests)} test cases (from {len(candidates)} candidates)",
             )
         else:
@@ -732,6 +751,7 @@ class ProblemGenerateTestsTool(Tool):
                 limit_case_count=limit_in_final,
                 limit_case_minimum_required=limit_minimum,
                 limit_case_quota_met=limit_quota_met,
+                generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
             )
 
     def _resolve_tests_dir(
@@ -797,6 +817,10 @@ class ProblemGenerateTestsTool(Tool):
         if not ext:
             return None, ToolResult.fail("invalid answer_ext")
         return ext, None
+
+    @staticmethod
+    def _generator_run_failed(result: RunResult) -> bool:
+        return result.timed_out or not result.success or not (result.stdout or "").strip()
 
     async def _run_with_retry(
         self,
@@ -1060,8 +1084,8 @@ class ProblemGenerateTestsTool(Tool):
         if n_limit >= 100:
             configs.extend(
                 [
-                    ("13", "4", str(n_limit), str(n_limit), "1", "1", []),
-                    ("14", "4", str(int(n_limit * 0.9)), str(n_limit), "1", "1", []),
+                    ("13", "4", str(n_limit), str(n_limit), "1", "1", ["mode=tle_dense"]),
+                    ("14", "4", str(int(n_limit * 0.9)), str(n_limit), "1", "1", ["mode=tle_chain"]),
                 ]
             )
 

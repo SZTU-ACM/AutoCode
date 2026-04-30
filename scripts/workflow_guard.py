@@ -544,10 +544,23 @@ def post_tool(payload: dict[str, Any]) -> int:
         state["solution_analyzed"] = True
         state["std_audited"] = False
         state["brute_audited"] = False
+        std_complexity = (
+            data.get("estimated_complexity")
+            or data.get("final_complexity")
+            or data.get("worst_case_complexity")
+        )
+        if std_complexity is not None:
+            state["std_complexity"] = std_complexity
+        if "recommended_stress_params" in data:
+            state["recommended_stress_params"] = data.get("recommended_stress_params")
     elif short_name == "solution_audit_std":
         state["std_audited"] = True
     elif short_name == "solution_audit_brute":
         state["brute_audited"] = True
+        if "brute_complexity" in data:
+            state["brute_complexity"] = data.get("brute_complexity")
+        if "recommended_stress_params" in data:
+            state["recommended_stress_params"] = data.get("recommended_stress_params")
     elif short_name == "validator_build":
         accuracy = data.get("accuracy")
         state["validator_accuracy"] = accuracy

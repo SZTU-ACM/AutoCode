@@ -18,6 +18,8 @@ int main(int argc, char* argv[]) {
     // }
     // inf.readEoln();
 
+    // validator 结束前必须 readEof()，否则 testlib finalize guard 会报错。
+    // 若需要容忍文件尾部额外空白，可先执行 inf.seekEof(); 再执行 inf.readEof();
     inf.readEof();
     return 0;
 }

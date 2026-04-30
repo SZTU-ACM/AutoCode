@@ -131,7 +131,10 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
                 binary_path=binary_path,
                 binary_size=binary_size,
                 compile_log=compile_result.stderr,
-                message="Validator built successfully (no test cases provided)",
+                message=(
+                    "Validator built successfully (no test cases provided). "
+                    "Remember to end with inf.readEof(); if trailing whitespace is allowed, use inf.seekEof(); inf.readEof();"
+                ),
             )
 
         # 运行测试用例

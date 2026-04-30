@@ -36,7 +36,7 @@ int main(int argc, char* argv[]) {
         case 3:  // extreme
             n = n_max;
             break;
-        case 4:  // tle
+        case 4:  // tle（建议做结构性卡法，而非仅拉满参数）
             n = n_max;
             break;
         default:
@@ -53,7 +53,12 @@ int main(int argc, char* argv[]) {
 
     for (int i = 0; i < n; i++) {
         if (i > 0) std::cout << " ";
-        std::cout << rnd.next(1, 1000000000);
+        if (type == 4) {
+            // 示例：构造大量重复值，常用于诱导低效去重/统计逻辑。
+            std::cout << (i % 2 == 0 ? 1 : 1000000000);
+        } else {
+            std::cout << rnd.next(1, 1000000000);
+        }
     }
     std::cout << std::endl;
 

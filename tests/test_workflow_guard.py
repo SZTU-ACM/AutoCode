@@ -586,3 +586,53 @@ def test_pre_tool_pack_denies_when_limit_ratio_below_gate(tmp_path, capsys):
     parsed = json.loads(captured)
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "min_limit_case_ratio" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_post_tool_solution_analyze_writes_std_complexity_and_stress_params(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    write_manifest(problem_dir)
+
+    payload = {
+        "tool_name": "mcp__autocode__solution_analyze",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {
+                    "estimated_complexity": "O(n log n)",
+                    "recommended_stress_params": [{"trials": 500, "n_max": 80}],
+                },
+            }
+        },
+    }
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["std_complexity"] == "O(n log n)"
+    assert state["recommended_stress_params"] == [{"trials": 500, "n_max": 80}]
+
+
+def test_post_tool_solution_audit_brute_writes_brute_complexity(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    write_manifest(problem_dir)
+
+    payload = {
+        "tool_name": "mcp__autocode__solution_audit_brute",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {
+                    "brute_complexity": "O(2^n)",
+                    "recommended_stress_params": {"n_max": 8, "trials": 600},
+                },
+            }
+        },
+    }
+    module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+    assert state["brute_complexity"] == "O(2^n)"
+    assert state["recommended_stress_params"] == {"n_max": 8, "trials": 600}

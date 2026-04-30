@@ -220,6 +220,81 @@ int main() {
 
 
 @pytest.mark.asyncio
+async def test_problem_generate_tests_type4_extra_args_fallback():
+    """type=4 带 mode 额外参数导致生成失败时，应去掉 extra_args 重试一次。"""
+    import shutil
+
+    if not shutil.which("g++"):
+        pytest.skip("g++ not available")
+
+    create_tool = ProblemCreateTool()
+    gen_tool = GeneratorBuildTool()
+    sol_tool = SolutionBuildTool()
+    generate_tool = ProblemGenerateTestsTool()
+
+    rejecting_mode_gen = """
+#include "testlib.h"
+#include <iostream>
+#include <string>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    for (int i = 7; i < argc; i++) {
+        std::string a(argv[i]);
+        if (a.rfind("mode=tle_", 0) == 0) {
+            return 1;
+        }
+    }
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int n_min = atoi(argv[3]);
+    int n_max = atoi(argv[4]);
+    int n = rnd.next(n_min, n_max);
+    std::cout << n << std::endl;
+    return 0;
+}
+"""
+    echo_sol = """
+#include <iostream>
+int main() {
+    int n;
+    std::cin >> n;
+    std::cout << n << std::endl;
+    return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "tle_fallback_test")
+        await create_tool.execute(problem_dir=problem_dir, problem_name="TLE Fallback")
+        await gen_tool.execute(problem_dir=problem_dir, code=rejecting_mode_gen)
+        await sol_tool.execute(problem_dir=problem_dir, solution_type="sol", code=echo_sol)
+
+        custom_configs = [
+            {
+                "type": "4",
+                "n_min": 1,
+                "n_max": 5,
+                "t_min": 1,
+                "t_max": 1,
+                "seed_offset": 0,
+                "extra_args": ["mode=tle_dense"],
+            },
+        ]
+
+        result = await generate_tool.execute(
+            problem_dir=problem_dir,
+            test_count=1,
+            oversample_ratio=1.0,
+            test_configs=custom_configs,
+            enable_validator_filter=False,
+        )
+
+        assert result.success
+        assert len(result.data["generated_tests"]) == 1
+        assert result.data.get("generator_tle_extra_args_fallbacks", 0) >= 1
+
+
+@pytest.mark.asyncio
 async def test_problem_generate_tests_constraints_validation():
     """测试 constraints 参数验证。"""
     tool = ProblemGenerateTestsTool()
@@ -289,6 +364,17 @@ def test_problem_generate_tests_default_configs_are_valid_for_small_constraints(
         for _, _, n_min, cfg_n_max, t_min, t_max, _ in configs:
             assert 1 <= int(n_min) <= int(cfg_n_max) <= n_max
             assert 1 <= int(t_min) <= int(t_max)
+
+
+def test_problem_generate_tests_default_configs_include_tle_modes():
+    """smart mode 的 type=4 默认配置应携带针对性构造标记。"""
+    tool = ProblemGenerateTestsTool()
+    configs = tool._get_default_configs({"n_max": 1000, "t_max": 1})
+    type4_configs = [cfg for cfg in configs if cfg[1] == "4"]
+    assert type4_configs
+    all_args = [arg for cfg in type4_configs for arg in cfg[6]]
+    assert "mode=tle_dense" in all_args
+    assert "mode=tle_chain" in all_args
 
 
 @pytest.mark.asyncio

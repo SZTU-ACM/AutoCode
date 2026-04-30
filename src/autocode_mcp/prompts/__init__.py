@@ -106,6 +106,8 @@ VALIDATOR_PROMPT = """
 int main(int argc, char* argv[]) {
     registerValidation(argc, argv);
     // 验证逻辑
+    // 若允许尾部空白，先调用 inf.seekEof() 再调用 inf.readEof()
+    // 不能只调用 seekEof()，validator 结束前必须 readEof()
     inf.readEof();
     return 0;
 }

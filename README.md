@@ -215,6 +215,12 @@ uv run autocode-verify examples/exact-sample
 - `hard_timeout_seconds`：工具级硬超时。
 - `problem_cleanup_processes`：清理残留 generator PID 和状态。
 
+实战注意事项：
+
+- 使用 testlib validator 时，结束前必须调用 `inf.readEof()`；如果希望容忍尾部空白，推荐 `inf.seekEof(); inf.readEof();`。
+- `stress_test_run` 会在返回中附带 `complexity_context`（来自 `.autocode-workflow/state.json`，由 `solution_analyze` / `solution_audit_brute` 等步骤写入）以及 `n_max_advisory`；**请由 LLM 根据证据与题意决定** `n_max` 等参数。兼容旧调用方时仍提供同内容的 `n_max_warning` 别名。
+- 编写 brute 时必须直接模拟题目约束本身，避免把“必须同时满足的条件”误简化成“可任选子集”的模型。
+
 ## 工具列表
 
 AutoCode 暴露 20 个 MCP 工具。一般用户不需要手动调用它们，`autocode-workflow` Agent 会按门禁顺序调用。

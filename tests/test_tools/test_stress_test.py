@@ -2,6 +2,7 @@
 Stress Test 工具组测试。
 """
 
+import json
 import os
 import tempfile
 
@@ -10,6 +11,7 @@ import pytest
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.solution import SolutionBuildTool
 from autocode_mcp.tools.stress_test import StressTestRunTool
+from autocode_mcp.tools.validator import ValidatorBuildTool
 from autocode_mcp.utils.platform import get_exe_extension
 
 # 简单的 C++ 代码用于测试
@@ -275,3 +277,189 @@ int main(int argc, char* argv[]) {
 
         # 验证所有输入都不同
         assert len(set(inputs)) == len(inputs), "Different seeds should produce different inputs"
+
+
+@pytest.mark.asyncio
+async def test_stress_test_validator_failure_includes_details():
+    """validator 失败时应返回 exit code 与 stderr 详情。"""
+    stress_tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+    val_tool = ValidatorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    std::cout << 1 << " " << 2 << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        strict_fail_validator = """
+#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    inf.readInt(10, 20, "a");
+    inf.readSpace();
+    inf.readInt(10, 20, "b");
+    inf.readEoln();
+    inf.readEof();
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+        await val_tool.execute(problem_dir=tmpdir, code=strict_fail_validator)
+
+        result = await stress_tool.execute(problem_dir=tmpdir, trials=1)
+        assert not result.success
+        assert "validator failed" in result.error.lower()
+        detail = result.data.get("validator_failure_detail", {})
+        assert isinstance(detail.get("validator_return_code"), int)
+        assert detail.get("validator_return_code") != 0
+        assert isinstance(detail.get("validator_stderr"), str)
+
+
+@pytest.mark.asyncio
+async def test_stress_test_returns_n_max_warning_for_large_n():
+    """应返回基于复杂度证据的 n_max advisory（并兼容 warning 字段）。"""
+    tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int a = rnd.next(1, 10);
+    int b = rnd.next(1, 10);
+    std::cout << a << " " << b << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+        workflow_dir = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(workflow_dir, exist_ok=True)
+        with open(os.path.join(workflow_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "brute_complexity": "O(2^n)",
+                    "recommended_stress_params": {"n_max": 8, "trials": 500},
+                },
+                f,
+            )
+
+        result = await tool.execute(problem_dir=tmpdir, trials=1, n_max=100)
+        assert result.success
+        assert "n_max_advisory" in result.data
+        assert "Current n_max=100" in result.data["n_max_advisory"]
+        assert "brute_complexity=O(2^n)" in result.data["n_max_advisory"]
+        assert result.data["n_max_warning"] == result.data["n_max_advisory"]
+        assert "complexity_context" in result.data
+        assert result.data["complexity_context"]["brute_complexity"] == "O(2^n)"
+
+
+@pytest.mark.asyncio
+async def test_stress_test_strict_validator_line_endings_pass():
+    """严格 readEoln/readSpace validator 在 stress 链路应通过。"""
+    stress_tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+    val_tool = ValidatorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int a = rnd.next(1, 20);
+    int b = rnd.next(1, 20);
+    std::cout << a << " " << b << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        strict_validator = """
+#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    inf.readInt(1, 20, "a");
+    inf.readSpace();
+    inf.readInt(1, 20, "b");
+    inf.readEoln();
+    inf.readEof();
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+        await val_tool.execute(problem_dir=tmpdir, code=strict_validator)
+
+        result = await stress_tool.execute(problem_dir=tmpdir, trials=3, n_max=8)
+        assert result.success
+        assert result.data["completed_rounds"] == 3
+
+
+def test_load_complexity_context_missing_state_returns_empty():
+    tool = StressTestRunTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        assert tool._load_complexity_context(tmpdir) == {}
+
+
+def test_load_complexity_context_invalid_json_returns_empty():
+    tool = StressTestRunTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wf = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(wf, exist_ok=True)
+        with open(os.path.join(wf, "state.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        assert tool._load_complexity_context(tmpdir) == {}
+
+
+def test_load_complexity_context_non_object_returns_empty():
+    tool = StressTestRunTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wf = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(wf, exist_ok=True)
+        with open(os.path.join(wf, "state.json"), "w", encoding="utf-8") as f:
+            f.write("[1,2]")
+        assert tool._load_complexity_context(tmpdir) == {}

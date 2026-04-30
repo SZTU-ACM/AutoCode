@@ -122,6 +122,11 @@ Build `sol` before `brute`.
 
 For non-trivial problems, `brute` must be independent enough to serve as an oracle. If it is the same algorithm as `sol`, mark this as a risk and run `solution_audit_brute`.
 
+Before writing brute, perform a quick counterexample check on paper:
+
+- verify brute directly simulates problem constraints;
+- reject simplifications that change mandatory selection semantics.
+
 ### `solution_analyze` and audit tools
 
 Use:
@@ -166,6 +171,8 @@ Use multiple profiles when possible:
 - `tiny_exhaustive`
 - `random_small`
 - `edge_small`
+
+If brute is exponential, set a conservative `n_max` first (often `<= 8`) and scale only after stability.
 
 Proceed only when `completed_rounds == total_rounds`.
 

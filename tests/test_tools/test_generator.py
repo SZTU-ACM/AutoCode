@@ -193,3 +193,20 @@ async def test_generator_build_strict_semantic_check():
         )
         assert not result.success
         assert "semantic" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_generator_build_semantic_check_reports_overlap():
+    """语义检查应返回 type3/type4 的结构信号重叠信息。"""
+    tool = GeneratorBuildTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            code=WEAK_GENERATOR_CODE,
+        )
+        assert result.success
+        semantic = result.data["semantic_check"]
+        assert "signal_overlap" in semantic
+        assert "signal_overlap_advisory" in semantic
+        assert "type3_signals" in semantic
+        assert "type4_signals" in semantic

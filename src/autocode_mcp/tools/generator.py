@@ -159,12 +159,29 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
         norm4 = " ".join(type4_blocks).replace(" ", "")
         output_lines = [line.strip() for line in code.splitlines() if "cout" in line or "printf" in line]
         duplicate_outputs = len(set(output_lines)) <= 1 and len(output_lines) > 0
-        similar = norm3 == norm4 or (norm3 and norm4 and abs(len(norm3) - len(norm4)) < 10) or duplicate_outputs
+        type3_signals = self._extract_branch_signals(" ".join(type3_blocks))
+        type4_signals = self._extract_branch_signals(" ".join(type4_blocks))
+        shared_signals = type3_signals.intersection(type4_signals)
+        signal_overlap = (
+            len(shared_signals) / max(len(type3_signals.union(type4_signals)), 1)
+            if (type3_signals or type4_signals)
+            else 1.0
+        )
+        similar_core = (
+            norm3 == norm4
+            or (norm3 and norm4 and abs(len(norm3) - len(norm4)) < 10)
+            or duplicate_outputs
+        )
+        overlap_advisory = signal_overlap > 0.9 and not similar_core
         return {
             "enabled": True,
-            "passed": not similar,
-            "reason": "" if not similar else "type=3/type=4 branch snippets are too similar",
+            "passed": not similar_core,
+            "reason": "" if not similar_core else "type=3/type=4 branch snippets are too similar",
             "hint": "为 type=4 增加针对性卡法，而不仅是 n_max/t_max 取最大值",
+            "signal_overlap": round(signal_overlap, 3),
+            "signal_overlap_advisory": overlap_advisory,
+            "type3_signals": sorted(type3_signals)[:20],
+            "type4_signals": sorted(type4_signals)[:20],
         }
 
     def _extract_type_branch_snippets(self, code: str, type_value: int) -> list[str]:
@@ -178,6 +195,15 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
             for match in re.finditer(pattern, code):
                 snippets.append(code[match.start(): match.start() + 240])
         return snippets
+
+    def _extract_branch_signals(self, snippet: str) -> set[str]:
+        """提取分支内结构信号，用于判断 type=3/type=4 是否只有参数放大差异。"""
+        tokens = set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", snippet))
+        stop_words = {
+            "if", "else", "case", "switch", "for", "while", "return", "int", "long", "double",
+            "seed", "type", "n_min", "n_max", "t_min", "t_max",
+        }
+        return {t for t in tokens if t not in stop_words and len(t) > 2}
 
 
 class GeneratorRunTool(Tool):
