@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-01
+
+### Bug Fixes
+
+- **stress_test_run 可观测性与参数建议**
+  - validator 失败时返回结构化诊断信息（`validator_return_code`、`validator_stderr`、`validator_stdout`）。
+  - 对拍结果增加 `complexity_context` 与 `n_max_advisory`，由复杂度审计证据驱动参数决策；兼容保留 `n_max_warning` 别名。
+  - Windows 输入换行归一化改为单次稳定转换，减少 CRLF/LF 混用导致的 strict validator 偶发失败。
+- **workflow_guard 审计上下文回写修复**
+  - `solution_analyze` 后按 `estimated_complexity`（并兼容回退字段）写入 `std_complexity`。
+  - `solution_audit_brute` 回写 `brute_complexity` 与 `recommended_stress_params`，供后续 `stress_test_run` 建议使用。
+- **problem_generate_tests 兼容性增强**
+  - `type=4` 使用 `extra_args`（如 `mode=tle_dense`/`mode=tle_chain`）失败时，自动回退到无 `extra_args` 重试一次。
+  - 返回新增 `generator_tle_extra_args_fallbacks` 统计，便于定位生成器参数兼容问题。
+- **generator 语义检查误判收敛**
+  - `signal_overlap` 从硬失败条件降级为 advisory 信号（`signal_overlap_advisory`），避免仅因标识符重叠造成误拒。
+
+### Improvements
+
+- **validator/generator 模板与提示词**
+  - validator prompt/template 明确 `inf.readEof()` 必须调用；若容忍尾部空白，推荐 `inf.seekEof(); inf.readEof();`。
+  - generator template 为 `type=4` 增加结构性卡法示例，不再仅建议“参数拉满”。
+- **文档与技能同步**
+  - README、workflow skill 与示例题面同步更新：brute 需直接模拟原始约束；`n_max` 决策改为基于审计证据与 advisory 字段。
+  - workflow skill 补充 `type=4 extra_args` 不兼容时的回退行为说明。
+
+### Tests
+
+- 新增/扩展回归测试覆盖：
+  - stress validator 失败详情、`n_max_advisory` 兼容字段、`state.json` 缺失/损坏路径；
+  - workflow_guard 审计字段回写；
+  - `type=4 extra_args` 回退行为；
+  - generator 语义检查 advisory 字段；
+  - Windows 换行归一化单元测试与 strict validator 链路验证。
+
 ## [1.0.1] - 2026-04-30
 
 ### Bug Fixes

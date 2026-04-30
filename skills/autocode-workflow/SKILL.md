@@ -172,7 +172,7 @@ Use multiple profiles when possible:
 - `random_small`
 - `edge_small`
 
-If brute is exponential, set a conservative `n_max` first (often `<= 8`) and scale only after stability.
+Use `stress_test_run` advisory fields (`complexity_context`, `n_max_advisory`) to choose `n_max` based on audit evidence instead of fixed thresholds.
 
 Proceed only when `completed_rounds == total_rounds`.
 
@@ -183,6 +183,8 @@ Validation failure is a release blocker. Do not generate final tests or package 
 ### `problem_generate_tests`
 
 Final tests should include at least half limit-oriented cases (`type=3` + `type=4`) when candidates are available.
+
+For `type=4` profiles with `extra_args` (for example `mode=tle_dense`), the runner may fallback to a no-extra-args retry when the generator rejects those args, to preserve compatibility with older generators.
 
 For long-running generation:
 

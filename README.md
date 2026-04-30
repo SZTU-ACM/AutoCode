@@ -214,6 +214,7 @@ uv run autocode-verify examples/exact-sample
 - `resume=true`：长任务中断后从 checkpoint 续跑。
 - `hard_timeout_seconds`：工具级硬超时。
 - `problem_cleanup_processes`：清理残留 generator PID 和状态。
+- 当 `type=4` 使用 `extra_args`（如 `mode=tle_dense` / `mode=tle_chain`）且 generator 不兼容时，会自动尝试一次去掉 `extra_args` 的回退运行；结果中可通过 `generator_tle_extra_args_fallbacks` 查看回退次数。
 
 实战注意事项：
 
