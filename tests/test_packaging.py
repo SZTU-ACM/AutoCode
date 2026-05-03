@@ -193,6 +193,19 @@ def test_autocode_verify_reports_invalid_manifest(monkeypatch, capsys, tmp_path)
     assert "invalid autocode.json" in parsed["error"]
 
 
+def test_autocode_verify_reports_unreadable_manifest(monkeypatch, capsys, tmp_path):
+    """非法 UTF-8 的 autocode.json 应返回结构化失败。"""
+    from autocode_mcp.cli.verify import main
+
+    (tmp_path / "autocode.json").write_bytes(b"\xff\xfe\xfd")
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert "invalid autocode.json" in parsed["error"]
+
+
 def test_autocode_verify_accepts_valid_manifest(monkeypatch, capsys, tmp_path):
     """CLI 正常路径校验 statement/tutorial 路径。"""
     from autocode_mcp.cli.verify import main
@@ -209,6 +222,100 @@ def test_autocode_verify_accepts_valid_manifest(monkeypatch, capsys, tmp_path):
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is True
     assert parsed["missing_paths"] == []
+    assert parsed.get("special_judge") is False
+
+
+def test_autocode_verify_special_judge_exact_skips_checker_warn(monkeypatch, capsys, tmp_path):
+    """仅 special_judge + exact 时不要求 checker 文件。"""
+    from autocode_mcp.cli.verify import main
+
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "README.md").write_text("# S\n", encoding="utf-8")
+    (statements_dir / "tutorial.md").write_text("# T\n", encoding="utf-8")
+    manifest = {
+        "schema_version": "1.0",
+        "problem_name": "X",
+        "interactive": False,
+        "special_judge": True,
+        "stress_comparison": "exact",
+        "time_limit_ms": 1000,
+        "memory_limit_mb": 256,
+        "statement_path": "statements/README.md",
+        "tutorial_path": "statements/tutorial.md",
+        "solutions": [],
+        "case_plan": [],
+    }
+    (tmp_path / "autocode.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["spj_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_rejects_invalid_manifest(tmp_path):
+    """problem_verify_tests 对非法 manifest 返回失败。"""
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "autocode.json").write_text(
+        '{"schema_version":"1.0","problem_name":"m","interactive":false,'
+        '"stress_comparison":"INVALID_ENUM"}',
+        encoding="utf-8",
+    )
+    tool = ProblemVerifyTestsTool()
+    result = await tool.execute(problem_dir=str(tmp_path), verify_types=["file_count"])
+    assert not result.success
+    err = (result.error or "").lower()
+    assert "autocode" in err or "invalid" in err or "readable" in err
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_rejects_unreadable_manifest(tmp_path):
+    """problem_verify_tests 对非法 UTF-8 的 manifest 返回失败。"""
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "autocode.json").write_bytes(b"\xff\xfe\xfd")
+    tool = ProblemVerifyTestsTool()
+    result = await tool.execute(problem_dir=str(tmp_path), verify_types=["file_count"])
+    assert not result.success
+    err = (result.error or "").lower()
+    assert "autocode" in err or "invalid" in err or "readable" in err
+
+
+def test_autocode_verify_spj_warns_without_checker(monkeypatch, capsys, tmp_path):
+    """special_judge 时 CLI 报告 spj_warnings。"""
+    from autocode_mcp.cli.verify import main
+
+    statements_dir = tmp_path / "statements"
+    statements_dir.mkdir()
+    (statements_dir / "README.md").write_text("# S\n", encoding="utf-8")
+    (statements_dir / "tutorial.md").write_text("# T\n", encoding="utf-8")
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    manifest = {
+        "schema_version": "1.0",
+        "problem_name": "SPJ",
+        "interactive": False,
+        "special_judge": True,
+        "stress_comparison": "checker",
+        "time_limit_ms": 1000,
+        "memory_limit_mb": 256,
+        "statement_path": "statements/README.md",
+        "tutorial_path": "statements/tutorial.md",
+        "solutions": [],
+        "case_plan": [],
+    }
+    (tmp_path / "autocode.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
+
+    assert main() == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["special_judge"] is True
+    assert parsed["spj_warnings"]
 
 
 # ============== MCP 类型测试 ==============

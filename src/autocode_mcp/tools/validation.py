@@ -6,10 +6,15 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from typing import Literal
 
+from pydantic import ValidationError
+
+from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_binary
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_uses_testlib_checker
 from .base import Tool, ToolResult
 
 
@@ -101,6 +106,15 @@ class ProblemValidateTool(Tool):
         if not os.path.exists(sol_exe):
             return ToolResult.fail("sol not found. Run solution_build first.")
 
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+        checker_bin = checker_exe_path(problem_dir, exe_ext)
+        checker_for_samples = manifest_uses_testlib_checker(manifest_model) and os.path.isfile(
+            checker_bin
+        )
+
         results = {}
         all_passed = True
 
@@ -117,7 +131,12 @@ class ProblemValidateTool(Tool):
 
             if samples:
                 result = await self._validate_statement_samples(
-                    sol_exe, samples, tolerance, timeout
+                    sol_exe,
+                    samples,
+                    tolerance,
+                    timeout,
+                    problem_dir=problem_dir,
+                    checker_exe=checker_bin if checker_for_samples else None,
                 )
                 results["statement_samples"] = result
                 if not result.get("passed", 0) == result.get("total", 0):
@@ -134,7 +153,12 @@ class ProblemValidateTool(Tool):
             tests_dir = os.path.join(problem_dir, "tests")
             if os.path.exists(tests_dir):
                 result = await self._validate_sample_files(
-                    sol_exe, tests_dir, tolerance, timeout
+                    sol_exe,
+                    tests_dir,
+                    tolerance,
+                    timeout,
+                    problem_dir=problem_dir,
+                    checker_exe=checker_bin if checker_for_samples else None,
                 )
                 results["sample_files"] = result
                 if not result.get("passed", 0) == result.get("total", 0):
@@ -163,8 +187,11 @@ class ProblemValidateTool(Tool):
         samples: list[dict],
         tolerance: float,
         timeout: int,
+        *,
+        problem_dir: str | None = None,
+        checker_exe: str | None = None,
     ) -> dict:
-        """验证题面样例。"""
+        """验证题面样例。SPJ 且提供 checker 时用 checker(input, sol_out, expected)。"""
         details = []
         passed = 0
         failed = 0
@@ -190,7 +217,24 @@ class ProblemValidateTool(Tool):
             actual = result.stdout.strip()
             expected_stripped = expected.strip()
 
-            is_passed = self._compare_output(actual, expected_stripped, tolerance)
+            if checker_exe and problem_dir:
+                with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+                    in_path = os.path.join(tmp, "input.txt")
+                    out_path = os.path.join(tmp, "output.txt")
+                    ans_path = os.path.join(tmp, "answer.txt")
+                    with open(in_path, "w", encoding="utf-8", newline="\n") as inf:
+                        inf.write(input_data)
+                    with open(out_path, "w", encoding="utf-8", newline="\n") as ouf:
+                        ouf.write(result.stdout)
+                    with open(ans_path, "w", encoding="utf-8", newline="\n") as anf:
+                        anf.write(expected)
+                    verdict, _ = await run_testlib_checker(
+                        checker_exe, in_path, out_path, ans_path, timeout=timeout
+                    )
+                    is_passed = verdict == "AC"
+            else:
+                is_passed = self._compare_output(actual, expected_stripped, tolerance)
+
             details.append({
                 "index": i,
                 "input": input_data,
@@ -203,13 +247,16 @@ class ProblemValidateTool(Tool):
             else:
                 failed += 1
 
-        return {
+        out: dict = {
             "validated": True,
             "passed": passed,
             "failed": failed,
             "total": len(samples),
             "details": details,
         }
+        if checker_exe:
+            out["mode"] = "checker"
+        return out
 
     async def _validate_sample_files(
         self,
@@ -217,6 +264,9 @@ class ProblemValidateTool(Tool):
         tests_dir: str,
         tolerance: float,
         timeout: int,
+        *,
+        problem_dir: str | None = None,
+        checker_exe: str | None = None,
     ) -> dict:
         """验证样例文件。"""
         # 找到所有 .in 文件
@@ -272,7 +322,17 @@ class ProblemValidateTool(Tool):
             with open(ans_path, encoding="utf-8") as f:
                 expected = f.read().strip()
 
-            is_passed = self._compare_output(actual, expected, tolerance)
+            if checker_exe and problem_dir:
+                with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+                    out_path = os.path.join(tmp, "output.txt")
+                    with open(out_path, "w", encoding="utf-8", newline="\n") as ouf:
+                        ouf.write(result.stdout)
+                    verdict, _ = await run_testlib_checker(
+                        checker_exe, in_path, out_path, ans_path, timeout=timeout
+                    )
+                    is_passed = verdict == "AC"
+            else:
+                is_passed = self._compare_output(actual, expected, tolerance)
             details.append({
                 "file": in_file,
                 "expected_file": ans_file,

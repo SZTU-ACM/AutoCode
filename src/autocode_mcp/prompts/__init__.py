@@ -165,6 +165,14 @@ CHECKER_PROMPT = """
 
 ## 基于论文 Algorithm 3: BUILDCHECKER
 
+### AutoCode 调用约定（与对拍一致）
+- 命令行：`checker <input_file> <output_file> <answer_file>`（testlib `registerTestlibCmd` 顺序）。
+- `autocode.json` 中 `special_judge: true` 且 `stress_comparison: "checker"` 时，`stress_test_run` 只调用一次
+  `checker(input, sol输出文件, brute输出文件)`：把 **output** 当作选手输出、**answer** 当作暴力/参考输出；
+  checker 应判定 sol 相对 brute 参考是否合法（多解时二者可文本不同）。
+- `problem_verify_tests` 在同一配置下用 `checker(input, sol重跑输出, 磁盘标答文件)`；`special_judge` 但 `stress_comparison: "exact"` 时终测仍比字符串。
+- 可选：`stress_checker_bidirectional: true` 时对拍再跑 `checker(in, brute, sol)`，仅当 checker 对交换 output/answer 仍语义正确时使用。
+
 ### 测试场景格式
 ```json
 {

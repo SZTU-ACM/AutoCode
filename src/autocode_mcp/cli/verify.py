@@ -6,7 +6,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ..workflow import load_manifest
+from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_uses_testlib_checker
 
 
 def _check_paths(problem_dir: Path, manifest: dict) -> list[str]:
@@ -27,7 +28,7 @@ def main() -> int:
     problem_dir = Path(args.problem_dir).resolve()
     try:
         manifest_model = load_manifest(str(problem_dir))
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         print(
             json.dumps(
                 {
@@ -44,12 +45,28 @@ def main() -> int:
         return 1
     manifest = manifest_model.model_dump(mode="json")
     missing = _check_paths(problem_dir, manifest)
+    spj = bool(manifest.get("special_judge", False))
+    spj_warnings: list[str] = []
+    if manifest_uses_testlib_checker(manifest_model):
+        cpp = problem_dir / "files" / "checker.cpp"
+        exe = problem_dir / "files" / f"checker{get_exe_extension()}"
+        if not cpp.is_file():
+            spj_warnings.append("checker workflow (special_judge + stress_comparison=checker) requires files/checker.cpp")
+        elif not exe.is_file():
+            spj_warnings.append(
+                "checker workflow requires compiled checker (run checker_build); missing files/checker"
+                f"{get_exe_extension()}"
+            )
+
     result = {
-        "success": len(missing) == 0,
+        "success": len(missing) == 0 and len(spj_warnings) == 0,
         "problem_dir": str(problem_dir),
         "interactive": manifest.get("interactive", False),
+        "special_judge": spj,
+        "stress_comparison": manifest.get("stress_comparison", "exact"),
         "case_plan_count": len(manifest.get("case_plan", [])),
         "missing_paths": missing,
+        "spj_warnings": spj_warnings,
     }
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["success"] else 1

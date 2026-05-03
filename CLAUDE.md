@@ -135,12 +135,11 @@ AutoCode 当前暴露 20 个 MCP 工具：
 4. 解法审计：`solution_analyze`、`solution_audit_std`、`solution_audit_brute`
 5. 非交互题：`validator_build(accuracy >= 0.9)`；交互题：`interactor_build`
 6. `generator_build`
-7. `stress_test_run(completed_rounds == total_rounds)`
-8. 需要特殊判题时：`checker_build(accuracy >= 0.9)`（非交互）
-9. `problem_validate(validation_passed)`
-10. `problem_generate_tests(generated_test_count > 0)`
-11. `problem_verify_tests(passed)`
-12. `problem_pack_polygon`
+7. `checker_build` 与 `stress_test_run`：`scripts/workflow_guard.py` 规定，非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`（非交互）。若在 `autocode.json` 设置 `special_judge: true` 且 `stress_comparison: "checker"`，可在 stress **之前**先完成 `checker_build`，且 `stress_test_run` 会用 checker 判定 sol/brute（详见内置 checker 提示词中的 argv 约定）。
+8. `problem_validate(validation_passed)`
+9. `problem_generate_tests(generated_test_count > 0)`
+10. `problem_verify_tests(passed)`（`special_judge` 时以 checker 校验终测与错解，而非仅字符串比对）
+11. `problem_pack_polygon`（存在 `files/checker.cpp` 时生成的 `problem.xml` 会带上 checker）
 
 关键门禁：
 
@@ -149,6 +148,7 @@ AutoCode 当前暴露 20 个 MCP 工具：
 - 交互题不可运行 `validator_build` / `checker_build`，应使用 `interactor_build`。
 - 最终测试生成后会清除旧的 `tests_verified`，必须重新跑 `problem_verify_tests`。
 - `problem_pack_polygon` 前必须完成最终测试验证。
+- `special_judge: true` 且 `stress_comparison: "checker"` 时：`stress_test_run` 前须 `checker_build` 通过；`problem_verify_tests` 的终测/错解用 checker。仅 `special_judge` 而 `stress_comparison: "exact"` 时终测仍比字符串。可选 `stress_checker_bidirectional: true` 使对拍再验证 `checker(in,brute,sol)`（checker 须支持对称语义）。
 
 ## Agent 与 Skill
 

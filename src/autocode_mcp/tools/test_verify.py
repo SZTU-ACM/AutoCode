@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_binary
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_uses_testlib_checker
+from ..workflow.models import AutoCodeManifest
 from .base import Tool, ToolResult
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
@@ -31,7 +37,7 @@ class ProblemVerifyTestsTool(Tool):
 
         自动执行以下检查：
         1. file_count: 每个 .in 有对应的 .ans，文件名连续
-        2. answer_consistency: 用 sol 重新运行 .in，对比输出与 .ans
+        2. answer_consistency: 用 sol 重跑 .in；special_judge 且 stress_comparison=checker 时用 checker，否则比 .ans 文本
         3. validator: 用 val 检查每个 .in 是否满足约束（如有 val.exe）
         4. no_empty: 没有空文件
         5. limit_ratio: 最终测试中 extreme/tle（type=3/4）不少于一半（需存在 manifest）
@@ -126,6 +132,11 @@ class ProblemVerifyTestsTool(Tool):
             return ToolResult.fail(f"Tests directory not found: {tests_dir}")
 
         resolved_answer_ext = self._resolve_answer_ext(tests_dir, answer_ext)
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+        verify_with_checker = manifest_uses_testlib_checker(manifest_model)
 
         # 默认执行所有验证
         if not verify_types:
@@ -164,6 +175,7 @@ class ProblemVerifyTestsTool(Tool):
                 effective_sol_name,
                 resolved_answer_ext,
                 timeout,
+                verify_with_checker=verify_with_checker,
             )
             results["answer_consistency"] = result
             if not result["passed"]:
@@ -189,12 +201,19 @@ class ProblemVerifyTestsTool(Tool):
                 all_passed = False
 
         if "wrong_solution_kill" in verify_types:
+            wrong_names = list(wrong_solution_names or [])
+            if manifest_model:
+                for s in manifest_model.solutions:
+                    if s.role == "wrong" and s.name not in wrong_names:
+                        wrong_names.append(s.name)
             result = await self._check_wrong_solution_kill(
                 problem_dir=problem_dir,
                 tests_dir=tests_dir,
-                wrong_solution_names=wrong_solution_names or [],
+                wrong_solution_names=wrong_names,
                 answer_ext=resolved_answer_ext,
                 timeout=timeout,
+                verify_with_checker=verify_with_checker,
+                manifest=manifest_model,
             )
             results["wrong_solution_kill"] = result
             if not result["passed"]:
@@ -321,9 +340,16 @@ class ProblemVerifyTestsTool(Tool):
         }
 
     async def _check_answer_consistency(
-        self, problem_dir: str, tests_dir: str, sol_name: str, answer_ext: str, timeout: int
+        self,
+        problem_dir: str,
+        tests_dir: str,
+        sol_name: str,
+        answer_ext: str,
+        timeout: int,
+        *,
+        verify_with_checker: bool = False,
     ) -> dict:
-        """用 sol 重新运行 .in，对比输出与 .ans。"""
+        """用 sol 重新运行 .in；verify_with_checker 时用 checker(input, sol_out, jury_ans)，否则比字符串。"""
         exe_ext = get_exe_extension()
         sol_exe = os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}")
         if not os.path.exists(sol_exe):
@@ -344,6 +370,19 @@ class ProblemVerifyTestsTool(Tool):
         mismatches = []
         timed_out = []
         errors = []
+
+        if verify_with_checker:
+            checker_bin = checker_exe_path(problem_dir, exe_ext)
+            if not os.path.isfile(checker_bin):
+                return {
+                    "passed": False,
+                    "total": len(in_files),
+                    "mismatches": [],
+                    "timed_out": [],
+                    "errors": [],
+                    "error": f"special_judge+stress_comparison=checker requires files/checker{exe_ext}",
+                    "mode": "checker",
+                }
 
         for in_file in in_files:
             in_path = os.path.join(tests_dir, in_file)
@@ -369,7 +408,25 @@ class ProblemVerifyTestsTool(Tool):
                 errors.append({"file": in_file, "stderr": result.stderr})
                 continue
 
-            if result.stdout.strip() != expected.strip():
+            if verify_with_checker:
+                with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+                    out_path = os.path.join(tmp, "output.txt")
+                    with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
+                        out_f.write(result.stdout)
+                    verdict, chk_run = await run_testlib_checker(
+                        checker_bin,
+                        in_path,
+                        out_path,
+                        ans_path,
+                        timeout=timeout,
+                    )
+                    if verdict != "AC":
+                        mismatches.append({
+                            "file": in_file,
+                            "checker_verdict": verdict,
+                            "checker_stderr": (chk_run.stderr or "")[:500],
+                        })
+            elif result.stdout.strip() != expected.strip():
                 mismatches.append({
                     "file": in_file,
                     "expected": expected[:200],
@@ -377,13 +434,16 @@ class ProblemVerifyTestsTool(Tool):
                 })
 
         passed = not mismatches and not timed_out and not errors
-        return {
+        out: dict = {
             "passed": passed,
             "total": len(in_files),
             "mismatches": mismatches,
             "timed_out": timed_out,
             "errors": errors,
         }
+        if verify_with_checker:
+            out["mode"] = "checker"
+        return out
 
     async def _check_validator(
         self, problem_dir: str, tests_dir: str, timeout: int
@@ -571,6 +631,13 @@ class ProblemVerifyTestsTool(Tool):
             return None
         return ext
 
+    def _wrong_expected(self, wrong_name: str, manifest: AutoCodeManifest | None) -> str:
+        if manifest:
+            for s in manifest.solutions:
+                if s.name == wrong_name and s.role == "wrong":
+                    return s.expected or "fail"
+        return "fail"
+
     async def _check_wrong_solution_kill(
         self,
         problem_dir: str,
@@ -578,11 +645,23 @@ class ProblemVerifyTestsTool(Tool):
         wrong_solution_names: list[str],
         answer_ext: str,
         timeout: int,
+        *,
+        verify_with_checker: bool = False,
+        manifest: AutoCodeManifest | None = None,
     ) -> dict:
         if not wrong_solution_names:
             return {"passed": True, "validated": False, "message": "No wrong solutions configured"}
 
         exe_ext = get_exe_extension()
+        checker_bin = checker_exe_path(problem_dir, exe_ext) if verify_with_checker else ""
+        if verify_with_checker and not os.path.isfile(checker_bin):
+            return {
+                "passed": False,
+                "validated": True,
+                "details": [],
+                "message": f"special_judge+stress_comparison=checker requires files/checker{exe_ext}",
+            }
+
         tests_path = Path(tests_dir)
         in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
         details = []
@@ -594,18 +673,69 @@ class ProblemVerifyTestsTool(Tool):
                 details.append({"name": wrong_name, "killed": False, "reason": "binary not found"})
                 all_killed = False
                 continue
-            killed = False
-            for in_file in in_files:
-                ans_file = in_file.with_suffix(answer_ext)
-                if not ans_file.exists():
-                    continue
-                input_data = in_file.read_text(encoding="utf-8")
-                expected = ans_file.read_text(encoding="utf-8").strip()
-                run = await run_binary(str(binary_path), input_data, timeout=timeout)
-                if run.timed_out or not run.success or run.stdout.strip() != expected:
-                    killed = True
-                    break
-            details.append({"name": wrong_name, "killed": killed})
+
+            exp = self._wrong_expected(wrong_name, manifest)
+            # 与 checker 一致：每测 "AC" / 非 AC；expected=fail 须至少一测非 AC；expected=pass 须全部 AC
+            per_test: list[str] = []
+
+            if verify_with_checker:
+                for in_file in in_files:
+                    ans_file = in_file.with_suffix(answer_ext)
+                    if not ans_file.exists():
+                        continue
+                    input_data = in_file.read_text(encoding="utf-8")
+                    in_path = str(in_file)
+                    ans_path = str(ans_file)
+                    run = await run_binary(str(binary_path), input_data, timeout=timeout)
+                    if run.timed_out or not run.success:
+                        per_test.append("FAIL")
+                        continue
+                    with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+                        out_path = os.path.join(tmp, "output.txt")
+                        with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
+                            out_f.write(run.stdout)
+                        verdict, _ = await run_testlib_checker(
+                            checker_bin,
+                            in_path,
+                            out_path,
+                            ans_path,
+                            timeout=timeout,
+                        )
+                    per_test.append(verdict)
+            else:
+                for in_file in in_files:
+                    ans_file = in_file.with_suffix(answer_ext)
+                    if not ans_file.exists():
+                        continue
+                    input_data = in_file.read_text(encoding="utf-8")
+                    run = await run_binary(str(binary_path), input_data, timeout=timeout)
+                    if run.timed_out or not run.success:
+                        per_test.append("FAIL")
+                        continue
+                    expected = ans_file.read_text(encoding="utf-8").strip()
+                    if run.stdout.strip() != expected:
+                        per_test.append("FAIL")
+                    else:
+                        per_test.append("AC")
+
+            if not per_test:
+                killed = False
+            elif exp == "fail":
+                killed = any(v != "AC" for v in per_test)
+            else:
+                killed = all(v == "AC" for v in per_test)
+
+            details.append(
+                {
+                    "name": wrong_name,
+                    "killed": killed,
+                    "expected": exp,
+                    "hint": (
+                        "expected=fail：须至少一测非 AC（checker）或与 .ans 不一致（exact）；"
+                        "expected=pass：须全部 AC 或与 .ans 一致"
+                    ),
+                }
+            )
             if not killed:
                 all_killed = False
 
@@ -614,4 +744,5 @@ class ProblemVerifyTestsTool(Tool):
             "validated": True,
             "details": details,
             "message": "All wrong solutions were killed" if all_killed else "Some wrong solutions survived all tests",
+            **({"mode": "checker"} if verify_with_checker else {}),
         }

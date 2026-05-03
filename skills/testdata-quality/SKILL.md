@@ -8,7 +8,7 @@ disable-model-invocation: false
 
 Final test data must pass:
 
-1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`.
+1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`. When `autocode.json` has `special_judge: true` **and** `stress_comparison: "checker"`, `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they still compare strings to `.ans`.
 2. `limit_ratio` and `limit_semantics` (type=3 and type=4 must not be semantically overlapping).
 3. `wrong_solution_kill`: every wrong solution must be killed by at least one test.
 

@@ -439,6 +439,93 @@ int main(int argc, char* argv[]) {
         assert result.data["completed_rounds"] == 3
 
 
+@pytest.mark.asyncio
+async def test_stress_rejects_invalid_autocode_manifest():
+    """损坏的 autocode.json 应返回结构化失败而非未捕获异常。"""
+    tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int a = rnd.next(1, 10);
+    int b = rnd.next(1, 10);
+    std::cout << a << " " << b << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+        with open(os.path.join(tmpdir, "autocode.json"), "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema_version":"1.0","problem_name":"x","interactive":false,'
+                '"stress_comparison":"not-a-valid-mode"}'
+            )
+
+        result = await tool.execute(problem_dir=tmpdir, trials=2)
+        assert not result.success
+        err = (result.error or "").lower()
+        assert "autocode" in err or "invalid" in err or "readable" in err
+
+
+@pytest.mark.asyncio
+async def test_stress_rejects_unreadable_autocode_manifest():
+    """非法 UTF-8 的 autocode.json 应返回结构化失败。"""
+    tool = StressTestRunTool()
+    build_tool = SolutionBuildTool()
+    gen_tool = GeneratorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        simple_gen = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = atoi(argv[1]);
+    rnd.setSeed(seed);
+    int a = rnd.next(1, 10);
+    int b = rnd.next(1, 10);
+    std::cout << a << " " << b << std::endl;
+    return 0;
+}
+"""
+        simple_sol = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << a + b << std::endl;
+    return 0;
+}
+"""
+        await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
+        await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
+        with open(os.path.join(tmpdir, "autocode.json"), "wb") as f:
+            f.write(b"\xff\xfe\xfd")
+
+        result = await tool.execute(problem_dir=tmpdir, trials=2)
+        assert not result.success
+        err = (result.error or "").lower()
+        assert "autocode" in err or "invalid" in err or "readable" in err
+
+
 def test_load_complexity_context_missing_state_returns_empty():
     tool = StressTestRunTool()
     with tempfile.TemporaryDirectory() as tmpdir:

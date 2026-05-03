@@ -39,8 +39,8 @@ problem_create
   -> solution_analyze / solution_audit_std / solution_audit_brute
   -> validator_build(accuracy >= 0.9)
   -> generator_build
-  -> stress_test_run(completed_rounds == total_rounds)
-  -> checker_build(if non-exact output)
+  -> stress_test_run(completed_rounds == total_rounds) (if `special_judge` + `stress_comparison: "checker"`, run `checker_build` first; stress calls `checker(in, sol, brute)`; optional `stress_checker_bidirectional` adds `checker(in, brute, sol)` — see checker prompt)
+  -> checker_build(if non-exact output; non-SPJ default is after stress)
   -> problem_validate
   -> problem_generate_tests
   -> problem_verify_tests(passed)

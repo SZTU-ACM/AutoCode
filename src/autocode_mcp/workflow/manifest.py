@@ -53,11 +53,21 @@ def default_manifest(problem_name: str, interactive: bool = False) -> AutoCodeMa
     )
 
 
+def manifest_uses_testlib_checker(manifest: AutoCodeManifest | None) -> bool:
+    """是否按 testlib checker 路径做对拍、终测与（可选）样例校验。"""
+    if manifest is None:
+        return False
+    return manifest.special_judge and manifest.stress_comparison == "checker"
+
+
 def load_manifest(problem_dir: str) -> AutoCodeManifest | None:
     path = manifest_path(problem_dir)
     if not path.exists():
         return None
-    content = path.read_text(encoding="utf-8")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read autocode.json: {exc}") from exc
     return AutoCodeManifest.model_validate_json(content)
 
 

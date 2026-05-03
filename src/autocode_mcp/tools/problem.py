@@ -1502,6 +1502,21 @@ class ProblemPackPolygonTool(Tool):
             problem_name = os.path.basename(problem_dir)
             xml_problem_name = escape(problem_name, {'"': "&quot;"})
             xml_answer_ext = escape(answer_ext, {'"': "&quot;"})
+            checker_cpp = os.path.join(files_dir, "checker.cpp")
+            has_checker = os.path.isfile(checker_cpp)
+            checker_testset_line = (
+                '\n            <checker type="testlib" path="files/checker.cpp"/>'
+                if has_checker
+                else ""
+            )
+            checker_executable_block = (
+                """
+            <executable>
+                <source path="files/checker.cpp"/>
+            </executable>"""
+                if has_checker
+                else ""
+            )
             xml_content = f'''<?xml version="1.0" encoding="utf-8" standalone="no"?>
 <problem revision="1" short-name="{xml_problem_name}">
     <names>
@@ -1516,7 +1531,7 @@ class ProblemPackPolygonTool(Tool):
             <memory-limit>{memory_limit_bytes}</memory-limit>
             <test-count>{actual_test_count}</test-count>
             <input-path-pattern>tests/%02d.in</input-path-pattern>
-            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>
+            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>{checker_testset_line}
         </testset>
     </judging>
     <files>
@@ -1529,7 +1544,7 @@ class ProblemPackPolygonTool(Tool):
             </executable>
             <executable>
                 <source path="files/val.cpp"/>
-            </executable>
+            </executable>{checker_executable_block}
         </executables>
     </files>
     <assets>

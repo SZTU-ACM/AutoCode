@@ -272,6 +272,47 @@ def _validator_check_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
     return _required_verify_signal_ok(state, "require_validator_check", "validator_check")
 
 
+def _stress_prereq_core_ok(state: dict[str, Any], tool_input: dict[str, Any]) -> bool:
+    """与 stress_test_run 相同的核心前置（不含 stress_passed / checker）。"""
+    return (
+        bool(state.get("sol_built"))
+        and bool(state.get("brute_built"))
+        and bool(state.get("solution_analyzed"))
+        and _audit_gate_ok(state, tool_input)
+        and _validator_gate_ok(state, tool_input)
+        and bool(state.get("generator_built"))
+    )
+
+
+def _manifest_dict_uses_testlib_checker(manifest: dict[str, Any]) -> bool:
+    """与 Pydantic manifest 的 manifest_uses_testlib_checker 一致（仅用 JSON 真值）。"""
+    return manifest.get("special_judge") is True and manifest.get("stress_comparison") == "checker"
+
+
+def _checker_build_prereq_ok(state: dict[str, Any], tool_input: dict[str, Any]) -> bool:
+    """stress 通过后，或 SPJ+checker 对拍路径在 stress 前完成 checker 编译。"""
+    if bool(state.get("stress_passed")):
+        return True
+    problem_dir = tool_input.get("problem_dir")
+    if not isinstance(problem_dir, str) or not problem_dir.strip():
+        return False
+    manifest = load_manifest(problem_dir.strip())
+    if not _manifest_dict_uses_testlib_checker(manifest):
+        return False
+    return _stress_prereq_core_ok(state, tool_input)
+
+
+def _stress_spj_checker_ready_ok(state: dict[str, Any], tool_input: dict[str, Any]) -> bool:
+    """SPJ + stress_comparison=checker 时对拍依赖 checker。"""
+    problem_dir = tool_input.get("problem_dir")
+    if not isinstance(problem_dir, str) or not problem_dir.strip():
+        return True
+    manifest = load_manifest(problem_dir.strip())
+    if not _manifest_dict_uses_testlib_checker(manifest):
+        return True
+    return bool(state.get("checker_ready"))
+
+
 def _append_history(
     state: dict[str, Any],
     *,
@@ -359,10 +400,17 @@ PRE_GATES: dict[str, list[Gate]] = {
             "必须先完成 validator_build(accuracy >= 0.9)，再进行 stress_test_run。",
         ),
         (lambda s, i: bool(s.get("generator_built")), "必须先完成 generator_build，再进行 stress_test_run。"),
+        (
+            _stress_spj_checker_ready_ok,
+            "SPJ 且 stress_comparison=checker 时需先成功完成 checker_build（accuracy >= 0.9）。",
+        ),
     ],
     "checker_build": [
         (_is_non_interactive, "交互题不应构建 checker，请使用 interactor_build。"),
-        (lambda s, i: bool(s.get("stress_passed")), "必须先通过 stress_test_run（completed_rounds == total_rounds）。"),
+        (
+            _checker_build_prereq_ok,
+            "须先通过 stress_test_run；或在 autocode.json 设 special_judge 并完成与 stress 相同的前置步骤后再编译 checker。",
+        ),
     ],
     "problem_validate": [
         (_stress_required_gate_ok, "必须先通过 stress_test_run，再进行题面与样例验证。"),
@@ -594,8 +642,9 @@ def session_start() -> int:
         "AutoCode plugin active. Enforce this workflow with quality gates: "
         "problem_create -> solution_build(sol) -> solution_build(brute) -> "
         "validator_build(accuracy >= 0.9, non-interactive only) -> interactor_build(interactive only) -> "
-        "generator_build -> stress_test_run(completed_rounds == total_rounds) -> "
-        "checker_build if needed (non-interactive) -> "
+        "generator_build -> checker_build（SPJ 且 stress_comparison=checker 时可先于 stress）-> "
+        "stress_test_run(completed_rounds == total_rounds) -> "
+        "checker_build if needed (non-interactive, 非 SPJ checker 路径时通常在 stress 后) -> "
         "problem_validate(validation_passed) -> "
         "problem_generate_tests(generated_test_count > 0, and prefer >=50% type3/type4 in final tests when candidates are sufficient) -> "
         "problem_verify_tests(passed) -> problem_pack_polygon. "

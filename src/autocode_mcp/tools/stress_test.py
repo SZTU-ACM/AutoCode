@@ -10,8 +10,12 @@ import json
 import os
 import tempfile
 
+from pydantic import ValidationError
+
+from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_uses_testlib_checker
 from .base import Tool, ToolResult
 
 
@@ -28,6 +32,10 @@ class StressTestRunTool(Tool):
 
         用于验证解法正确性。支持自定义轮数和参数。
         使用小数据（N <= 100）确保暴力解法快速运行。
+        若 autocode.json 中 special_judge 为 true 且 stress_comparison 为 checker，则调用
+        checker(input, sol输出, brute输出)（须已编译 files/checker）；brute 作为 answer。
+        若另设 stress_checker_bidirectional 为 true，会再调用 checker(input, brute, sol)，二者均须 AC。
+        否则比较 sol/brute 输出字符串是否一致。
 
         前置条件：
         1. 已运行 solution_build 构建 sol.cpp
@@ -169,6 +177,18 @@ class StressTestRunTool(Tool):
         if not os.path.exists(brute_exe):
             return ToolResult.fail(f"{effective_brute_name} not found. Run solution_build first.")
 
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+        use_checker_stress = manifest_uses_testlib_checker(manifest_model)
+        checker_exe = checker_exe_path(problem_dir, exe_ext) if use_checker_stress else ""
+        if use_checker_stress and not os.path.isfile(checker_exe):
+            return ToolResult.fail(
+                "special_judge with stress_comparison=checker requires files/checker"
+                f"{exe_ext}. Run checker_build first."
+            )
+
         # 可选的 validator
         val_exe = os.path.join(problem_dir, "files", f"val{exe_ext}")
         if not os.path.exists(val_exe):
@@ -299,8 +319,32 @@ class StressTestRunTool(Tool):
                         "n_value": self._extract_n_value(input_data),
                     })
 
-                    # 5. 比较输出
-                    if sol_output.strip() != brute_output.strip():
+                    # 5. 比较输出（普通题字符串一致；SPJ+checker 用 testlib checker，answer=brute）
+                    if use_checker_stress:
+                        sol_path = os.path.join(temp_dir, f"sol_out_{global_round}.txt")
+                        brute_path = os.path.join(temp_dir, f"brute_out_{global_round}.txt")
+                        with open(sol_path, "w", encoding="utf-8", newline="\n") as sf:
+                            sf.write(sol_output)
+                        with open(brute_path, "w", encoding="utf-8", newline="\n") as bf:
+                            bf.write(brute_output)
+                        v1, _ = await run_testlib_checker(
+                            checker_exe, input_path, sol_path, brute_path, timeout=timeout
+                        )
+                        v2_ok = True
+                        if (
+                            manifest_model is not None
+                            and manifest_model.stress_checker_bidirectional
+                        ):
+                            v2, _ = await run_testlib_checker(
+                                checker_exe, input_path, brute_path, sol_path, timeout=timeout
+                            )
+                            v2_ok = v2 == "AC"
+                        if v1 != "AC" or not v2_ok:
+                            last_input = input_data
+                            failed_round = global_round
+                            profile_failed_round = global_round
+                            break
+                    elif sol_output.strip() != brute_output.strip():
                         last_input = input_data
                         failed_round = global_round
                         profile_failed_round = global_round

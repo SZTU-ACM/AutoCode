@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,7 @@ from autocode_mcp.tools.solution import SolutionBuildTool
 from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
 from autocode_mcp.utils.compiler import RunResult
 from autocode_mcp.utils.platform import get_exe_extension
+from autocode_mcp.workflow.models import AutoCodeManifest, SolutionEntry
 
 
 def write_verified_workflow_state(problem_dir: str) -> None:
@@ -156,6 +158,37 @@ async def test_problem_pack_polygon_creates_xml():
             content = f.read()
             assert "2000" in content  # time_limit_ms (2秒 * 1000)
             assert "536870912" in content  # memory_limit_bytes (512MB * 1024 * 1024)
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_xml_includes_checker_when_present():
+    """存在 files/checker.cpp 时 problem.xml 声明 checker。"""
+    tool = ProblemPackPolygonTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "xml_checker")
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "files"), exist_ok=True)
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# Test\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, "files", "checker.cpp"), "w", encoding="utf-8") as f:
+            f.write("// checker\n")
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        write_verified_workflow_state(problem_dir)
+
+        result = await tool.execute(problem_dir=problem_dir, time_limit=1, memory_limit=256)
+        assert result.success
+        xml_path = os.path.join(problem_dir, "problem.xml")
+        content = Path(xml_path).read_text(encoding="utf-8")
+        assert "files/checker.cpp" in content
+        assert "<checker" in content
 
 
 @pytest.mark.asyncio
@@ -667,6 +700,125 @@ async def test_problem_generate_tests_resume_without_state_falls_back_to_fresh(m
         assert result.data["progress_snapshot"].get("resume_fallback") is True
         assert not os.path.exists(os.path.join(tests_dir, "02.in"))
         assert not os.path.exists(os.path.join(tests_dir, "02.ans"))
+
+
+@pytest.mark.asyncio
+async def test_wrong_solution_kill_exact_expected_pass_all_match(monkeypatch, tmp_path):
+    """非 checker 路径：expected=pass 时须与 .ans 全一致，全对则 killed 为 True（与 hint 一致）。"""
+    import autocode_mcp.tools.test_verify as tv
+
+    exe_ext = get_exe_extension()
+    sol_dir = tmp_path / "solutions"
+    sol_dir.mkdir()
+    (sol_dir / f"alt{exe_ext}").touch()
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "01.in").write_text("1 2\n", encoding="utf-8")
+    (tdir / "01.ans").write_text("3\n", encoding="utf-8")
+
+    manifest = AutoCodeManifest(
+        problem_name="p",
+        solutions=[
+            SolutionEntry(name="alt", role="wrong", path="solutions/alt.cpp", expected="pass"),
+        ],
+    )
+
+    async def fake_run(*_a, **_kw):
+        return RunResult(success=True, return_code=0, stdout="3\n")
+
+    monkeypatch.setattr(tv, "run_binary", fake_run)
+    tool = ProblemVerifyTestsTool()
+    result = await tool._check_wrong_solution_kill(
+        str(tmp_path),
+        str(tdir),
+        ["alt"],
+        ".ans",
+        30,
+        verify_with_checker=False,
+        manifest=manifest,
+    )
+    assert result["passed"] is True
+    assert result["details"][0]["killed"] is True
+    assert result["details"][0]["expected"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_wrong_solution_kill_exact_expected_pass_fails_on_mismatch(monkeypatch, tmp_path):
+    """expected=pass 时若输出与 .ans 不一致，killed 为 False，整体验证失败。"""
+    import autocode_mcp.tools.test_verify as tv
+
+    exe_ext = get_exe_extension()
+    sol_dir = tmp_path / "solutions"
+    sol_dir.mkdir()
+    (sol_dir / f"alt{exe_ext}").touch()
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "01.in").write_text("1 2\n", encoding="utf-8")
+    (tdir / "01.ans").write_text("3\n", encoding="utf-8")
+
+    manifest = AutoCodeManifest(
+        problem_name="p",
+        solutions=[
+            SolutionEntry(name="alt", role="wrong", path="solutions/alt.cpp", expected="pass"),
+        ],
+    )
+
+    async def fake_run(*_a, **_kw):
+        return RunResult(success=True, return_code=0, stdout="4\n")
+
+    monkeypatch.setattr(tv, "run_binary", fake_run)
+    tool = ProblemVerifyTestsTool()
+    result = await tool._check_wrong_solution_kill(
+        str(tmp_path),
+        str(tdir),
+        ["alt"],
+        ".ans",
+        30,
+        verify_with_checker=False,
+        manifest=manifest,
+    )
+    assert result["passed"] is False
+    assert result["details"][0]["killed"] is False
+
+
+@pytest.mark.asyncio
+async def test_wrong_solution_kill_exact_expected_fail_survives_when_all_match(monkeypatch, tmp_path):
+    """expected=fail（默认）时若错解全程匹配 .ans，应判未杀伤（killed=False）。"""
+    import autocode_mcp.tools.test_verify as tv
+
+    exe_ext = get_exe_extension()
+    sol_dir = tmp_path / "solutions"
+    sol_dir.mkdir()
+    (sol_dir / f"bad{exe_ext}").touch()
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "01.in").write_text("1 2\n", encoding="utf-8")
+    (tdir / "01.ans").write_text("3\n", encoding="utf-8")
+
+    manifest = AutoCodeManifest(
+        problem_name="p",
+        solutions=[
+            SolutionEntry(name="bad", role="wrong", path="solutions/bad.cpp", expected="fail"),
+        ],
+    )
+
+    async def fake_run(*_a, **_kw):
+        return RunResult(success=True, return_code=0, stdout="3\n")
+
+    monkeypatch.setattr(tv, "run_binary", fake_run)
+    tool = ProblemVerifyTestsTool()
+    result = await tool._check_wrong_solution_kill(
+        str(tmp_path),
+        str(tdir),
+        ["bad"],
+        ".ans",
+        30,
+        verify_with_checker=False,
+        manifest=manifest,
+    )
+    assert result["passed"] is False
+    assert result["details"][0]["killed"] is False
+    assert result["details"][0]["expected"] == "fail"
 
 
 def test_problem_verify_tests_file_count_requires_contiguous_numeric_names():
