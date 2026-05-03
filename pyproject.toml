@@ -1,6 +1,6 @@
 [project]
 name = "autocode-mcp"
-version = "1.0.1"
+version = "1.0.3"
 description = "MCP Server for competitive programming problem creation, based on AutoCode paper"
 readme = "README.md"
 requires-python = ">=3.10"

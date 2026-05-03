@@ -10,7 +10,7 @@ Final test data must pass:
 
 1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`. When `autocode.json` has `special_judge: true` **and** `stress_comparison: "checker"`, `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they still compare strings to `.ans`.
 2. `limit_ratio` and `limit_semantics` (type=3 and type=4 must not be semantically overlapping).
-3. `wrong_solution_kill`: every wrong solution must be killed by at least one test.
+3. `wrong_solution_kill`: for each `role=wrong` solution in `autocode.json`, behavior depends on `expected` (default `fail`). **`expected=fail`**: at least one final test must be non-AC under checker mode, or not match `.ans` under exact mode (wrong solution must be "killed"). **`expected=pass`**: every final test must be AC / match `.ans` (e.g. alternate valid output). The tool reports `killed`, `expected`, and a `hint` per wrong solution; interpret them together.
 
 ## Additional Required Checks
 
@@ -28,7 +28,7 @@ Final test data must pass:
 
 ## Decision Rules
 
-- `go`: all required checks pass, limit semantics are valid, and wrong-solution kill is effective.
+- `go`: all required checks pass, limit semantics are valid, and wrong-solution checks match each entry's `expected` semantics (not only the legacy "always killed by one test" reading).
 - `no_go`: any required check fails or coverage quality is insufficient.
 
 ## Forbidden Behavior

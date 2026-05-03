@@ -12,7 +12,7 @@ def test_import():
     """测试模块导入。"""
     from autocode_mcp import __version__
 
-    assert __version__ == "1.0.1"
+    assert __version__ == "1.0.3"
 
 
 def test_tool_result():

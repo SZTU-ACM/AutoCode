@@ -40,7 +40,7 @@ AutoCode 把“AI 出题”拆成一组必须通过的质量门禁：
 | std 有隐藏 bug | `stress_test_run` 用 sol/brute 多 profile 对拍 |
 | 测试数据覆盖弱 | `problem_generate_tests` 生成 tiny/random/extreme/tle 多策略测试，并优先保证极限类比例 |
 | type=3/type=4 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限/TLE 数据差异 |
-| 错解未被杀 | `problem_verify_tests` 的 `wrong_solution_kill` 验证错解杀伤 |
+| 错解与 manifest 预期不符 | `wrong_solution_kill`：`expected=fail`（默认）须至少一测非 AC 或与标答不一致；`expected=pass` 须全部测例通过（checker 或 exact） |
 | 工作流跳步 | Claude hooks 调用 `scripts/workflow_guard.py`，缺少前置步骤会直接拒绝工具调用 |
 | 打包前状态不清 | `autocode.json` 记录题目契约，`autocode-verify` 可快速检查基础完整性 |
 
@@ -153,13 +153,16 @@ validator_build / checker_build
     └── .autocode_tests_manifest.json
 ```
 
-`autocode.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。示例：
+`autocode.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。可选字段包括 `special_judge`、`stress_comparison`（`exact` | `checker`）、`stress_checker_bidirectional`（仅在与 checker 对拍联用时有效）；错解条目可设 `expected`（`fail` | `pass`）以配合 `wrong_solution_kill`。示例：
 
 ```json
 {
   "schema_version": "1.0",
   "problem_name": "Example Problem",
   "interactive": false,
+  "special_judge": false,
+  "stress_comparison": "exact",
+  "stress_checker_bidirectional": false,
   "time_limit_ms": 2000,
   "memory_limit_mb": 256,
   "statement_path": "statements/README.md",
@@ -201,12 +204,12 @@ uv run autocode-verify examples/exact-sample
 最终测试数据不是“生成了就算完成”。AutoCode 会要求 `problem_verify_tests` 通过，默认检查：
 
 - `file_count`：每个 `.in` 都有对应答案文件，编号连续。
-- `answer_consistency`：重新运行 `sol`，确认答案一致。
+- `answer_consistency`：用 `sol` 重跑每个 `.in`。若 `autocode.json` 为 `special_judge: true` 且 `stress_comparison: "checker"`（且已编译 `files/checker`），则用 testlib checker 比对标答；否则与答案文件逐字比对。
 - `validator`：用 `val` 检查所有输入合法性。
 - `no_empty`：没有空文件。
 - `limit_ratio`：最终数据中 `type=3/4` 至少占一半。
 - `limit_semantics`：`type=3` 和 `type=4` 不能高度重合。
-- `wrong_solution_kill`：配置错解时，错解必须至少被一个测试点杀掉。
+- `wrong_solution_kill`：对 manifest 中 `role=wrong` 的解法跑终测。默认 `expected` 为 `fail`，要求至少一测未通过 checker 或与 `.ans` 不一致；若某条目标解在终测上应合法，可在对应 `SolutionEntry` 设 `expected: "pass"`，此时要求全部测例通过 checker 或与 `.ans` 一致。工具返回的 `details[].hint` 与上述语义一致。
 
 `problem_generate_tests` 支持：
 

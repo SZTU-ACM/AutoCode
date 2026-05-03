@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-05-04
+
+### Features
+
+- **SPJ（testlib checker）与 manifes你  t 契约**
+  - `autocode.json` 增加 `special_judge`、`stress_comparison`（`exact` | `checker`）、可选 `stress_checker_bidirectional`；无 checker 工作流时自动忽略误设的 `stress_checker_bidirectional`。
+  - `stress_test_run`：在 `special_judge` + `stress_comparison=checker` 时用 `checker(in, sol_out, brute_out)` 判定对拍；可选双向再跑 `checker(in, brute, sol)`。
+  - `problem_verify_tests`：`answer_consistency` 与 `wrong_solution_kill` 在同一配置下走已编译的 `files/checker`；`stress_comparison=exact` 时仍与 `.ans` 字符串比对。
+  - `problem_validate`：题面样例与 `tests/` 样例在 checker 路径且 checker 已编译时走 checker。
+  - `problem_pack_polygon`：存在 `files/checker.cpp` 时在生成的 `problem.xml` 中声明 checker。
+  - `autocode-verify`：输出 `special_judge`、`stress_comparison`；在 checker 工作流下校验 `checker.cpp`/已编译 checker，并以 `spj_warnings` 提示缺失项。
+
+### Bug Fixes
+
+- **`wrong_solution_kill` 与 manifest `expected` 一致（含非 checker）**
+  - `expected` 默认 `fail`：须至少一测未通过 checker 或与 `.ans` 不一致才算「杀伤」成功。
+  - `expected=pass`：须全部测例通过 checker 或与 `.ans` 一致（用于合法多解等需在终测上保持 AC 的条目）；此前非 checker 分支忽略该字段，已与 checker 分支对齐。
+- **`load_manifest` 读盘健壮性**：`autocode.json` 非 UTF-8 或读失败时抛出带上下文的 `ValueError`；`stress_test_run` / `problem_verify_tests` / `problem_validate` 与 `autocode-verify` 统一捕获，避免未处理解码异常。
+
+### Documentation
+
+- 同步 README、`skills/testdata-quality`、`skills/autocode-workflow`、`skills/problem-validate` 与 CLAUDE.md 中 Manifest 说明（SPJ、错解 `expected`、`autocode-verify`）。
+
+### Tests
+
+- 非法 UTF-8 manifest、`stress_checker_bidirectional` 归一化、`wrong_solution_kill` exact 路径下 `expected=pass`/`fail` 回归用例。
+
 ## [1.0.2] - 2026-05-01
 
 ### Bug Fixes

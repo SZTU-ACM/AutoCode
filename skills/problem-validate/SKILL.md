@@ -19,9 +19,10 @@ Use when:
 ## Core Instructions
 
 1. Run `problem_validate` against statement samples and sample files.
-2. Treat any mismatch as a release blocker.
-3. Classify failures by source: statement text, sample files, or solution behavior.
-4. Re-run validation after fixes before allowing progression.
+2. When `autocode.json` has `special_judge: true`, `stress_comparison: "checker"`, and a compiled `files/checker`, sample checks use the checker (same argv convention as final verification); otherwise outputs are compared with the usual float/string rules.
+3. Treat any mismatch as a release blocker.
+4. Classify failures by source: statement text, sample files, or solution behavior.
+5. Re-run validation after fixes before allowing progression.
 
 ## Output Contract
 

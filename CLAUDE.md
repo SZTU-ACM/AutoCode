@@ -176,11 +176,19 @@ AutoCode 当前暴露 20 个 MCP 工具：
 
 每个题目应维护 `autocode.json` 作为人类和 CI 都可读的题目契约。模型位于 `src/autocode_mcp/workflow/`，模板位于 `src/autocode_mcp/templates/autocode.json`。
 
+常用字段补充：
+
+- `special_judge` / `stress_comparison`（`exact` | `checker`）/ 可选 `stress_checker_bidirectional`：控制对拍、终测、错解杀伤与样例校验是否走 testlib checker（须 `checker_build` 且存在 `files/checker`）。仅 `special_judge` 而 `stress_comparison=exact` 时终测等仍以字符串比对标答文件为主。
+- `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
+- `load_manifest` 若遇 `autocode.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误而非裸 traceback。
+
 快速校验：
 
 ```bash
 uv run autocode-verify <problem_dir>
 ```
+
+`autocode-verify` 在 checker 工作流下会返回 `spj_warnings`（缺 `checker.cpp` 或未编译 checker 等）；JSON 中还包含 `special_judge`、`stress_comparison` 便于 CI 解析。
 
 ## 关键约束
 

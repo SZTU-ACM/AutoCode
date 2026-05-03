@@ -203,7 +203,11 @@ Must pass before packaging. Default checks include:
 - `limit_ratio`
 - `limit_semantics`
 
-Use `wrong_solution_kill` when wrong solutions are available.
+With `special_judge: true` and `stress_comparison: "checker"` (and a built `files/checker`), `answer_consistency` and `wrong_solution_kill` use the testlib checker against jury answers; with `stress_comparison: "exact"` they still compare strings to the answer files.
+
+Use `wrong_solution_kill` when wrong solutions are available. Wrong entries honor manifest `expected`: default `fail` means at least one test must reject the binary; `pass` means all tests must accept it (checker AC or exact match to `.ans`).
+
+Run `autocode-verify <problem_dir>` for quick manifest/path checks; under the checker workflow it also surfaces `spj_warnings` if `checker.cpp` or the compiled checker is missing.
 
 ### `problem_pack_polygon`
 
@@ -217,8 +221,9 @@ Each problem should maintain `autocode.json` as a readable contract. It should d
 - interactive or non-interactive mode;
 - statement/tutorial paths;
 - time and memory limits;
-- solution roles;
-- case plan.
+- solution roles (including `wrong` solutions and optional per-entry `expected`: `fail` | `pass` for `wrong_solution_kill`);
+- case plan;
+- optional SPJ fields: `special_judge`, `stress_comparison` (`exact` | `checker`), and optional `stress_checker_bidirectional` (only meaningful with `special_judge` + `stress_comparison=checker`).
 
 Use `autocode-verify <problem_dir>` for quick structural checks.
 
