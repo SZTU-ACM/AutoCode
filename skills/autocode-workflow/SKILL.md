@@ -65,6 +65,8 @@ problem_create
 
 The authoritative implementation is `scripts/workflow_guard.py`.
 
+Interactive tasks are not just "no validator". They require an explicit protocol contract in the statement and a testlib interactor that can reject protocol violations. Treat missing protocol semantics as a blocker, the same severity as a missing validator for a non-interactive task.
+
 ## Mandatory Gates
 
 | Gate | Requirement |
@@ -151,7 +153,26 @@ Target:
 
 Interactive problems use `interactor_build` instead of `validator_build` and `checker_build`.
 
-Require an explicit interaction protocol in the statement before final packaging.
+Require an explicit interaction protocol in the statement before final packaging. The protocol must define:
+
+- who outputs first;
+- hidden input/range/randomness/adaptiveness;
+- every query command and final-answer command;
+- judge response format and meaning;
+- numeric query/round limits;
+- flush requirement after every contestant output;
+- immediate termination behavior after final answer;
+- verdict for malformed tokens, out-of-range arguments, too many queries, premature EOF, blocked protocol, and extra output.
+
+Interactor implementation requirements:
+
+- use `registerInteraction(argc, argv)`;
+- read testcase data from `inf` and optional jury data from `ans`;
+- write to the contestant via `tout`, not `std::cout`;
+- call `tout.flush()` after every message to the contestant;
+- read contestant output via `ouf`;
+- end every branch with `quitf(_ok/_wa/_pe/_fail, ...)`;
+- include scripted `interaction_scenarios` in `interactor_build` that cover AC, wrong final answer, malformed command, out-of-range query, query-limit boundary, exceeding query limit, and premature EOF.
 
 ### `generator_build`
 

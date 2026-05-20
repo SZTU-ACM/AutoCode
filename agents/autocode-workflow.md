@@ -21,6 +21,7 @@ Primary failure modes to prevent:
 - buggy or over-claimed standard solution complexity;
 - brute not usable as a conservative oracle;
 - weak generator coverage of boundary/extreme/TLE patterns;
+- interactive statements without a complete protocol contract or interactor that cannot reject invalid conversations;
 - packaging before final verification.
 
 ## Mandatory Status Contract
@@ -74,6 +75,8 @@ When creating or revising `statements/README.md`, enforce this fixed order:
 6. output format
 7. numbered samples (ascending)
 8. explanation section (sample explanations must be placed here)
+
+For `interactive: true`, the same statement must also include a complete interaction protocol: who outputs first, hidden input/range/randomness, every query and final-answer command, judge response format and meaning, numeric query limits, flush requirement, termination rule, and verdicts for malformed output, out-of-range values, too many queries, premature EOF, blocked protocol, and extra output. Samples must be transcripts with judge/contestant sides marked.
 
 ## Long-Running Generation
 

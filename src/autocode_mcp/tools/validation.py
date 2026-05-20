@@ -98,6 +98,18 @@ class ProblemValidateTool(Tool):
         if validate_types is None or "all" in validate_types:
             validate_types = ["statement_samples", "sample_files"]
 
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+        if manifest_model is not None and manifest_model.interactive:
+            return await self._validate_interactive_problem(
+                problem_dir=problem_dir,
+                validate_types=validate_types,
+                statement_samples=statement_samples,
+                timeout=timeout,
+            )
+
         # 检查 sol 是否存在
         exe_ext = get_exe_extension()
         sol_exe = os.path.join(problem_dir, "solutions", f"sol{exe_ext}")
@@ -106,10 +118,6 @@ class ProblemValidateTool(Tool):
         if not os.path.exists(sol_exe):
             return ToolResult.fail("sol not found. Run solution_build first.")
 
-        try:
-            manifest_model = load_manifest(problem_dir)
-        except (ValidationError, OSError, ValueError) as exc:
-            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
         checker_bin = checker_exe_path(problem_dir, exe_ext)
         checker_for_samples = manifest_uses_testlib_checker(manifest_model) and os.path.isfile(
             checker_bin
@@ -180,6 +188,82 @@ class ProblemValidateTool(Tool):
                 "Validation failed",
                 **results,
             )
+
+    async def _validate_interactive_problem(
+        self,
+        problem_dir: str,
+        validate_types: list[Literal["statement_samples", "sample_files", "all"]],
+        statement_samples: list[dict] | None,
+        timeout: int,
+    ) -> ToolResult:
+        """验证交互题协议骨架，而不是把 transcript 当作静态 stdin/stdout 样例。"""
+        readme_path = os.path.join(problem_dir, "statements", "README.md")
+        if not os.path.exists(readme_path):
+            readme_path = os.path.join(problem_dir, "README.md")
+        if not os.path.exists(readme_path):
+            return ToolResult.fail(
+                "interactive statement missing",
+                statement_samples={"validated": False, "message": "statement file missing"},
+                sample_files={"validated": False, "message": "statement file missing"},
+            )
+
+        with open(readme_path, encoding="utf-8") as f:
+            content = f.read()
+
+        protocol_checks = {
+            "interaction_protocol_section": "## 交互协议" in content or "interaction protocol" in content.lower(),
+            "flush": "flush" in content.lower() or "刷新" in content,
+            "query_limit": (
+                "查询" in content
+                and ("次数" in content or "上限" in content or "最多" in content or "limit" in content.lower())
+            ),
+            "final_answer": ("最终答案" in content or "final answer" in content.lower()),
+            "judge_response": ("judge" in content.lower() or "交互器返回" in content or "返回" in content),
+            "transcript": ("judge:" in content.lower() and "contestant:" in content.lower())
+            or ("judge" in content.lower() and "选手" in content),
+        }
+        passed = all(protocol_checks.values())
+        statement_result = {
+            "validated": True,
+            "passed": 1 if passed else 0,
+            "failed": 0 if passed else 1,
+            "total": 1,
+            "details": [
+                {
+                    "interactive": True,
+                    "checks": protocol_checks,
+                    "passed": passed,
+                }
+            ],
+            "mode": "interactive_protocol",
+        }
+
+        sample_files_result = {
+            "validated": True,
+            "passed": 1,
+            "failed": 0,
+            "total": 1,
+            "details": [
+                {
+                    "interactive": True,
+                    "message": "transcript samples are validated as protocol text, not static stdin/stdout",
+                }
+            ],
+            "mode": "interactive_protocol",
+        }
+
+        results = {
+            "statement_samples": statement_result,
+            "sample_files": sample_files_result,
+            "interactive_protocol": {
+                "validated": True,
+                "passed": passed,
+                "checks": protocol_checks,
+            },
+        }
+        if passed:
+            return ToolResult.ok(**results, message="Interactive protocol validation passed")
+        return ToolResult.fail("Interactive protocol validation failed", **results)
 
     async def _validate_statement_samples(
         self,

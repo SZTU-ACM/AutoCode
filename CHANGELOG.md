@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-05-21
+
+### Features
+
+- **交互题协议硬化**
+  - `interactor_build` 新增 `interaction_scenarios`，用 testlib `registerInteraction` 约定脚本化验证交互器对合法/非法协议的 verdict。
+  - `problem_create(interactive=true)` 自动生成交互题 README 骨架与 `files/interactor.cpp` 模板。
+  - `problem_validate` 对交互题改走协议校验，不再把 transcript 样例当作普通静态输入输出题处理。
+  - `problem_pack_polygon` 在交互题下会打包并声明 `files/interactor.cpp`，不再无条件依赖 `val.cpp`。
+
+### Improvements
+
+- README、CLAUDE、skills、agents、示例题面与题解同步补充交互题规范。
+- 交互器模板改为 testlib 语义的 `tout` / `ouf` / `inf` 调用方式。
+
+### Tests
+
+- 新增交互题协议、interactor 场景、workflow gate 与 Polygon 打包回归测试。
+
 ## [1.0.3] - 2026-05-04
 
 ### Features

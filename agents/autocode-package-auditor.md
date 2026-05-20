@@ -20,6 +20,7 @@ Minimum evidence before `go`:
 - successful statement/sample validation evidence (`problem_validate`);
 - successful final test verification evidence (`problem_verify_tests`);
 - no unresolved blocker in checker/interactor strategy when applicable.
+- for interactive problems: statement protocol checklist is complete, `files/interactor.cpp` uses `registerInteraction` with `tout`/`ouf`, and `interactor_build` has scripted scenarios covering valid and invalid conversations.
 
 Output requirements:
 

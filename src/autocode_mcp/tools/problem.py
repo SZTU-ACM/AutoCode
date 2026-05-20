@@ -130,35 +130,70 @@ class ProblemCreateTool(Tool):
                 "and place it in src/autocode_mcp/templates/."
             )
 
+        if interactive:
+            template_interactor = os.path.join(TEMPLATES_DIR, "interactor_template.cpp")
+            dest_interactor = os.path.join(problem_dir, "files", "interactor.cpp")
+            if os.path.exists(template_interactor) and not os.path.exists(dest_interactor):
+                shutil.copy2(template_interactor, dest_interactor)
+
         # 创建基础 README.md
         readme_path = os.path.join(problem_dir, "statements", "README.md")
         if not os.path.exists(readme_path):
             with open(readme_path, "w", encoding="utf-8") as f:
-                f.write(
-                    f"# {problem_name}\n\n"
-                    "## 时间限制与空间限制\n\n"
-                    "- 时间限制：\n"
-                    "- 空间限制：\n\n"
-                    "## 题目背景（可选）\n\n"
-                    "如不需要背景，可删除本节。\n\n"
-                    "## 题目描述\n\n"
-                    "请完整描述任务目标、判定标准与关键术语。\n\n"
-                    "## 输入格式\n\n"
-                    "请完整给出输入结构，并在本节明确所有变量范围与总规模约束。\n\n"
-                    "## 输出格式\n\n"
-                    "请明确输出内容与格式细节。\n\n"
-                    "## 样例\n\n"
-                    "### 样例输入 #1\n\n"
-                    "```\n"
-                    "（请填写样例输入）\n"
-                    "```\n\n"
-                    "### 样例输出 #1\n\n"
-                    "```\n"
-                    "（请填写样例输出）\n"
-                    "```\n\n"
-                    "## 说明\n\n"
-                    "所有样例解释统一写在本节；只需解释有代表性的样例即可。\n"
-                )
+                if interactive:
+                    f.write(
+                        f"# {problem_name}\n\n"
+                        "## 时间限制与空间限制\n\n"
+                        "- 时间限制：\n"
+                        "- 空间限制：\n\n"
+                        "## 题目背景（可选）\n\n"
+                        "如不需要背景，可删除本节。\n\n"
+                        "## 题目描述\n\n"
+                        "请完整描述选手需要完成的目标、隐藏状态含义、判定标准与关键术语。\n\n"
+                        "## 输入格式\n\n"
+                        "本题为交互题，选手程序不会获得传统静态输入。请在本节明确交互器内部输入或隐藏参数的范围、随机性来源与总规模约束。\n\n"
+                        "## 输出格式\n\n"
+                        "请完整定义选手可输出的每一种命令、参数范围、最终答案格式，以及每次输出后的 flush 要求。\n\n"
+                        "## 交互协议\n\n"
+                        "- 明确交互开始时 judge 首先输出什么，或是否等待选手先查询。\n"
+                        "- 明确每种查询格式、judge 响应格式、响应取值含义和查询次数上限。\n"
+                        "- 明确最终答案格式、输出最终答案后是否必须立即结束程序。\n"
+                        "- 明确非法格式、越界参数、查询超限、提前 EOF、未及时 flush、读到错误响应时的判定。\n"
+                        "- 若 judge 可能自适应回答，必须说明哪些不变量始终成立。\n\n"
+                        "## 样例\n\n"
+                        "交互题样例应写成一次 transcript，而不是传统输入输出。请标明哪些行来自 judge，哪些行来自选手。\n\n"
+                        "```text\n"
+                        "（请填写样例交互过程）\n"
+                        "```\n\n"
+                        "## 说明\n\n"
+                        "所有样例解释统一写在本节；只需解释有代表性的样例即可。\n"
+                    )
+                else:
+                    f.write(
+                        f"# {problem_name}\n\n"
+                        "## 时间限制与空间限制\n\n"
+                        "- 时间限制：\n"
+                        "- 空间限制：\n\n"
+                        "## 题目背景（可选）\n\n"
+                        "如不需要背景，可删除本节。\n\n"
+                        "## 题目描述\n\n"
+                        "请完整描述任务目标、判定标准与关键术语。\n\n"
+                        "## 输入格式\n\n"
+                        "请完整给出输入结构，并在本节明确所有变量范围与总规模约束。\n\n"
+                        "## 输出格式\n\n"
+                        "请明确输出内容与格式细节。\n\n"
+                        "## 样例\n\n"
+                        "### 样例输入 #1\n\n"
+                        "```\n"
+                        "（请填写样例输入）\n"
+                        "```\n\n"
+                        "### 样例输出 #1\n\n"
+                        "```\n"
+                        "（请填写样例输出）\n"
+                        "```\n\n"
+                        "## 说明\n\n"
+                        "所有样例解释统一写在本节；只需解释有代表性的样例即可。\n"
+                    )
 
         tutorial_path = os.path.join(problem_dir, "statements", "tutorial.md")
         if not os.path.exists(tutorial_path):
@@ -1333,11 +1368,13 @@ class ProblemPackPolygonTool(Tool):
         workflow_state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
         require_tests_verified = True
         min_limit_case_ratio = 0.5
+        is_interactive_problem = False
         problem_manifest_path = os.path.join(problem_dir, "autocode.json")
         if os.path.exists(problem_manifest_path):
             try:
                 with open(problem_manifest_path, encoding="utf-8") as pmf:
                     problem_manifest = json.load(pmf)
+                is_interactive_problem = bool(problem_manifest.get("interactive", False))
                 quality_gates = problem_manifest.get("quality_gates", {})
                 if isinstance(quality_gates, dict):
                     require_tests_verified = bool(quality_gates.get("require_tests_verified", True))
@@ -1353,6 +1390,7 @@ class ProblemPackPolygonTool(Tool):
             try:
                 with open(problem_manifest_path, encoding="utf-8") as pmf:
                     problem_manifest = json.load(pmf)
+                is_interactive_problem = bool(problem_manifest.get("interactive", is_interactive_problem))
                 quality_gates = problem_manifest.get("quality_gates", {})
                 if isinstance(quality_gates, dict):
                     required_limit_semantics = bool(quality_gates.get("require_limit_semantics", True))
@@ -1362,6 +1400,11 @@ class ProblemPackPolygonTool(Tool):
                 required_limit_semantics = True
                 required_wrong_solution_kill = True
                 required_validator_check = True
+
+        interactor_cpp = os.path.join(problem_dir, "files", "interactor.cpp")
+        root_interactor_cpp = os.path.join(problem_dir, "interactor.cpp")
+        if is_interactive_problem and not os.path.exists(interactor_cpp) and not os.path.exists(root_interactor_cpp):
+            return ToolResult.fail("interactive problem requires files/interactor.cpp")
 
         workflow_state: dict[str, object] = {}
         if os.path.exists(workflow_state_path):
@@ -1465,7 +1508,7 @@ class ProblemPackPolygonTool(Tool):
 
         # 2. 移动文件到 files/
         files_dir = os.path.join(problem_dir, "files")
-        for src in ["testlib.h", "gen.cpp", "val.cpp"]:
+        for src in ["testlib.h", "gen.cpp", "val.cpp", "interactor.cpp"]:
             src_path = os.path.join(problem_dir, src)
             if os.path.exists(src_path):
                 dst_path = os.path.join(files_dir, src)
@@ -1502,11 +1545,20 @@ class ProblemPackPolygonTool(Tool):
             problem_name = os.path.basename(problem_dir)
             xml_problem_name = escape(problem_name, {'"': "&quot;"})
             xml_answer_ext = escape(answer_ext, {'"': "&quot;"})
+            validator_cpp = os.path.join(files_dir, "val.cpp")
+            include_validator = (not is_interactive_problem) or os.path.isfile(validator_cpp)
             checker_cpp = os.path.join(files_dir, "checker.cpp")
             has_checker = os.path.isfile(checker_cpp)
+            interactor_cpp = os.path.join(files_dir, "interactor.cpp")
+            has_interactor = is_interactive_problem and os.path.isfile(interactor_cpp)
             checker_testset_line = (
                 '\n            <checker type="testlib" path="files/checker.cpp"/>'
                 if has_checker
+                else ""
+            )
+            interactor_testset_line = (
+                '\n            <interactor type="testlib" path="files/interactor.cpp"/>'
+                if has_interactor
                 else ""
             )
             checker_executable_block = (
@@ -1515,6 +1567,22 @@ class ProblemPackPolygonTool(Tool):
                 <source path="files/checker.cpp"/>
             </executable>"""
                 if has_checker
+                else ""
+            )
+            validator_executable_block = (
+                """
+            <executable>
+                <source path="files/val.cpp"/>
+            </executable>"""
+                if include_validator
+                else ""
+            )
+            interactor_executable_block = (
+                """
+            <executable>
+                <source path="files/interactor.cpp"/>
+            </executable>"""
+                if has_interactor
                 else ""
             )
             xml_content = f'''<?xml version="1.0" encoding="utf-8" standalone="no"?>
@@ -1531,7 +1599,7 @@ class ProblemPackPolygonTool(Tool):
             <memory-limit>{memory_limit_bytes}</memory-limit>
             <test-count>{actual_test_count}</test-count>
             <input-path-pattern>tests/%02d.in</input-path-pattern>
-            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>{checker_testset_line}
+            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>{checker_testset_line}{interactor_testset_line}
         </testset>
     </judging>
     <files>
@@ -1541,10 +1609,7 @@ class ProblemPackPolygonTool(Tool):
         <executables>
             <executable>
                 <source path="files/gen.cpp"/>
-            </executable>
-            <executable>
-                <source path="files/val.cpp"/>
-            </executable>{checker_executable_block}
+            </executable>{validator_executable_block}{checker_executable_block}{interactor_executable_block}
         </executables>
     </files>
     <assets>

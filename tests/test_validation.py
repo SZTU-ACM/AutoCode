@@ -7,6 +7,8 @@ ProblemValidateTool 测试。
 import os
 import tempfile
 
+import pytest
+
 from autocode_mcp.tools.validation import ProblemValidateTool
 
 
@@ -222,6 +224,61 @@ class TestProblemValidateTool:
         assert "problem_dir" in schema["properties"]
         assert "validate_types" in schema["properties"]
         assert "statement_samples" in schema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_interactive_protocol_validation_accepts_transcript(self, tmp_path):
+        """交互题 transcript 样例不应被当作普通 stdin/stdout 样例执行。"""
+        (tmp_path / "statements").mkdir()
+        (tmp_path / "autocode.json").write_text(
+            '{"schema_version":"1.0","problem_name":"I","interactive":true}',
+            encoding="utf-8",
+        )
+        (tmp_path / "statements" / "README.md").write_text(
+            """# I
+
+## 输入格式
+
+本题为交互题，选手程序不会获得传统静态输入。
+
+## 输出格式
+
+输出 `? x` 查询，输出 `! s` 作为最终答案。每次输出后必须 flush 或刷新。
+
+## 交互协议
+
+交互开始时 judge 等待选手输出。最多允许 20 次查询。交互器返回 -1、0、1。
+
+## 样例
+
+```text
+contestant: ? 50
+judge: -1
+contestant: ! 63
+```
+""",
+            encoding="utf-8",
+        )
+
+        result = await ProblemValidateTool().execute(problem_dir=str(tmp_path))
+
+        assert result.success
+        assert result.data["interactive_protocol"]["passed"] is True
+        assert result.data["statement_samples"]["mode"] == "interactive_protocol"
+
+    @pytest.mark.asyncio
+    async def test_interactive_protocol_validation_rejects_missing_protocol(self, tmp_path):
+        """交互题题面缺协议时应失败。"""
+        (tmp_path / "statements").mkdir()
+        (tmp_path / "autocode.json").write_text(
+            '{"schema_version":"1.0","problem_name":"I","interactive":true}',
+            encoding="utf-8",
+        )
+        (tmp_path / "statements" / "README.md").write_text("# I\n\n## 样例\n\n无\n", encoding="utf-8")
+
+        result = await ProblemValidateTool().execute(problem_dir=str(tmp_path))
+
+        assert not result.success
+        assert result.data["interactive_protocol"]["passed"] is False
 
 
 class TestExtractSamplesPlainText:

@@ -118,11 +118,17 @@ validator_build / checker_build
   替换为 interactor_build
 ```
 
+交互题不是简单地“没有输入输出”。`statements/README.md` 必须把协议写成可执行契约：谁先输出、隐藏参数范围、每种查询和最终答案的格式、judge 响应含义、查询次数上限、每次输出后的 flush、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞和继续输出时的判定。样例应写成交互 transcript，明确哪些行来自 judge、哪些行来自选手。
+
+`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `tout` 向选手输出并在每次响应后 `tout.flush()`，用 `ouf` 读取选手输出，所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。不要用 `std::cout` 向选手发送交互数据。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的 verdict。
+
+交互题的 `problem_validate` 会检查题面协议要素与 transcript，不会把 transcript 当作普通 stdin/stdout 样例执行。`problem_pack_polygon` 会在 `autocode.json` 标记 `interactive: true` 时声明 `files/interactor.cpp`，并避免无条件引用不存在的 `val.cpp`。
+
 关键门禁：
 
 - `brute` 必须在 `sol` 之后构建。
 - 非交互题必须通过 `validator_build`，且 `accuracy >= 0.9`。
-- 交互题必须先完成可用的 `interactor_build`。
+- 交互题必须先完成可用的 `interactor_build`，并提供协议覆盖完整的 `interaction_scenarios`。
 - `stress_test_run` 必须完整跑完所有轮次。
 - `problem_generate_tests` 前必须通过 `problem_validate`。
 - `problem_pack_polygon` 前必须通过 `problem_verify_tests`，并满足门禁要求的结构化质量信号（如 `limit_semantics`、`wrong_solution_kill`、`validator_check`）。

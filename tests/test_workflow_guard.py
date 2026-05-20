@@ -85,6 +85,41 @@ def test_post_tool_marks_stress_passed(tmp_path):
     assert state["stress_passed"] is True
 
 
+def test_post_tool_marks_interactor_ready_from_scenarios(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    write_manifest(problem_dir, interactive=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__interactor_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "structuredContent": {
+                "success": True,
+                "data": {
+                    "pass_rate": 0.0,
+                    "fail_rate": 0.0,
+                    "interaction_scenarios": {
+                        "validated": True,
+                        "accuracy": 1.0,
+                        "total": 2,
+                    },
+                    "scenario_accuracy": 1.0,
+                },
+            }
+        },
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["interactor_ready"] is True
+    assert state["interaction_scenarios"]["accuracy"] == 1.0
+
+
 def test_pre_tool_denies_generator_when_validator_accuracy_absent(tmp_path, capsys):
     module = load_module()
     problem_dir = tmp_path / "problem"
@@ -175,6 +210,42 @@ def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsy
     parsed = json.loads(captured)
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "interactor_build" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_pre_tool_allows_interactive_generator_with_scripted_interactor(tmp_path, capsys):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    (problem_dir / "autocode.json").write_text('{"interactive": true}', encoding="utf-8")
+    state = {
+        "problem_dir": str(problem_dir),
+        "created": True,
+        "interactive": True,
+        "sol_built": True,
+        "brute_built": True,
+        "solution_analyzed": True,
+        "std_audited": True,
+        "brute_audited": True,
+        "interactor_ready": False,
+        "interaction_scenarios": {
+            "validated": True,
+            "accuracy": 1.0,
+            "total": 2,
+        },
+    }
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+    }
+
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert captured.strip() == ""
 
 
 def test_pre_tool_denies_pack_before_tests_verified(tmp_path, capsys):

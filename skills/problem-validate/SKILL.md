@@ -20,9 +20,10 @@ Use when:
 
 1. Run `problem_validate` against statement samples and sample files.
 2. When `autocode.json` has `special_judge: true`, `stress_comparison: "checker"`, and a compiled `files/checker`, sample checks use the checker (same argv convention as final verification); otherwise outputs are compared with the usual float/string rules.
-3. Treat any mismatch as a release blocker.
-4. Classify failures by source: statement text, sample files, or solution behavior.
-5. Re-run validation after fixes before allowing progression.
+3. For interactive problems, do not treat transcript samples as ordinary stdin/stdout. Validate the protocol text with `statement-audit` and validate interactor behavior with `interactor_build interaction_scenarios`.
+4. Treat any mismatch as a release blocker.
+5. Classify failures by source: statement text, sample files, solution behavior, or interactor protocol.
+6. Re-run validation after fixes before allowing progression.
 
 ## Output Contract
 

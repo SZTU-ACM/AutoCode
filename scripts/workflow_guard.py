@@ -192,7 +192,18 @@ def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
 
 
 def _interactor_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    return not bool(state.get("interactive", False)) or bool(state.get("interactor_ready"))
+    if not bool(state.get("interactive", False)):
+        return True
+    if bool(state.get("interactor_ready")):
+        return True
+    interaction = state.get("interaction_scenarios", {})
+    if not isinstance(interaction, dict):
+        return False
+    try:
+        accuracy = float(interaction.get("accuracy", 0))
+    except (TypeError, ValueError):
+        return False
+    return bool(interaction.get("validated")) and int(interaction.get("total", 0)) > 0 and accuracy >= 1.0
 
 
 def _quality_gate_enabled(state: dict[str, Any], key: str, default: bool = True) -> bool:
@@ -569,6 +580,11 @@ def post_tool(payload: dict[str, Any]) -> int:
         elif short_name == "checker_build":
             state["checker_accuracy"] = None
             state["checker_ready"] = False
+        elif short_name == "interactor_build":
+            state["interactor_ready"] = False
+            state["interaction_scenarios"] = {}
+            state["interactor_pass_rate"] = 0
+            state["interactor_fail_rate"] = 0
         elif short_name == "problem_pack_polygon":
             state["packaged"] = False
         _append_history(state, tool=short_name, success=False, gate_result="post")
@@ -628,7 +644,27 @@ def post_tool(payload: dict[str, Any]) -> int:
     elif short_name == "interactor_build":
         pass_rate = data.get("pass_rate", 0)
         fail_rate = data.get("fail_rate", 0)
-        state["interactor_ready"] = pass_rate == 1.0 and fail_rate >= 0.8
+        interaction_scenarios = data.get("interaction_scenarios", {})
+        if isinstance(interaction_scenarios, dict):
+            state["interaction_scenarios"] = interaction_scenarios
+        else:
+            state["interaction_scenarios"] = {}
+        scenario_accuracy = data.get("scenario_accuracy")
+        scenario_ready = False
+        if isinstance(interaction_scenarios, dict):
+            try:
+                scenario_ready = (
+                    bool(interaction_scenarios.get("validated"))
+                    and int(interaction_scenarios.get("total", 0)) > 0
+                    and float(interaction_scenarios.get("accuracy", 0)) >= 1.0
+                )
+            except (TypeError, ValueError):
+                scenario_ready = False
+        if isinstance(scenario_accuracy, (int, float)) and scenario_accuracy < 1.0:
+            scenario_ready = False
+        state["interactor_ready"] = scenario_ready or (pass_rate == 1.0 and fail_rate >= 0.8)
+        state["interactor_pass_rate"] = pass_rate
+        state["interactor_fail_rate"] = fail_rate
     elif short_name == "problem_pack_polygon":
         state["packaged"] = True
 

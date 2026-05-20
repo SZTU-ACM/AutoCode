@@ -91,6 +91,29 @@ async def test_problem_create_readme():
 
 
 @pytest.mark.asyncio
+async def test_problem_create_interactive_bootstrap():
+    """交互题初始化应带交互协议骨架和 interactor 模板。"""
+    tool = ProblemCreateTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "interactive_test")
+        result = await tool.execute(
+            problem_dir=problem_dir,
+            problem_name="Interactive Test",
+            interactive=True,
+        )
+
+        assert result.success
+        assert os.path.exists(os.path.join(problem_dir, "files", "interactor.cpp"))
+
+        readme_path = os.path.join(problem_dir, "statements", "README.md")
+        with open(readme_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "## 交互协议" in content
+        assert "flush" in content
+
+
+@pytest.mark.asyncio
 async def test_problem_pack_polygon():
     """测试 Polygon 打包。"""
     create_tool = ProblemCreateTool()
@@ -189,6 +212,53 @@ async def test_problem_pack_polygon_xml_includes_checker_when_present():
         content = Path(xml_path).read_text(encoding="utf-8")
         assert "files/checker.cpp" in content
         assert "<checker" in content
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_xml_includes_interactor_when_interactive():
+    """交互题打包时 problem.xml 应声明 interactor。"""
+    tool = ProblemPackPolygonTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "xml_interactor")
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "files"), exist_ok=True)
+        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "problem_name": "Interactive",
+                    "interactive": True,
+                    "quality_gates": {
+                        "require_tests_verified": True,
+                        "require_limit_semantics": True,
+                        "require_wrong_solution_kill": True,
+                        "require_validator_check": True,
+                    },
+                },
+                f,
+            )
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# Test\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, "files", "interactor.cpp"), "w", encoding="utf-8") as f:
+            f.write("// interactor\n")
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        write_verified_workflow_state(problem_dir)
+
+        result = await tool.execute(problem_dir=problem_dir, time_limit=1, memory_limit=256)
+
+        assert result.success
+        content = Path(os.path.join(problem_dir, "problem.xml")).read_text(encoding="utf-8")
+        assert "files/interactor.cpp" in content
+        assert "<interactor" in content
+        assert "files/val.cpp" not in content
 
 
 @pytest.mark.asyncio

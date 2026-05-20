@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 
-from ..utils.compiler import compile_cpp
+from ..utils.checker_judge import verdict_from_run
+from ..utils.compiler import compile_cpp, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult
 from .mixins import resolve_source
@@ -29,11 +31,12 @@ class InteractorBuildTool(Tool):
         基于论文 Algorithm 4 实现:
         1. 保存代码到 problem_dir/files/interactor.cpp
         2. 编译生成 files/interactor.exe
-        3. 运行变异测试验证区分能力
-        4. 返回 pass_rate 和 fail_rate
+        3. 可用 interaction_scenarios 按 testlib registerInteraction 约定验证协议判定
+        4. 可运行变异测试验证区分能力
+        5. 返回 scenario accuracy、pass_rate 和 fail_rate
 
         注意：此工具不生成代码，代码由 Client LLM 生成后传入。
-        变异程序也应由 Client LLM 生成。
+        交互场景和变异程序也应由 Client LLM 生成。
         """
 
     @property
@@ -55,12 +58,30 @@ class InteractorBuildTool(Tool):
                 },
                 "reference_solution_path": {
                     "type": "string",
-                    "description": "参考解法路径（用于验证正确解能通过）",
+                    "description": "参考解法路径（旧式双进程管道验证；testlib interactor 优先使用 interaction_scenarios）",
                 },
                 "mutant_solutions": {
                     "type": "array",
-                    "description": "变异解法路径列表（用于验证错误解被拒绝）",
+                    "description": "变异解法路径列表（旧式双进程管道验证；testlib interactor 优先使用 interaction_scenarios）",
                     "items": {"type": "string"},
+                },
+                "interaction_scenarios": {
+                    "type": "array",
+                    "description": "脚本化交互场景。按 testlib registerInteraction 约定运行 interactor <input-file> <output-file> <answer-file>，并把 contestant_output 送入 interactor stdin。",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "input": {"type": "string", "description": "测试输入文件内容，供 inf 读取"},
+                            "answer": {"type": "string", "description": "可选标准答案文件内容，供 ans 读取"},
+                            "contestant_output": {"type": "string", "description": "模拟选手在整个交互过程中的输出，供 ouf 读取"},
+                            "expected_verdict": {
+                                "type": "string",
+                                "enum": ["AC", "WA", "PE", "FAIL", "TLE"],
+                                "description": "期望 verdict，默认 AC",
+                            },
+                        },
+                        "required": ["input", "contestant_output"],
+                    },
                 },
                 "compiler": {
                     "type": "string",
@@ -82,6 +103,7 @@ class InteractorBuildTool(Tool):
         source_path: str | None = None,
         reference_solution_path: str | None = None,
         mutant_solutions: list[str] | None = None,
+        interaction_scenarios: list[dict] | None = None,
         compiler: str = "g++",
     ) -> ToolResult:
         """执行 Interactor 构建。"""
@@ -117,21 +139,48 @@ class InteractorBuildTool(Tool):
 
         binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
 
-        # 如果没有提供参考解和变异解，直接返回成功（但 pass_rate 为 0）
+        scenario_report = None
+        if interaction_scenarios:
+            scenario_report = await self._run_interaction_scenarios(
+                interactor_exe=binary_path,
+                problem_dir=problem_dir,
+                scenarios=interaction_scenarios,
+                timeout=10,
+            )
+            if scenario_report["accuracy"] < 1.0:
+                return ToolResult.fail(
+                    "Interactor scripted scenarios failed",
+                    source_path=compile_source,
+                    canonical_path=canonical_path,
+                    binary_path=binary_path,
+                    binary_size=binary_size,
+                    compile_log=compile_result.stderr,
+                    interaction_scenarios=scenario_report,
+                    scenario_accuracy=scenario_report["accuracy"],
+                )
+
+        # 如果没有提供任何验证，直接返回成功（但 pass_rate 为 0）
         if not reference_solution_path and not mutant_solutions:
+            message = "Interactor built successfully"
+            if scenario_report is None:
+                message += " (no validation performed)"
+            else:
+                message += f", scenario_accuracy={scenario_report['accuracy']:.2%}"
             return ToolResult.ok(
                 source_path=compile_source,
                 canonical_path=canonical_path,
                 binary_path=binary_path,
                 binary_size=binary_size,
                 compile_log=compile_result.stderr,
+                interaction_scenarios=scenario_report,
+                scenario_accuracy=scenario_report["accuracy"] if scenario_report else None,
                 pass_rate=0.0,
                 fail_rate=0.0,
                 pass_count=0,
                 pass_total=0,
                 fail_count=0,
                 fail_total=0,
-                message="Interactor built successfully (no validation performed)",
+                message=message,
             )
 
         # 验证正确解通过率
@@ -180,6 +229,8 @@ class InteractorBuildTool(Tool):
             binary_path=binary_path,
             binary_size=binary_size,
             compile_log=compile_result.stderr,
+            interaction_scenarios=scenario_report,
+            scenario_accuracy=scenario_report["accuracy"] if scenario_report else None,
             pass_rate=pass_rate,
             fail_rate=fail_rate,
             pass_count=pass_count,
@@ -188,6 +239,69 @@ class InteractorBuildTool(Tool):
             fail_total=fail_total,
             message=f"Interactor built, pass_rate={pass_rate:.2%}, fail_rate={fail_rate:.2%}",
         )
+
+    async def _run_interaction_scenarios(
+        self,
+        interactor_exe: str,
+        problem_dir: str,
+        scenarios: list[dict],
+        timeout: int = 10,
+    ) -> dict:
+        """用脚本化选手输出验证 testlib interactor 的协议判定能力。"""
+        details = []
+        correct_count = 0
+
+        with tempfile.TemporaryDirectory(dir=problem_dir) as temp_dir:
+            for i, scenario in enumerate(scenarios):
+                input_data = scenario.get("input", "")
+                answer_data = scenario.get("answer", "")
+                contestant_output = scenario.get("contestant_output", "")
+                expected_verdict = scenario.get("expected_verdict", "AC")
+
+                input_file = os.path.join(temp_dir, f"input_{i}.txt")
+                output_file = os.path.join(temp_dir, f"interaction_{i}.txt")
+                answer_file = os.path.join(temp_dir, f"answer_{i}.txt")
+
+                with open(input_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(input_data)
+                with open(answer_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(answer_data)
+
+                run_result = await run_binary_with_args(
+                    interactor_exe,
+                    [input_file, output_file, answer_file],
+                    stdin=contestant_output,
+                    timeout=timeout,
+                )
+                actual_verdict = verdict_from_run(run_result)
+                is_correct = actual_verdict == expected_verdict
+                if is_correct:
+                    correct_count += 1
+
+                transcript = ""
+                if os.path.exists(output_file):
+                    with open(output_file, encoding="utf-8") as f:
+                        transcript = f.read()
+
+                details.append(
+                    {
+                        "index": i + 1,
+                        "expected_verdict": expected_verdict,
+                        "actual_verdict": actual_verdict,
+                        "correct": is_correct,
+                        "interactor_output": transcript,
+                        "stderr": (run_result.stderr or "")[:500],
+                    }
+                )
+
+        total = len(scenarios)
+        return {
+            "validated": True,
+            "correct_count": correct_count,
+            "total": total,
+            "accuracy": correct_count / total if total else 0.0,
+            "details": details,
+        }
 
     async def _run_interactor_test(
         self,

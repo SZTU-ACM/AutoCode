@@ -12,7 +12,6 @@ from autocode_mcp.tools.interactor import InteractorBuildTool
 # 简单的 Interactor 代码（基于 testlib.h）
 INTERACTOR_CODE = """
 #include "testlib.h"
-#include <iostream>
 
 int main(int argc, char* argv[]) {
     registerInteraction(argc, argv);
@@ -21,8 +20,8 @@ int main(int argc, char* argv[]) {
     int n = inf.readInt();
 
     // 输出给选手
-    std::cout << n << std::endl;
-    std::cout.flush();
+    tout << n << std::endl;
+    tout.flush();
 
     // 读取选手输出
     int answer = ouf.readInt();
@@ -82,6 +81,63 @@ async def test_interactor_build_no_validation():
         assert result.success
         # 没有提供参考解和变异解，应该直接返回成功
         assert "binary_path" in result.data
+
+
+@pytest.mark.asyncio
+async def test_interactor_build_with_scripted_scenarios():
+    """测试 testlib registerInteraction 的脚本化场景验证。"""
+    tool = InteractorBuildTool()
+
+    scenarios = [
+        {
+            "input": "5\n",
+            "contestant_output": "10\n",
+            "answer": "",
+            "expected_verdict": "AC",
+        },
+        {
+            "input": "5\n",
+            "contestant_output": "15\n",
+            "answer": "",
+            "expected_verdict": "WA",
+        },
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            code=INTERACTOR_CODE,
+            interaction_scenarios=scenarios,
+        )
+
+        assert result.success
+        report = result.data["interaction_scenarios"]
+        assert report["validated"] is True
+        assert report["total"] == 2
+        assert report["accuracy"] == 1.0
+        assert report["details"][0]["interactor_output"] == "5\n"
+
+
+@pytest.mark.asyncio
+async def test_interactor_build_fails_when_scripted_scenario_mismatches():
+    """脚本化场景不匹配时不应把 interactor_build 视为成功。"""
+    tool = InteractorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            code=INTERACTOR_CODE,
+            interaction_scenarios=[
+                {
+                    "input": "5\n",
+                    "contestant_output": "15\n",
+                    "expected_verdict": "AC",
+                }
+            ],
+        )
+
+        assert not result.success
+        assert result.data["interaction_scenarios"]["accuracy"] == 0.0
 
 
 SIMPLE_SOLUTION = """

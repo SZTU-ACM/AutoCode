@@ -213,6 +213,23 @@ INTERACTOR_PROMPT = """
 
 ## 基于论文 Algorithm 4: BUILDINTERACTOR
 
+### 题面必须先写清的交互协议
+- 本题是交互题，不是传统静态输入输出题；题面必须明确 judge 和选手谁先输出。
+- 明确隐藏状态/输入范围、是否随机或自适应，以及始终成立的不变量。
+- 明确每一种选手命令的格式、参数范围、judge 响应格式、响应值含义。
+- 明确查询次数上限、总输出大小限制、最终答案格式、输出最终答案后是否必须立即结束。
+- 明确每次输出后必须 flush；未 flush 可能导致阻塞、TLE 或 Idleness limit exceeded。
+- 明确非法格式、越界查询、查询超限、提前 EOF、读到错误响应、继续输出等情况的 verdict。
+- 样例应是 transcript：标出哪些行来自 judge，哪些行来自选手；不要把 transcript 当作普通 stdin/stdout 样例验证。
+
+### testlib interactor 调用约定
+- 使用 `registerInteraction(argc, argv)`，命令行是 `interactor <input-file> <output-file> [answer-file]`。
+- 用 `inf` 读取测试输入或隐藏参数，用 `ans` 读取可选标准答案。
+- 用 `tout` 向选手程序发送数据，写完每一次响应后 `tout.flush()`。
+- 用 `ouf` 读取选手程序输出；`ouf.readInt(l, r)` 等范围检查失败应得到 WA/PE，不要手写不完整解析。
+- 不要用 `std::cout` 向选手输出；testlib interactor 的选手输出通道是 `tout`。
+- 所有 AC/WA/PE/FAIL 必须通过 `quitf(_ok/_wa/_pe/_fail, ...)` 明确退出。
+
 ### 变异类型
 - 交换 </<=/>=
 - off-by-one 错误
@@ -221,24 +238,67 @@ INTERACTOR_PROMPT = """
 - RNG 误用
 
 ### 评分指标
+- interaction_scenarios accuracy: 脚本化协议场景的 verdict 匹配率，目标 100%
 - pass_rate: 正确解通过的比例
 - fail_rate: 变异解被拒绝的比例
+
+### 脚本化交互场景格式
+`interactor_build` 可用 `interaction_scenarios` 测 interactor 的协议判定能力：
+
+```json
+{
+    "input": "测试输入文件内容",
+    "answer": "可选标准答案文件内容",
+    "contestant_output": "模拟选手完整输出",
+    "expected_verdict": "AC/WA/PE/FAIL/TLE"
+}
+```
+
+必须覆盖：
+- 合法完整交互；
+- 非法命令 token；
+- 参数越界；
+- 查询次数刚好上限与超过上限；
+- 错误最终答案；
+- 提前 EOF 或多余输出；
+- 需要 flush 的每个交互回合。
 
 ### 代码模板
 ```cpp
 #include "testlib.h"
-#include <iostream>
 int main(int argc, char* argv[]) {
     registerInteraction(argc, argv);
-    // 交互逻辑
-    std::cout << data << std::endl;
-    std::cout.flush();
-    int answer = ouf.readInt();
-    // 验证
+    int secret = inf.readInt();
+    int queries = 0;
+    const int MAX_Q = 20;
+    while (true) {
+        std::string op = ouf.readToken();
+        if (op == "?") {
+            if (++queries > MAX_Q) quitf(_wa, "too many queries");
+            int x = ouf.readInt(1, 100);
+            int response = (x < secret ? -1 : (x > secret ? 1 : 0));
+            tout << response << '\\n';
+            tout.flush();
+        } else if (op == "!") {
+            int answer = ouf.readInt(1, 100);
+            if (answer == secret) quitf(_ok, "accepted in %d queries", queries);
+            quitf(_wa, "wrong final answer");
+        } else {
+            quitf(_pe, "unknown command");
+        }
+    }
 }
 ```
 
+### 常见错误
+- 用 `cout` 代替 `tout`，导致本地/Polygon testlib interactor 通道错误。
+- 题面没有写 query limit 或非法输出后果，导致选手不知道何时停止。
+- 只测试正确解，不测试越界查询、超限查询、错误 final answer。
+- interactor 对非法 token 死循环或等待更多输入，而不是给出 WA/PE。
+- 选手输出最终答案后 interactor 没有立即 `quitf`，继续等待导致挂起。
+
 ### 目标
+- 脚本化交互场景 accuracy = 100%
 - pass_rate = 100%（正确解必须通过）
 - fail_rate > 80%（变异解应该被拒绝）
 """
