@@ -151,7 +151,9 @@ class ProblemAuditTool(Tool):
                 }
             )
         if manifest.audit_gates.require_statement_consistency and not statement_consistency["passed"]:
-            blocking.append({"gate": "statement_consistency", "reason": statement_consistency["message"]})
+            blocking.append(
+                {"gate": "statement_consistency", "reason": str(statement_consistency["message"])}
+            )
         elif not statement_consistency["passed"]:
             warnings.append(
                 {
