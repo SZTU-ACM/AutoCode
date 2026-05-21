@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-05-21
+
+### Features
+
+- **完整验题审计链**
+  - 新增 `problem_audit` 与 `autocode-audit`，聚合 manifest、workflow state、终测质量信号和难度证据，输出 `decision`、`blocking_issues`、`risk_report`、`quality_signals`、`difficulty_signals` 与 `next_actions`。
+  - 新增 `skills/problem-difficulty-rating`，用于把 `problem_audit` 的确定性信号转成 CF-style rating、难度档位、原因与置信度说明。
+
+### Improvements
+
+- `problem_verify_tests` 增强为更强门禁：新增重复/近重复数据、规模分布、case purpose 覆盖和错解杀伤统计。
+- `problem_pack_polygon` 可在 full audit 门禁开启时要求最近一次 `problem_audit(mode=full)` 通过。
+- README、CLAUDE、agents、prompts、manifest 模板与测试同步更新。
+
+### Tests
+
+- 新增 audit / difficulty / packaging 回归测试，覆盖 manifest 兼容、validator/checker/interactor 自测门禁和 full audit 打包门禁。
+
 ## [1.0.4] - 2026-05-21
 
 ### Features

@@ -32,6 +32,25 @@ class QualityGates(BaseModel):
     min_limit_case_ratio: float = Field(default=0.5, ge=0, le=1)
 
 
+class AuditGates(BaseModel):
+    require_full_audit: bool = False
+    require_statement_consistency: bool = True
+    require_validator_self_test: bool = False
+    require_checker_self_test: bool = True
+    require_interactor_self_test: bool = True
+    max_duplicate_input_ratio: float = Field(default=0.2, ge=0, le=1)
+    min_difficulty_confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class DifficultyProfile(BaseModel):
+    rating: int | None = Field(default=None, ge=800, le=3500)
+    band: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    algorithm_tags: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class AutoCodeManifest(BaseModel):
     schema_version: str = "1.0"
     problem_name: str
@@ -52,10 +71,12 @@ class AutoCodeManifest(BaseModel):
     memory_limit_mb: int = 256
     statement_path: str = "statements/README.md"
     tutorial_path: str = "statements/tutorial.md"
-    constraints: dict[str, int] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict)
     solutions: list[SolutionEntry] = Field(default_factory=list)
     case_plan: list[CasePlanItem] = Field(default_factory=list)
     quality_gates: QualityGates = Field(default_factory=QualityGates)
+    audit_gates: AuditGates = Field(default_factory=AuditGates)
+    difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
 
     @model_validator(mode="before")
     @classmethod

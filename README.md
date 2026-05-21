@@ -9,7 +9,7 @@
 
 它不是单纯让 AI “写一道题”，而是把 AI 生成的题面、解法、校验器、生成器、对拍、测试数据和打包流程放进一条可验证、可审计、会阻止跳步的出题流水线。
 
-仓库内部包含 `autocode-mcp` 这个 MCP server 实现，但默认分发和使用形态是 Claude Code plugin：安装后会同时获得工作流 Agent、Skills、Hooks 和 20 个 MCP 原子工具。
+仓库内部包含 `autocode-mcp` 这个 MCP server 实现，但默认分发和使用形态是 Claude Code plugin：安装后会同时获得工作流 Agent、Skills、Hooks 和 21 个 MCP 原子工具。
 
 ## 为什么需要 AutoCode
 
@@ -233,7 +233,7 @@ uv run autocode-verify examples/exact-sample
 
 ## 工具列表
 
-AutoCode 暴露 20 个 MCP 工具。一般用户不需要手动调用它们，`autocode-workflow` Agent 会按门禁顺序调用。
+AutoCode 暴露 21 个 MCP 工具。一般用户不需要手动调用它们，`autocode-workflow` Agent 会按门禁顺序调用。
 
 | 分组 | 工具 |
 |------|------|
@@ -243,7 +243,7 @@ AutoCode 暴露 20 个 MCP 工具。一般用户不需要手动调用它们，`a
 | 生成器 | `generator_build`, `generator_run` |
 | 检查器/交互器 | `checker_build`, `interactor_build` |
 | 对拍 | `stress_test_run` |
-| 题目管理 | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_pack_polygon` |
+| 题目管理 | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_audit`, `problem_pack_polygon` |
 
 所有工具返回统一结构：
 
@@ -254,6 +254,14 @@ AutoCode 暴露 20 个 MCP 工具。一般用户不需要手动调用它们，`a
   "error": null
 }
 ```
+
+`problem_audit` 会聚合题面、manifest、workflow state、终测质量信号和难度评级证据，输出 `decision=go/no_go`、`blocking_issues`、`risk_report`、`quality_signals`、`difficulty_signals` 和 `next_actions`。命令行入口：
+
+```bash
+uv run autocode-audit <problem_dir> --mode full --report audit_report.json
+```
+
+若在 `autocode.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包。
 
 ## 示例目录
 

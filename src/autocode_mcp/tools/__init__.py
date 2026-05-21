@@ -1,6 +1,7 @@
 """
 AutoCode MCP 工具模块。
 """
+from .audit import ProblemAuditTool
 from .base import Tool, ToolResult
 from .checker import CheckerBuildTool
 from .complexity import SolutionAnalyzeTool
@@ -23,6 +24,7 @@ from .validator import ValidatorBuildTool, ValidatorSelectTool
 __all__ = [
     "Tool",
     "ToolResult",
+    "ProblemAuditTool",
     "FileReadTool",
     "FileSaveTool",
     "SolutionBuildTool",

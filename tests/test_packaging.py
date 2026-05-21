@@ -12,7 +12,7 @@ def test_import():
     """测试模块导入。"""
     from autocode_mcp import __version__
 
-    assert __version__ == "1.0.4"
+    assert __version__ == "1.0.5"
 
 
 def test_tool_result():
@@ -43,6 +43,7 @@ def test_all_tools_registered():
         GeneratorBuildTool,
         GeneratorRunTool,
         InteractorBuildTool,
+        ProblemAuditTool,
         ProblemCleanupProcessesTool,
         ProblemCreateTool,
         ProblemGenerateTestsTool,
@@ -72,6 +73,7 @@ def test_all_tools_registered():
         ProblemGenerateTestsTool(),
         ProblemCleanupProcessesTool(),
         ProblemVerifyTestsTool(),
+        ProblemAuditTool(),
         ProblemPackPolygonTool(),
         ProblemValidateTool(),
         ValidatorBuildTool(),
@@ -95,6 +97,7 @@ def test_all_tools_registered():
         "problem_generate_tests",
         "problem_cleanup_processes",
         "problem_verify_tests",
+        "problem_audit",
         "problem_pack_polygon",
         "problem_validate",
         "validator_build",
@@ -160,7 +163,7 @@ def test_all_prompts_exist():
     from autocode_mcp.prompts import get_prompt, list_prompts
 
     prompts = list_prompts()
-    assert len(prompts) == 6
+    assert len(prompts) == 7
 
     for name in prompts:
         content = get_prompt(name)

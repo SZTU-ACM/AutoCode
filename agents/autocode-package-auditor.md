@@ -4,6 +4,7 @@ description: Readonly auditor before packaging, checks statement, tests, wrong s
 skills:
   - statement-audit
   - testdata-quality
+  - problem-difficulty-rating
 model: inherit
 ---
 
@@ -21,6 +22,7 @@ Minimum evidence before `go`:
 - successful final test verification evidence (`problem_verify_tests`);
 - no unresolved blocker in checker/interactor strategy when applicable.
 - for interactive problems: statement protocol checklist is complete, `files/interactor.cpp` uses `registerInteraction` with `tout`/`ouf`, and `interactor_build` has scripted scenarios covering valid and invalid conversations.
+- if `problem_audit` is available, prefer its `decision`, `blocking_issues`, and `difficulty_signals` as the final packaging evidence bundle.
 
 Output requirements:
 

@@ -6,6 +6,7 @@ Test Verification 工具 - 验证生成的测试数据。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -13,8 +14,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ..utils.checker_judge import checker_exe_path, run_testlib_checker
-from ..utils.compiler import run_binary
+from ..utils.checker_judge import checker_exe_path, run_testlib_checker, verdict_from_run
+from ..utils.compiler import run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from ..workflow.models import AutoCodeManifest
@@ -76,6 +77,12 @@ class ProblemVerifyTestsTool(Tool):
                             "limit_ratio",
                             "limit_semantics",
                             "wrong_solution_kill",
+                            "duplicate_inputs",
+                            "scale_distribution",
+                            "purpose_coverage",
+                            "validator_self_test",
+                            "checker_self_test",
+                            "interactor_self_test",
                         ],
                     },
                     "description": "要执行的验证类型，默认全部执行",
@@ -219,6 +226,42 @@ class ProblemVerifyTestsTool(Tool):
             if not result["passed"]:
                 all_passed = False
 
+        if "duplicate_inputs" in verify_types:
+            result = self._check_duplicate_inputs(tests_dir)
+            results["duplicate_inputs"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "scale_distribution" in verify_types:
+            result = self._check_scale_distribution(tests_dir)
+            results["scale_distribution"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "purpose_coverage" in verify_types:
+            result = self._check_purpose_coverage(tests_dir)
+            results["purpose_coverage"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "validator_self_test" in verify_types:
+            result = await self._check_validator_self_test(problem_dir, tests_dir, timeout)
+            results["validator_self_test"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "checker_self_test" in verify_types:
+            result = await self._check_checker_self_test(problem_dir, timeout)
+            results["checker_self_test"] = result
+            if not result["passed"]:
+                all_passed = False
+
+        if "interactor_self_test" in verify_types:
+            result = await self._check_interactor_self_test(problem_dir, timeout)
+            results["interactor_self_test"] = result
+            if not result["passed"]:
+                all_passed = False
+
         # 汇总
         total_checks = len(results)
         passed_checks = sum(1 for r in results.values() if r["passed"])
@@ -258,6 +301,12 @@ class ProblemVerifyTestsTool(Tool):
             "limit_ratio": "limit_ratio",
             "limit_semantics": "limit_semantics",
             "wrong_solution_kill": "wrong_solution_kill",
+            "duplicate_inputs": "duplicate_inputs",
+            "scale_distribution": "scale_distribution",
+            "purpose_coverage": "purpose_coverage",
+            "validator_self_test": "validator_self_test",
+            "checker_self_test": "checker_self_test",
+            "interactor_self_test": "interactor_self_test",
         }
         verify_set = set(verify_types)
         signals: dict[str, dict] = {}
@@ -598,6 +647,346 @@ class ProblemVerifyTestsTool(Tool):
             "overlap_ratio": overlap_ratio,
             "hint": "需要确保 type=4 不是仅放大参数，而是有独立卡法" if not passed else "",
         }
+
+    def _check_duplicate_inputs(self, tests_dir: str) -> dict:
+        tests_path = Path(tests_dir)
+        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        signatures: dict[str, list[str]] = {}
+        normalized_signatures: dict[str, list[str]] = {}
+        for path in in_files:
+            data = path.read_text(encoding="utf-8", errors="replace")
+            exact_key = hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()
+            normalized_key = " ".join(data.split())
+            signatures.setdefault(exact_key, []).append(path.name)
+            normalized_signatures.setdefault(normalized_key, []).append(path.name)
+
+        exact_duplicates = [names for names in signatures.values() if len(names) > 1]
+        near_duplicates = [
+            names
+            for names in normalized_signatures.values()
+            if len(names) > 1 and names not in exact_duplicates
+        ]
+        duplicate_file_count = sum(len(names) for names in exact_duplicates)
+        near_duplicate_file_count = sum(len(names) for names in near_duplicates)
+        total = len(in_files)
+        ratio = (duplicate_file_count + near_duplicate_file_count) / total if total else 0.0
+        return {
+            "passed": ratio <= 0.2,
+            "total": total,
+            "duplicate_file_count": duplicate_file_count,
+            "near_duplicate_file_count": near_duplicate_file_count,
+            "duplicate_ratio": ratio,
+            "exact_duplicates": exact_duplicates,
+            "near_duplicates": near_duplicates[:20],
+            "threshold": 0.2,
+        }
+
+    def _check_scale_distribution(self, tests_dir: str) -> dict:
+        tests_path = Path(tests_dir)
+        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        buckets = {"empty": 0, "tiny": 0, "small": 0, "medium": 0, "large": 0}
+        byte_buckets = {"0-100B": 0, "101B-1KB": 0, "1KB-32KB": 0, "32KB+": 0}
+        parsed_first_ints: list[int] = []
+        for path in in_files:
+            data = path.read_text(encoding="utf-8", errors="replace")
+            tokens = data.split()
+            if not tokens:
+                buckets["empty"] += 1
+            else:
+                try:
+                    first = int(tokens[0])
+                    parsed_first_ints.append(first)
+                    if first <= 1:
+                        buckets["tiny"] += 1
+                    elif first <= 10:
+                        buckets["small"] += 1
+                    elif first <= 1000:
+                        buckets["medium"] += 1
+                    else:
+                        buckets["large"] += 1
+                except ValueError:
+                    buckets["medium"] += 1
+            size = path.stat().st_size
+            if size <= 100:
+                byte_buckets["0-100B"] += 1
+            elif size <= 1024:
+                byte_buckets["101B-1KB"] += 1
+            elif size <= 32 * 1024:
+                byte_buckets["1KB-32KB"] += 1
+            else:
+                byte_buckets["32KB+"] += 1
+        non_empty_scale_buckets = sum(1 for key, value in buckets.items() if key != "empty" and value > 0)
+        return {
+            "passed": bool(in_files) and buckets["empty"] == 0,
+            "total": len(in_files),
+            "first_integer_buckets": {k: v for k, v in buckets.items() if v > 0},
+            "byte_size_buckets": {k: v for k, v in byte_buckets.items() if v > 0},
+            "min_first_integer": min(parsed_first_ints) if parsed_first_ints else None,
+            "max_first_integer": max(parsed_first_ints) if parsed_first_ints else None,
+            "non_empty_scale_bucket_count": non_empty_scale_buckets,
+        }
+
+    def _check_purpose_coverage(self, tests_dir: str) -> dict:
+        manifest = self._read_tests_manifest(tests_dir)
+        if not manifest:
+            return {"passed": False, "error": "tests manifest missing or unreadable"}
+        tests = manifest.get("tests", [])
+        if not isinstance(tests, list) or not tests:
+            return {"passed": False, "error": "tests manifest has no tests"}
+        type_counts: dict[str, int] = {}
+        group_counts: dict[str, int] = {}
+        purpose_count = 0
+        for item in tests:
+            if not isinstance(item, dict):
+                continue
+            type_param = str(item.get("type_param", "unknown"))
+            group = str(item.get("group", "default"))
+            if item.get("purpose"):
+                purpose_count += 1
+            type_counts[type_param] = type_counts.get(type_param, 0) + 1
+            group_counts[group] = group_counts.get(group, 0) + 1
+        required_types = {"1", "2", "3", "4"}
+        missing_types = sorted(required_types - set(type_counts))
+        return {
+            "passed": not missing_types,
+            "total": len(tests),
+            "type_counts": type_counts,
+            "group_counts": group_counts,
+            "purpose_count": purpose_count,
+            "missing_types": missing_types,
+        }
+
+    async def _check_validator_self_test(self, problem_dir: str, tests_dir: str, timeout: int) -> dict:
+        exe_ext = get_exe_extension()
+        val_exe = os.path.join(problem_dir, "files", f"val{exe_ext}")
+        if not os.path.exists(val_exe):
+            return {
+                "passed": False,
+                "skipped": True,
+                "message": f"files/val{exe_ext} not found",
+            }
+        valid_result = await self._check_validator(problem_dir, tests_dir, timeout)
+        invalid_fixtures = self._collect_invalid_fixtures(problem_dir, tests_dir)
+        rejected = []
+        accepted = []
+        fixture_errors = []
+        for fixture in invalid_fixtures:
+            try:
+                if "path" in fixture:
+                    fixture_path = Path(str(fixture["path"]))
+                    input_data = fixture_path.read_text(encoding="utf-8", errors="replace")
+                    name = str(fixture.get("name") or fixture_path.name)
+                else:
+                    input_data = str(fixture.get("input", ""))
+                    name = str(fixture.get("name") or f"inline-{len(rejected) + len(accepted) + 1}")
+            except (OSError, UnicodeError) as exc:
+                fixture_errors.append({"fixture": str(fixture), "error": str(exc)})
+                continue
+            result = await run_binary(val_exe, input_data, timeout=timeout)
+            if result.return_code != 0:
+                rejected.append(name)
+            else:
+                accepted.append(name)
+        passed = bool(valid_result.get("passed")) and bool(invalid_fixtures) and not accepted and not fixture_errors
+        return {
+            "passed": passed,
+            "valid_tests": valid_result,
+            "invalid_total": len(invalid_fixtures),
+            "invalid_rejected": rejected,
+            "invalid_accepted": accepted,
+            "invalid_fixture_errors": fixture_errors,
+            "skipped": not invalid_fixtures,
+            "message": "No invalid fixtures found" if not invalid_fixtures else "",
+        }
+
+    async def _check_checker_self_test(self, problem_dir: str, timeout: int) -> dict:
+        exe_ext = get_exe_extension()
+        checker_bin = checker_exe_path(problem_dir, exe_ext)
+        if not os.path.isfile(checker_bin):
+            return {
+                "passed": False,
+                "skipped": True,
+                "message": f"files/checker{exe_ext} not found",
+            }
+        scenarios = self._load_scenarios(problem_dir, "checker_scenarios.json")
+        if not scenarios:
+            return {"passed": False, "skipped": True, "message": "checker scenarios not found"}
+        details = []
+        correct = 0
+        with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+            for idx, scenario in enumerate(scenarios, 1):
+                input_path = os.path.join(tmp, f"checker_{idx}.in")
+                output_path = os.path.join(tmp, f"checker_{idx}.out")
+                answer_path = os.path.join(tmp, f"checker_{idx}.ans")
+                Path(input_path).write_text(str(scenario.get("input", "")), encoding="utf-8")
+                Path(output_path).write_text(
+                    str(scenario.get("contestant_output", "")), encoding="utf-8"
+                )
+                Path(answer_path).write_text(
+                    str(scenario.get("reference_output", "")), encoding="utf-8"
+                )
+                expected = str(scenario.get("expected_verdict", "AC"))
+                verdict, run = await run_testlib_checker(
+                    checker_bin,
+                    input_path,
+                    output_path,
+                    answer_path,
+                    timeout=timeout,
+                )
+                ok = verdict == expected
+                correct += 1 if ok else 0
+                details.append(
+                    {
+                        "index": idx,
+                        "expected_verdict": expected,
+                        "actual_verdict": verdict,
+                        "correct": ok,
+                        "stderr": (run.stderr or "")[:500],
+                    }
+                )
+        categories = self._scenario_categories(
+            scenarios,
+            default_by_verdict={"AC": "ac", "WA": "wrong_answer", "PE": "format_error"},
+        )
+        required_categories = {"ac", "wrong_answer", "format_error"}
+        missing_categories = sorted(required_categories - categories)
+        passed = correct == len(scenarios) and not missing_categories
+        return {
+            "passed": passed,
+            "total": len(scenarios),
+            "correct_count": correct,
+            "scenario_categories": sorted(categories),
+            "missing_required_categories": missing_categories,
+            "details": details,
+        }
+
+    async def _check_interactor_self_test(self, problem_dir: str, timeout: int) -> dict:
+        exe_ext = get_exe_extension()
+        interactor_bin = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
+        if not os.path.isfile(interactor_bin):
+            return {
+                "passed": False,
+                "skipped": True,
+                "message": f"files/interactor{exe_ext} not found",
+            }
+        scenarios = self._load_scenarios(problem_dir, "interactor_scenarios.json")
+        if not scenarios:
+            return {"passed": False, "skipped": True, "message": "interactor scenarios not found"}
+        details = []
+        correct = 0
+        with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
+            for idx, scenario in enumerate(scenarios, 1):
+                input_path = os.path.join(tmp, f"interactor_{idx}.in")
+                output_path = os.path.join(tmp, f"interactor_{idx}.out")
+                answer_path = os.path.join(tmp, f"interactor_{idx}.ans")
+                Path(input_path).write_text(str(scenario.get("input", "")), encoding="utf-8")
+                Path(answer_path).write_text(str(scenario.get("answer", "")), encoding="utf-8")
+                run = await run_binary_with_args(
+                    interactor_bin,
+                    [input_path, output_path, answer_path],
+                    stdin=str(scenario.get("contestant_output", "")),
+                    timeout=timeout,
+                )
+                expected = str(scenario.get("expected_verdict", "AC"))
+                verdict = verdict_from_run(run)
+                ok = verdict == expected
+                correct += 1 if ok else 0
+                details.append(
+                    {
+                        "index": idx,
+                        "expected_verdict": expected,
+                        "actual_verdict": verdict,
+                        "correct": ok,
+                        "stderr": (run.stderr or "")[:500],
+                    }
+                )
+        categories = self._scenario_categories(
+            scenarios,
+            default_by_verdict={"AC": "ac", "WA": "wrong_answer", "PE": "malformed_command"},
+        )
+        required_categories = {
+            "ac",
+            "wrong_answer",
+            "malformed_command",
+            "out_of_range",
+            "query_limit",
+            "premature_eof",
+            "extra_output",
+        }
+        missing_categories = sorted(required_categories - categories)
+        passed = correct == len(scenarios) and not missing_categories
+        return {
+            "passed": passed,
+            "total": len(scenarios),
+            "correct_count": correct,
+            "scenario_categories": sorted(categories),
+            "missing_required_categories": missing_categories,
+            "details": details,
+        }
+
+    def _read_tests_manifest(self, tests_dir: str) -> dict | None:
+        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+        if not os.path.exists(manifest_path):
+            return None
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _collect_invalid_fixtures(self, problem_dir: str, tests_dir: str) -> list[dict]:
+        fixtures: list[dict] = []
+        invalid_dir = Path(tests_dir) / "invalid"
+        if invalid_dir.is_dir():
+            for path in sorted(p for p in invalid_dir.iterdir() if p.is_file()):
+                fixtures.append({"name": path.name, "path": str(path)})
+        manifest = self._read_tests_manifest(tests_dir)
+        if manifest:
+            invalid_tests = manifest.get("invalid_tests", [])
+            if isinstance(invalid_tests, list):
+                for item in invalid_tests:
+                    if not isinstance(item, dict):
+                        continue
+                    if isinstance(item.get("input"), str):
+                        fixtures.append({"name": item.get("name", "inline"), "input": item["input"]})
+                    elif isinstance(item.get("path"), str):
+                        path = Path(item["path"])
+                        if not path.is_absolute():
+                            path = Path(problem_dir) / path
+                        fixtures.append({"name": item.get("name", path.name), "path": str(path)})
+        return fixtures
+
+    def _load_scenarios(self, problem_dir: str, filename: str) -> list[dict]:
+        candidates = [
+            Path(problem_dir) / "tests" / filename,
+            Path(problem_dir) / "files" / filename,
+        ]
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            if isinstance(data, dict) and isinstance(data.get("scenarios"), list):
+                return [item for item in data["scenarios"] if isinstance(item, dict)]
+        return []
+
+    def _scenario_categories(self, scenarios: list[dict], default_by_verdict: dict[str, str]) -> set[str]:
+        categories: set[str] = set()
+        for scenario in scenarios:
+            category = scenario.get("category")
+            if isinstance(category, str) and category.strip():
+                categories.add(category.strip())
+                continue
+            verdict = str(scenario.get("expected_verdict", "AC"))
+            fallback = default_by_verdict.get(verdict)
+            if fallback:
+                categories.add(fallback)
+        return categories
 
     def _resolve_answer_ext(self, tests_dir: str, answer_ext: str | None) -> str:
         normalized = self._normalize_answer_ext(answer_ext)

@@ -1368,8 +1368,10 @@ class ProblemPackPolygonTool(Tool):
         workflow_state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
         require_tests_verified = True
         min_limit_case_ratio = 0.5
+        require_full_audit = False
         is_interactive_problem = False
         problem_manifest_path = os.path.join(problem_dir, "autocode.json")
+        problem_manifest: dict[str, object] = {}
         if os.path.exists(problem_manifest_path):
             try:
                 with open(problem_manifest_path, encoding="utf-8") as pmf:
@@ -1379,13 +1381,20 @@ class ProblemPackPolygonTool(Tool):
                 if isinstance(quality_gates, dict):
                     require_tests_verified = bool(quality_gates.get("require_tests_verified", True))
                     min_limit_case_ratio = float(quality_gates.get("min_limit_case_ratio", 0.5))
+                audit_gates = problem_manifest.get("audit_gates", {})
+                if isinstance(audit_gates, dict):
+                    require_full_audit = bool(audit_gates.get("require_full_audit", False))
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 require_tests_verified = True
                 min_limit_case_ratio = 0.5
+                require_full_audit = False
         min_limit_case_ratio = min(1.0, max(0.0, min_limit_case_ratio))
         required_limit_semantics = True
         required_wrong_solution_kill = True
         required_validator_check = True
+        required_validator_self_test = False
+        required_checker_self_test = True
+        required_interactor_self_test = True
         if os.path.exists(problem_manifest_path):
             try:
                 with open(problem_manifest_path, encoding="utf-8") as pmf:
@@ -1396,6 +1405,18 @@ class ProblemPackPolygonTool(Tool):
                     required_limit_semantics = bool(quality_gates.get("require_limit_semantics", True))
                     required_wrong_solution_kill = bool(quality_gates.get("require_wrong_solution_kill", True))
                     required_validator_check = bool(quality_gates.get("require_validator_check", True))
+                audit_gates = problem_manifest.get("audit_gates", {})
+                if isinstance(audit_gates, dict):
+                    require_full_audit = bool(audit_gates.get("require_full_audit", require_full_audit))
+                    required_validator_self_test = bool(
+                        audit_gates.get("require_validator_self_test", required_validator_self_test)
+                    )
+                    required_checker_self_test = bool(
+                        audit_gates.get("require_checker_self_test", required_checker_self_test)
+                    )
+                    required_interactor_self_test = bool(
+                        audit_gates.get("require_interactor_self_test", required_interactor_self_test)
+                    )
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 required_limit_semantics = True
                 required_wrong_solution_kill = True
@@ -1441,6 +1462,55 @@ class ProblemPackPolygonTool(Tool):
         verify_signals = workflow_state.get("verify_signals", {}) if isinstance(workflow_state, dict) else {}
         if not isinstance(verify_signals, dict):
             verify_signals = {}
+        if require_full_audit:
+            full_audit = workflow_state.get("full_audit", {}) if isinstance(workflow_state, dict) else {}
+            if not isinstance(full_audit, dict):
+                full_audit = {}
+            try:
+                full_audit_blocking_count = int(full_audit.get("blocking_issue_count", 1))
+            except (TypeError, ValueError):
+                full_audit_blocking_count = 1
+            if (
+                full_audit.get("mode") != "full"
+                or full_audit.get("decision") != "go"
+                or not bool(workflow_state.get("full_audit_passed", False))
+                or full_audit_blocking_count != 0
+            ):
+                return ToolResult.fail(
+                    "full audit is required, run problem_audit with mode=full first",
+                    stage="problem_pack_polygon",
+                    gate="require_full_audit",
+                    required=True,
+                    actual=full_audit,
+                )
+            audit_signals = full_audit.get("quality_signals", {})
+            if not isinstance(audit_signals, dict):
+                audit_signals = {}
+            spj_checker = bool(problem_manifest.get("special_judge", False)) and (
+                problem_manifest.get("stress_comparison", "exact") == "checker"
+            )
+            audit_signal_rules = [
+                ("duplicate_inputs", True),
+                ("scale_distribution", True),
+                ("purpose_coverage", True),
+                ("validator_self_test", required_validator_self_test and not is_interactive_problem),
+                ("checker_self_test", required_checker_self_test and spj_checker),
+                ("interactor_self_test", required_interactor_self_test and is_interactive_problem),
+            ]
+            for signal_name, required in audit_signal_rules:
+                if not required:
+                    continue
+                signal_data = audit_signals.get(signal_name, {})
+                if not isinstance(signal_data, dict):
+                    signal_data = {}
+                if not bool(signal_data.get("executed")) or not bool(signal_data.get("passed")):
+                    return ToolResult.fail(
+                        f"full audit signal `{signal_name}` not satisfied, run problem_audit first",
+                        stage="problem_pack_polygon",
+                        gate=f"full_audit.{signal_name}",
+                        required=True,
+                        actual=signal_data,
+                    )
         signal_rules = [
             ("limit_semantics", required_limit_semantics),
             ("wrong_solution_kill", required_wrong_solution_kill),

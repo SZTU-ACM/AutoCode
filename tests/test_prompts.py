@@ -8,10 +8,11 @@ def test_list_prompts():
     """测试列出提示词。"""
     prompt_list = prompts.list_prompts()
     assert isinstance(prompt_list, list)
-    assert len(prompt_list) == 6
+    assert len(prompt_list) == 7
     assert "full_pipeline" in prompt_list
     assert "validator" in prompt_list
     assert "generator" in prompt_list
+    assert "difficulty_rating" in prompt_list
 
 
 def test_get_prompt_exists():

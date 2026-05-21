@@ -21,6 +21,23 @@
     "require_validator_check": true,
     "min_limit_case_ratio": 0.5
   },
+  "audit_gates": {
+    "require_full_audit": false,
+    "require_statement_consistency": true,
+    "require_validator_self_test": false,
+    "require_checker_self_test": true,
+    "require_interactor_self_test": true,
+    "max_duplicate_input_ratio": 0.2,
+    "min_difficulty_confidence": 0.5
+  },
+  "difficulty": {
+    "rating": null,
+    "band": null,
+    "confidence": null,
+    "algorithm_tags": [],
+    "reasons": [],
+    "notes": []
+  },
   "solutions": [
     {
       "name": "sol",

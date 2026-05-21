@@ -8,6 +8,7 @@ skills:
   - stress-strategy
   - statement-audit
   - testdata-quality
+  - problem-difficulty-rating
 model: inherit
 ---
 
@@ -92,3 +93,5 @@ Use specialized auditors when risk is material:
 - `autocode-idea-auditor`: before implementation when constraints/judging are unclear.
 - `autocode-solution-auditor`: after std/brute are available and before relying on stress conclusions.
 - `autocode-package-auditor`: before final packaging.
+
+Before packaging, prefer running `problem_audit(mode="full")` to collect the final go/no_go report, quality signals, and difficulty evidence.

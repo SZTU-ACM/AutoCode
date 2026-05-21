@@ -40,6 +40,9 @@ uv run autocode-mcp
 # 校验题目 manifest
 uv run autocode-verify examples/exact-sample
 
+# 运行完整题包审计
+uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
+
 # 构建并检查分发包
 uv build
 uv run twine check dist/*
@@ -70,7 +73,7 @@ AutoCode/
 
 ## 工具列表
 
-AutoCode 当前暴露 20 个 MCP 工具：
+AutoCode 当前暴露 21 个 MCP 工具：
 
 | 分组 | 工具 |
 |------|------|
@@ -80,7 +83,7 @@ AutoCode 当前暴露 20 个 MCP 工具：
 | Generator | `generator_build`, `generator_run` |
 | Checker / Interactor | `checker_build`, `interactor_build` |
 | Stress | `stress_test_run` |
-| Problem | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_pack_polygon` |
+| Problem | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_audit`, `problem_pack_polygon` |
 
 ## 题目目录结构
 
@@ -139,7 +142,8 @@ AutoCode 当前暴露 20 个 MCP 工具：
 8. `problem_validate(validation_passed)`（交互题验证协议与 transcript，不按普通 stdin/stdout 样例执行）
 9. `problem_generate_tests(generated_test_count > 0)`
 10. `problem_verify_tests(passed)`（`special_judge` 时以 checker 校验终测与错解，而非仅字符串比对）
-11. `problem_pack_polygon`（存在 `files/checker.cpp` 时生成的 `problem.xml` 会带上 checker；交互题会带上 `files/interactor.cpp`）
+11. `problem_audit(mode="full")`（推荐在打包前运行，收集最终 go/no_go、质量信号与难度证据）
+12. `problem_pack_polygon`（存在 `files/checker.cpp` 时生成的 `problem.xml` 会带上 checker；交互题会带上 `files/interactor.cpp`）
 
 关键门禁：
 
@@ -150,6 +154,7 @@ AutoCode 当前暴露 20 个 MCP 工具：
 - `files/interactor.cpp` 必须使用 `registerInteraction(argc, argv)`；用 `inf`/`ans` 读输入与参考数据，用 `tout` 向选手输出并 `flush`，用 `ouf` 读选手输出，不能用 `std::cout` 发送交互数据。`interactor_build` 应带 `interaction_scenarios` 覆盖 AC、WA、PE、越界、超限和 EOF。
 - 最终测试生成后会清除旧的 `tests_verified`，必须重新跑 `problem_verify_tests`。
 - `problem_pack_polygon` 前必须完成最终测试验证。
+- 若 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 前必须有最近一次通过的 full audit。
 - `special_judge: true` 且 `stress_comparison: "checker"` 时：`stress_test_run` 前须 `checker_build` 通过；`problem_verify_tests` 的终测/错解用 checker。仅 `special_judge` 而 `stress_comparison: "exact"` 时终测仍比字符串。可选 `stress_checker_bidirectional: true` 使对拍再验证 `checker(in,brute,sol)`（checker 须支持对称语义）。
 
 ## Agent 与 Skill
@@ -173,6 +178,7 @@ AutoCode 当前暴露 20 个 MCP 工具：
 - `skills/statement-audit/SKILL.md`
 - `skills/testdata-quality/SKILL.md`
 - `skills/problem-validate/SKILL.md`
+- `skills/problem-difficulty-rating/SKILL.md`
 
 ## Manifest
 
@@ -183,6 +189,8 @@ AutoCode 当前暴露 20 个 MCP 工具：
 - `special_judge` / `stress_comparison`（`exact` | `checker`）/ 可选 `stress_checker_bidirectional`：控制对拍、终测、错解杀伤与样例校验是否走 testlib checker（须 `checker_build` 且存在 `files/checker`）。仅 `special_judge` 而 `stress_comparison=exact` 时终测等仍以字符串比对标答文件为主。
 - `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
 - `load_manifest` 若遇 `autocode.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误而非裸 traceback。
+- `audit_gates` 控制 full audit、validator/checker/interactor 自测、题面一致性与难度置信度等发布前门禁。
+- `difficulty` 记录规则/LLM 难度评级的结果字段；`problem_audit(include_difficulty=true)` 会先产出确定性 signals。
 
 快速校验：
 
@@ -191,6 +199,12 @@ uv run autocode-verify <problem_dir>
 ```
 
 `autocode-verify` 在 checker 工作流下会返回 `spj_warnings`（缺 `checker.cpp` 或未编译 checker 等）；JSON 中还包含 `special_judge`、`stress_comparison` 便于 CI 解析。
+
+完整审计：
+
+```bash
+uv run autocode-audit <problem_dir> --mode full --report audit_report.json
+```
 
 ## 关键约束
 

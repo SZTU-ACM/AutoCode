@@ -303,6 +303,30 @@ int main(int argc, char* argv[]) {
 - fail_rate > 80%（变异解应该被拒绝）
 """
 
+DIFFICULTY_PROMPT = """
+# Problem Difficulty Rating
+
+你要根据 `problem_audit` 返回的确定性 signals 给出难度评级说明。
+
+## 必须引用的证据
+- `estimated_complexity`
+- `algorithm_tags`
+- `constraint_scale`
+- `implementation_evidence`
+- `data_strength`
+- `risk_report` 中的 warnings
+
+## 输出要求
+- 给出一个 CF-style rating（800 到 3500 之间）
+- 给出难度档位：入门 / 基础 / 中等 / 较难 / 困难 / 高难
+- 解释为什么不是更低，也不是更高
+- 如果证据不足，明确标注 provisional / 需要人工复核
+
+## 约束
+- 不要编造提交统计、通过率历史或外部校准数据
+- 不要把主观印象写成事实
+"""
+
 
 def get_prompt(name: str) -> str:
     """
@@ -321,6 +345,7 @@ def get_prompt(name: str) -> str:
         "generator": GENERATOR_PROMPT,
         "checker": CHECKER_PROMPT,
         "interactor": INTERACTOR_PROMPT,
+        "difficulty_rating": DIFFICULTY_PROMPT,
     }
     return prompts.get(name, "")
 
@@ -339,4 +364,5 @@ def list_prompts() -> list[str]:
         "generator",
         "checker",
         "interactor",
+        "difficulty_rating",
     ]

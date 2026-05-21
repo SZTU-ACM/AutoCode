@@ -1410,6 +1410,71 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
 
 
 @pytest.mark.asyncio
+async def test_problem_pack_polygon_requires_full_audit_when_enabled():
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "pack_audit_gate")
+        os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
+        with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("1\n")
+        with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
+            f.write("# T\n")
+        with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write("// sol\n")
+        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "problem_name": "t",
+                    "audit_gates": {"require_full_audit": True},
+                    "quality_gates": {
+                        "require_tests_verified": True,
+                        "require_limit_semantics": True,
+                        "require_wrong_solution_kill": True,
+                        "require_validator_check": True,
+                    },
+                },
+                f,
+            )
+        write_verified_workflow_state(problem_dir)
+
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "problem_audit" in result.error
+
+        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        state["full_audit"] = {
+            "mode": "full",
+            "decision": "go",
+            "blocking_issue_count": 0,
+            "quality_signals": {},
+        }
+        state["full_audit_passed"] = True
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+        result = await tool.execute(problem_dir=problem_dir)
+        assert not result.success
+        assert "full audit signal" in result.error
+
+        state["full_audit"]["quality_signals"] = {
+            "duplicate_inputs": {"executed": True, "passed": True},
+            "scale_distribution": {"executed": True, "passed": True},
+            "purpose_coverage": {"executed": True, "passed": True},
+        }
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+        result = await tool.execute(problem_dir=problem_dir)
+        assert result.success
+
+
+@pytest.mark.asyncio
 async def test_problem_pack_polygon_fails_when_required_verify_signal_missing():
     tool = ProblemPackPolygonTool()
     with tempfile.TemporaryDirectory() as tmpdir:
