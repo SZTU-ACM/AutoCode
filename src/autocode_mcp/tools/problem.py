@@ -459,6 +459,7 @@ class ProblemGenerateTestsTool(Tool):
         tests_dir, tests_dir_error = self._resolve_tests_dir(problem_dir, output_dir)
         if tests_dir_error:
             return tests_dir_error
+        self._mark_tests_unverified(problem_dir)
 
         # 如果 files 目录下没有，检查根目录
         if not os.path.exists(gen_exe):
@@ -700,9 +701,9 @@ class ProblemGenerateTestsTool(Tool):
             test_file = os.path.join(tests_dir, f"{i:02d}.in")
             ans_file = os.path.join(tests_dir, f"{i:02d}{normalized_answer_ext}")
 
-            with open(test_file, "w", encoding="utf-8") as f:
+            with open(test_file, "w", encoding="utf-8", newline="") as f:
                 f.write(candidate.input_data)
-            with open(ans_file, "w", encoding="utf-8") as f:
+            with open(ans_file, "w", encoding="utf-8", newline="") as f:
                 f.write(candidate.output_data)
 
             generated_tests.append(i)
@@ -788,6 +789,30 @@ class ProblemGenerateTestsTool(Tool):
                 limit_case_quota_met=limit_quota_met,
                 generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
             )
+
+    def _mark_tests_unverified(self, problem_dir: str) -> None:
+        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
+        try:
+            if os.path.exists(state_path):
+                with open(state_path, encoding="utf-8") as f:
+                    state = json.load(f)
+            else:
+                state = {}
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        state["tests_verified"] = False
+        state["verify_signals"] = {}
+        state["limit_case_ratio"] = None
+        state["full_audit_passed"] = False
+        state["full_audit"] = {}
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
 
     def _resolve_tests_dir(
         self,

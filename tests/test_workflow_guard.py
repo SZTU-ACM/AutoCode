@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 
@@ -83,6 +84,174 @@ def test_post_tool_marks_stress_passed(tmp_path):
 
     assert exit_code == 0
     assert state["stress_passed"] is True
+
+
+def test_post_tool_parses_prefixed_content_text_result(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__solution_build",
+        "tool_input": {"problem_dir": str(problem_dir), "solution_type": "sol"},
+        "tool_response": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": 'Tool result:\n{"success": true, "data": {"message": "Successfully built sol"}}',
+                }
+            ]
+        },
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["sol_built"] is True
+    assert state["history"][-1]["success"] is True
+
+
+def test_pre_tool_denies_malformed_payload(monkeypatch, capsys):
+    module = load_module()
+    raw = '{"tool_name":"mcp__autocode__problem_pack_polygon","tool_input":{"problem_dir":"C:\\\\tmp\\\\p"'
+    monkeypatch.setattr(module.sys, "stdin", io.StringIO(raw))
+
+    payload = module.load_payload()
+    exit_code = module.pre_tool(payload)
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    parsed = json.loads(captured)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "malformed" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_post_tool_uses_last_result_object_not_prefixed_decoy(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    state = module.infer_state(str(problem_dir))
+    state["generator_built"] = True
+    module.save_state(str(problem_dir), state)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": 'log {"success": true}\n{"success": false, "error": "compile failed"}',
+                }
+            ]
+        },
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["generator_built"] is False
+
+
+def test_post_tool_parses_snake_case_structured_content(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__solution_build",
+        "tool_input": {"problem_dir": str(problem_dir), "solution_type": "brute"},
+        "tool_response": {
+            "structured_content": {
+                "success": True,
+                "data": {"message": "Successfully built brute"},
+            }
+        },
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["brute_built"] is True
+
+
+def test_post_tool_parses_root_content_block_list_result(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": [
+            {
+                "type": "text",
+                "text": '{"success": true, "data": {"message": "Generator built"}}',
+            }
+        ],
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["generator_built"] is True
+
+
+def test_post_tool_recovers_success_from_malformed_tool_response_string(tmp_path):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    payload = {
+        "tool_name": "mcp__autocode__generator_build",
+        "tool_input": {"problem_dir": str(problem_dir)},
+        "tool_response": '{"success":true,"data":{"semantic_check":{"hint":"bad\udcba"',
+    }
+
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert state["generator_built"] is True
+
+
+def test_load_payload_recovers_malformed_post_tool_json(tmp_path, monkeypatch):
+    module = load_module()
+    problem_dir = tmp_path / "problem"
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+
+    raw = json.dumps(
+        {
+            "tool_name": "mcp__autocode__generator_build",
+            "tool_input": {"problem_dir": str(problem_dir)},
+            "tool_response": {
+                "structuredContent": {
+                    "success": True,
+                    "data": {},
+                }
+            },
+        }
+    ).replace('"data": {}', '"data": {unquoted: "value"}')
+    monkeypatch.setattr(module.sys, "stdin", io.StringIO(raw))
+
+    payload = module.load_payload()
+    exit_code = module.post_tool(payload)
+    state = module.load_state(str(problem_dir))
+
+    assert exit_code == 0
+    assert payload["tool_name"] == "mcp__autocode__generator_build"
+    assert payload["tool_input"]["problem_dir"] == str(problem_dir)
+    assert state["generator_built"] is True
 
 
 def test_post_tool_marks_interactor_ready_from_scenarios(tmp_path):

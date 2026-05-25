@@ -75,6 +75,23 @@ async def test_generator_build():
 
 
 @pytest.mark.asyncio
+async def test_generator_build_uses_existing_default_source():
+    """generator_build 缺省 code/source_path 时读取 files/gen.cpp。"""
+    tool = GeneratorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "files")
+        os.makedirs(files_dir)
+        with open(os.path.join(files_dir, "gen.cpp"), "w", encoding="utf-8") as f:
+            f.write(GENERATOR_CODE)
+
+        result = await tool.execute(problem_dir=tmpdir)
+
+        assert result.success
+        assert os.path.exists(result.data["binary_path"])
+
+
+@pytest.mark.asyncio
 async def test_generator_build_invalid_code():
     """测试无效代码编译失败。"""
     tool = GeneratorBuildTool()

@@ -53,6 +53,23 @@ async def test_interactor_build():
 
 
 @pytest.mark.asyncio
+async def test_interactor_build_uses_existing_default_source():
+    """interactor_build 缺省 code/source_path 时读取 files/interactor.cpp。"""
+    tool = InteractorBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "files")
+        os.makedirs(files_dir)
+        with open(os.path.join(files_dir, "interactor.cpp"), "w", encoding="utf-8") as f:
+            f.write(INTERACTOR_CODE)
+
+        result = await tool.execute(problem_dir=tmpdir)
+
+        assert result.success
+        assert os.path.exists(result.data["binary_path"])
+
+
+@pytest.mark.asyncio
 async def test_interactor_build_invalid_code():
     """测试无效代码编译失败。"""
     tool = InteractorBuildTool()

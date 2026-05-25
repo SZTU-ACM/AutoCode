@@ -8,6 +8,26 @@ import os
 
 from .base import Tool, ToolResult
 
+CANONICAL_PROBLEM_FILES = {
+    "sol.cpp": "solutions/sol.cpp",
+    "brute.cpp": "solutions/brute.cpp",
+    "val.cpp": "files/val.cpp",
+    "gen.cpp": "files/gen.cpp",
+    "checker.cpp": "files/checker.cpp",
+    "interactor.cpp": "files/interactor.cpp",
+    "README.md": "statements/README.md",
+    "tutorial.md": "statements/tutorial.md",
+}
+
+
+def canonical_problem_path(path: str, problem_dir: str | None = None) -> str:
+    normalized = path.replace("\\", "/")
+    if "/" in normalized:
+        return path
+    if problem_dir and os.path.exists(os.path.join(problem_dir, path)):
+        return path
+    return CANONICAL_PROBLEM_FILES.get(normalized, path)
+
 
 class FileReadTool(Tool):
     """读取文件内容。"""
@@ -46,6 +66,7 @@ class FileReadTool(Tool):
         """执行文件读取。"""
         # 解析路径
         if not os.path.isabs(path) and problem_dir:
+            path = canonical_problem_path(path, problem_dir)
             full_path = os.path.join(problem_dir, path)
         else:
             full_path = path
@@ -123,7 +144,11 @@ class FileSaveTool(Tool):
     ) -> ToolResult:
         """执行文件保存。"""
         # 解析路径
+        if not os.path.isabs(path) and not problem_dir:
+            return ToolResult.fail("problem_dir is required for relative file_save paths")
+
         if not os.path.isabs(path) and problem_dir:
+            path = canonical_problem_path(path, problem_dir)
             full_path = os.path.join(problem_dir, path)
         else:
             full_path = path

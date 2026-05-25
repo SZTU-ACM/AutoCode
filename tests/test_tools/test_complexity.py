@@ -16,7 +16,7 @@ from autocode_mcp.tools.complexity import (
 
 
 def test_no_loop():
-    """无循环代码应返回默认 O(n)。"""
+    """无循环代码应返回 O(1)。"""
     code = """
 int main() {
     int a, b;
@@ -26,7 +26,7 @@ int main() {
 }
 """
     result = analyze_loop_complexity(code)
-    assert result == ComplexityLevel.LINEAR
+    assert result == ComplexityLevel.CONSTANT
 
 
 def test_single_loop():
@@ -225,6 +225,7 @@ int main() {
 }
 """
     space, memory_mb = estimate_memory_usage(code)
+    assert space == "O(1)"
     assert memory_mb == 64
 
 
@@ -294,6 +295,54 @@ int main() {
 
 
 @pytest.mark.asyncio
+async def test_analyze_uses_existing_default_source(tmp_path):
+    """solution_analyze 缺省 code/source_path 时读取 solutions/sol.cpp。"""
+    tool = SolutionAnalyzeTool()
+    solutions_dir = tmp_path / "solutions"
+    solutions_dir.mkdir()
+    (solutions_dir / "sol.cpp").write_text(
+        """
+int main() {
+    int n;
+    cin >> n;
+    for (int i = 0; i < n; i++) {
+        sum += i;
+    }
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+
+    result = await tool.execute(problem_dir=str(tmp_path))
+
+    assert result.success
+    assert result.data["time_complexity"] == ComplexityLevel.LINEAR
+
+
+@pytest.mark.asyncio
+async def test_analyze_requires_explicit_source_or_problem_dir():
+    """无参调用不应隐式读取服务端 CWD。"""
+    tool = SolutionAnalyzeTool()
+
+    result = await tool.execute()
+
+    assert not result.success
+    assert "problem_dir" in result.error
+
+
+@pytest.mark.asyncio
+async def test_analyze_rejects_invalid_solution_type(tmp_path):
+    """solution_type 不能只依赖 schema enum 校验。"""
+    tool = SolutionAnalyzeTool()
+
+    result = await tool.execute(problem_dir=str(tmp_path), solution_type="../sol")
+
+    assert not result.success
+    assert "solution_type" in result.error
+
+
+@pytest.mark.asyncio
 async def test_analyze_with_constraints():
     """测试带约束的分析。"""
     tool = SolutionAnalyzeTool()
@@ -355,3 +404,26 @@ async def test_generate_test_configs():
         assert "type" in config
         assert "n_min" in config
         assert "n_max" in config
+
+
+@pytest.mark.asyncio
+async def test_analyze_constant_code_with_large_constraints_has_no_tle_warning():
+    """无循环常数解不应被大 n_max 误报 TLE。"""
+    tool = SolutionAnalyzeTool()
+
+    code = """
+int main() {
+    long long n;
+    cin >> n;
+    cout << n * n << '\\n';
+    return 0;
+}
+"""
+    result = await tool.execute(
+        code=code,
+        constraints={"n_max": 1000000000, "time_limit_ms": 1000},
+    )
+
+    assert result.success
+    assert result.data["time_complexity"] == ComplexityLevel.CONSTANT
+    assert result.data["warnings"] == []

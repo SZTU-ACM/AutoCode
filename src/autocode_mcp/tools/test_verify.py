@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -136,12 +137,26 @@ class ProblemVerifyTestsTool(Tool):
             tests_dir = os.path.join(problem_dir, "tests")
 
         if not os.path.exists(tests_dir):
+            self._write_workflow_state(
+                problem_dir=problem_dir,
+                success=False,
+                passed=False,
+                quality_signals={},
+                results={},
+            )
             return ToolResult.fail(f"Tests directory not found: {tests_dir}")
 
         resolved_answer_ext = self._resolve_answer_ext(tests_dir, answer_ext)
         try:
             manifest_model = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
+            self._write_workflow_state(
+                problem_dir=problem_dir,
+                success=False,
+                passed=False,
+                quality_signals={},
+                results={},
+            )
             return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
         verify_with_checker = manifest_uses_testlib_checker(manifest_model)
 
@@ -247,39 +262,65 @@ class ProblemVerifyTestsTool(Tool):
         if "validator_self_test" in verify_types:
             result = await self._check_validator_self_test(problem_dir, tests_dir, timeout)
             results["validator_self_test"] = result
-            if not result["passed"]:
+            if not result["passed"] and not result.get("skipped", False):
                 all_passed = False
 
         if "checker_self_test" in verify_types:
             result = await self._check_checker_self_test(problem_dir, timeout)
             results["checker_self_test"] = result
-            if not result["passed"]:
+            if not result["passed"] and not result.get("skipped", False):
                 all_passed = False
 
         if "interactor_self_test" in verify_types:
             result = await self._check_interactor_self_test(problem_dir, timeout)
             results["interactor_self_test"] = result
-            if not result["passed"]:
+            if not result["passed"] and not result.get("skipped", False):
                 all_passed = False
 
         # 汇总
         total_checks = len(results)
-        passed_checks = sum(1 for r in results.values() if r["passed"])
+        passed_checks = sum(
+            1 for r in results.values() if bool(r.get("passed")) and not r.get("skipped", False)
+        )
+        skipped_checks = sum(1 for r in results.values() if r.get("skipped", False))
+        effective_checks = total_checks - skipped_checks
         quality_signals = self._build_quality_signals(verify_types, results)
 
-        if all_passed:
+        if all_passed and effective_checks:
+            message = f"All {total_checks} verification checks passed"
+            if skipped_checks:
+                message = (
+                    f"{passed_checks}/{total_checks} verification checks passed, "
+                    f"{skipped_checks} skipped"
+                )
+            self._write_workflow_state(
+                problem_dir=problem_dir,
+                success=True,
+                passed=True,
+                quality_signals=quality_signals,
+                results=results,
+            )
             return ToolResult.ok(
                 passed=True,
                 results=results,
                 quality_signals=quality_signals,
                 total_checks=total_checks,
                 passed_checks=passed_checks,
+                skipped_checks=skipped_checks,
+                effective_checks=effective_checks,
                 tests_dir=tests_dir,
                 sol_name=effective_sol_name,
                 limit_ratio_enabled=enable_limit_ratio,
-                message=f"All {total_checks} verification checks passed",
+                message=message,
             )
         else:
+            self._write_workflow_state(
+                problem_dir=problem_dir,
+                success=False,
+                passed=False,
+                quality_signals=quality_signals,
+                results=results,
+            )
             return ToolResult.fail(
                 f"{passed_checks}/{total_checks} checks passed",
                 passed=False,
@@ -287,6 +328,8 @@ class ProblemVerifyTestsTool(Tool):
                 quality_signals=quality_signals,
                 total_checks=total_checks,
                 passed_checks=passed_checks,
+                skipped_checks=skipped_checks,
+                effective_checks=effective_checks,
                 tests_dir=tests_dir,
                 sol_name=effective_sol_name,
                 limit_ratio_enabled=enable_limit_ratio,
@@ -322,6 +365,55 @@ class ProblemVerifyTestsTool(Tool):
                 "evidence": result if executed else {},
             }
         return signals
+
+    def _write_workflow_state(
+        self,
+        *,
+        problem_dir: str,
+        success: bool,
+        passed: bool,
+        quality_signals: dict[str, dict],
+        results: dict,
+    ) -> None:
+        state_path = Path(problem_dir) / ".autocode-workflow" / "state.json"
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+
+        limit_ratio = results.get("limit_ratio", {})
+        if isinstance(limit_ratio, dict) and "limit_case_ratio" in limit_ratio:
+            state["limit_case_ratio"] = limit_ratio.get("limit_case_ratio")
+        else:
+            state["limit_case_ratio"] = None
+
+        state["verify_signals"] = quality_signals
+        state["tests_verified"] = bool(success and passed)
+        history = state.get("history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "tool": "problem_verify_tests",
+                "success": state["tests_verified"],
+                "at": datetime.now(timezone.utc).isoformat(),
+                "key_metrics": {
+                    "tests_verified": state["tests_verified"],
+                    "limit_case_ratio": state.get("limit_case_ratio"),
+                },
+            }
+        )
+        state["history"] = history[-50:]
+        try:
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def _check_file_count(self, tests_dir: str, answer_ext: str) -> dict:
         """检查文件完整性：每个 .in 有对应的 answer_ext。"""

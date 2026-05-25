@@ -29,8 +29,9 @@ def resolve_source(
     problem_dir: str,
     code: str | None,
     source_path: str | None,
+    default_source_path: str | None = None,
 ) -> tuple[ResolvedSource | None, ToolResult | None]:
-    """解析源代码来源：source_path 优先于 code。
+    """解析源代码来源：source_path 优先于 code，缺省时可读取标准文件。
 
     Returns:
         成功时返回 (ResolvedSource, None)，失败时返回 (None, ToolResult.fail(...))
@@ -39,7 +40,9 @@ def resolve_source(
     include_dir = None
     from_source_path = False
 
-    if source_path:
+    if source_path or (code is None and default_source_path):
+        source_path = source_path or default_source_path
+        assert source_path is not None
         from_source_path = True
         if not os.path.isabs(source_path):
             source_path = os.path.join(problem_dir, source_path)

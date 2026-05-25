@@ -727,6 +727,83 @@ async def test_problem_generate_tests_supports_custom_answer_ext(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_problem_generate_tests_preserves_crlf_outputs(monkeypatch):
+    """Windows 下写测试文件时不应把 CRLF 变成 CRCRLF。"""
+    tool = ProblemGenerateTestsTool()
+
+    async def fake_run_binary_with_args(*args, **kwargs):
+        return RunResult(success=True, stdout="7\r\n")
+
+    async def fake_run_binary(binary_path, stdin="", timeout=5, memory_mb=256):
+        return RunResult(success=True, stdout="49\r\n")
+
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary_with_args", fake_run_binary_with_args)
+    monkeypatch.setattr("autocode_mcp.tools.problem.run_binary", fake_run_binary)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "preserve_newlines")
+        files_dir = os.path.join(problem_dir, "files")
+        solutions_dir = os.path.join(problem_dir, "solutions")
+        os.makedirs(files_dir)
+        os.makedirs(solutions_dir)
+
+        exe_ext = get_exe_extension()
+        open(os.path.join(files_dir, f"gen{exe_ext}"), "w").close()
+        open(os.path.join(solutions_dir, f"sol{exe_ext}"), "w").close()
+
+        result = await tool.execute(
+            problem_dir=problem_dir,
+            test_count=1,
+            enable_dedup=False,
+            oversample_ratio=1.0,
+        )
+
+        assert result.success
+        with open(os.path.join(problem_dir, "tests", "01.in"), "rb") as f:
+            assert f.read() == b"7\r\n"
+        with open(os.path.join(problem_dir, "tests", "01.ans"), "rb") as f:
+            assert f.read() == b"49\r\n"
+        with open(
+            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
+            encoding="utf-8",
+        ) as f:
+            assert json.load(f)["tests_verified"] is False
+
+
+def test_problem_generate_tests_mark_unverified_clears_stale_gate_evidence():
+    """重新生成测试时必须清掉旧验证和审计证据。"""
+    tool = ProblemGenerateTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_dir = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(state_dir)
+        state_path = os.path.join(state_dir, "state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tests_verified": True,
+                    "verify_signals": {
+                        "limit_semantics": {"executed": True, "passed": True},
+                    },
+                    "limit_case_ratio": 1.0,
+                    "full_audit_passed": True,
+                    "full_audit": {"decision": "go"},
+                },
+                f,
+            )
+
+        tool._mark_tests_unverified(tmpdir)
+
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["tests_verified"] is False
+        assert state["verify_signals"] == {}
+        assert state["limit_case_ratio"] is None
+        assert state["full_audit_passed"] is False
+        assert state["full_audit"] == {}
+
+
+@pytest.mark.asyncio
 async def test_problem_generate_tests_resume_without_state_falls_back_to_fresh(monkeypatch):
     """resume=true 且无状态文件时应回退 fresh run 并清理旧测试。"""
     tool = ProblemGenerateTestsTool()
@@ -1239,6 +1316,208 @@ async def test_problem_verify_tests_can_disable_limit_ratio():
         assert result.success
         assert result.data.get("limit_ratio_enabled") is False
         assert "limit_ratio" not in result.data.get("results", {})
+        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["limit_case_ratio"] is None
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_failure_clears_stale_verified_state():
+    """验证早期失败也必须清掉旧 tests_verified。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_dir = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(state_dir)
+        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tests_verified": True,
+                    "verify_signals": {
+                        "validator_check": {"executed": True, "passed": True},
+                    },
+                    "limit_case_ratio": 1.0,
+                },
+                f,
+            )
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=os.path.join(tmpdir, "missing-tests"),
+            verify_types=["file_count"],
+            enable_limit_ratio=False,
+        )
+
+        assert not result.success
+        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["tests_verified"] is False
+        assert state["verify_signals"] == {}
+        assert state["limit_case_ratio"] is None
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_invalid_manifest_clears_stale_verified_state():
+    """manifest 读取失败也必须清掉旧 tests_verified。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir)
+        with open(os.path.join(tmpdir, "autocode.json"), "w", encoding="utf-8") as f:
+            f.write(
+                '{"schema_version":"1.0","problem_name":"m","interactive":false,'
+                '"stress_comparison":"INVALID_ENUM"}'
+            )
+        state_dir = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(state_dir)
+        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"tests_verified": True, "limit_case_ratio": 1.0}, f)
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            verify_types=["file_count"],
+            enable_limit_ratio=False,
+        )
+
+        assert not result.success
+        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["tests_verified"] is False
+        assert state["verify_signals"] == {}
+        assert state["limit_case_ratio"] is None
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_state_write_is_best_effort():
+    """workflow state 路径异常不应让成功验证崩溃。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+        with open(os.path.join(tmpdir, ".autocode-workflow"), "w", encoding="utf-8") as f:
+            f.write("not a directory")
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty"],
+            enable_limit_ratio=False,
+        )
+
+        assert result.success
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_skipped_self_test_does_not_fail():
+    """自测无 fixtures 时是 skipped，不应阻断整体验证。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty", "validator_self_test"],
+            enable_limit_ratio=False,
+        )
+
+        assert result.success
+        assert result.data["skipped_checks"] == 1
+        assert result.data["passed_checks"] == 2
+        assert result.data["results"]["validator_self_test"]["skipped"] is True
+        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["tests_verified"] is True
+        assert state["verify_signals"]["file_count"]["passed"] is True
+        assert state["verify_signals"]["no_empty"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_all_skipped_does_not_verify_tests():
+    """全 skipped 的验证不能把测试集标记为已验证。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["validator_self_test"],
+            enable_limit_ratio=False,
+        )
+
+        assert not result.success
+        assert result.data["skipped_checks"] == 1
+        assert result.data["effective_checks"] == 0
+        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["tests_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_skipped_validator_not_counted_as_passed():
+    """skipped 的 validator 不能同时计入 passed_checks。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "validator"],
+            enable_limit_ratio=False,
+        )
+
+        assert result.success
+        assert result.data["total_checks"] == 2
+        assert result.data["passed_checks"] == 1
+        assert result.data["skipped_checks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_problem_verify_tests_overwrites_stale_verify_signals():
+    """本轮未执行的验证项不应复用旧 gate 证据。"""
+    tool = ProblemVerifyTestsTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for name in ["01.in", "01.ans"]:
+            with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                f.write("1\n")
+        state_dir = os.path.join(tmpdir, ".autocode-workflow")
+        os.makedirs(state_dir)
+        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "verify_signals": {
+                        "limit_semantics": {"executed": True, "passed": True},
+                    }
+                },
+                f,
+            )
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            tests_dir=tmpdir,
+            verify_types=["file_count", "no_empty"],
+            enable_limit_ratio=False,
+        )
+
+        assert result.success
+        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        assert state["verify_signals"]["limit_semantics"]["executed"] is False
+        assert state["verify_signals"]["limit_semantics"]["passed"] is False
 
 
 @pytest.mark.asyncio

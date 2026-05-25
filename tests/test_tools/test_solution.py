@@ -6,6 +6,7 @@ import pytest
 
 from autocode_mcp.tools.mixins import BuildToolMixin, RunToolMixin
 from autocode_mcp.tools.solution import SolutionBuildTool, SolutionRunTool
+from autocode_mcp.tools.solution_audit import SolutionAuditBruteTool, SolutionAuditStdTool
 from autocode_mcp.utils.compiler import CompileResult, RunResult
 
 # ============== Mixin 测试 ==============
@@ -278,6 +279,23 @@ async def test_solution_build():
 
 
 @pytest.mark.asyncio
+async def test_solution_build_uses_existing_standard_source():
+    """solution_build 缺省 code/source_path 时读取 solutions/{type}.cpp。"""
+    tool = SolutionBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        solutions_dir = os.path.join(tmpdir, "solutions")
+        os.makedirs(solutions_dir)
+        with open(os.path.join(solutions_dir, "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write(SIMPLE_CPP)
+
+        result = await tool.execute(problem_dir=tmpdir, solution_type="sol")
+
+        assert result.success
+        assert os.path.exists(result.data["binary_path"])
+
+
+@pytest.mark.asyncio
 async def test_solution_build_custom_name_keeps_standard_files(monkeypatch):
     """测试自定义命名构建时仍保留 sol.cpp/sol 可供默认流程使用。"""
     tool = SolutionBuildTool()
@@ -303,6 +321,39 @@ async def test_solution_build_custom_name_keeps_standard_files(monkeypatch):
         assert os.path.exists(result.data["binary_path"])
         assert os.path.exists(result.data["standard_binary_path"])
         assert result.data["effective_name"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_solution_build_rejects_invalid_solution_type():
+    """solution_type 运行时也必须限制为 sol/brute。"""
+    tool = SolutionBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            solution_type="../victim",
+            code=SIMPLE_CPP,
+        )
+
+        assert not result.success
+        assert "solution_type" in result.error
+
+
+@pytest.mark.asyncio
+async def test_solution_build_rejects_path_like_custom_name():
+    """自定义 name 不能写出 solutions 目录。"""
+    tool = SolutionBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            name="../accepted",
+            code=SIMPLE_CPP,
+        )
+
+        assert not result.success
+        assert "name" in result.error
 
 
 @pytest.mark.asyncio
@@ -335,6 +386,42 @@ async def test_solution_build_invalid_code():
 
         assert not result.success
         assert "compilation" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_solution_audits_use_existing_standard_sources():
+    """solution_audit_* 缺省 code/source_path 时读取标准解与暴力解文件。"""
+    std_tool = SolutionAuditStdTool()
+    brute_tool = SolutionAuditBruteTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        solutions_dir = os.path.join(tmpdir, "solutions")
+        os.makedirs(solutions_dir)
+        with open(os.path.join(solutions_dir, "sol.cpp"), "w", encoding="utf-8") as f:
+            f.write(SIMPLE_CPP)
+        with open(os.path.join(solutions_dir, "brute.cpp"), "w", encoding="utf-8") as f:
+            f.write(BRUTE_CPP)
+
+        std_result = await std_tool.execute(problem_dir=tmpdir)
+        brute_result = await brute_tool.execute(problem_dir=tmpdir)
+
+        assert std_result.success
+        assert brute_result.success
+
+
+@pytest.mark.asyncio
+async def test_solution_audits_require_explicit_source_or_problem_dir():
+    """无参审计不应隐式读取服务端 CWD。"""
+    std_tool = SolutionAuditStdTool()
+    brute_tool = SolutionAuditBruteTool()
+
+    std_result = await std_tool.execute()
+    brute_result = await brute_tool.execute()
+
+    assert not std_result.success
+    assert not brute_result.success
+    assert "problem_dir" in std_result.error
+    assert "problem_dir" in brute_result.error
 
 
 @pytest.mark.asyncio

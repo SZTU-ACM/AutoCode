@@ -4,6 +4,8 @@ Solution 审计工具：审核标准解与暴力解的可行性与复杂度假�
 
 from __future__ import annotations
 
+import os
+
 from .base import Tool, ToolResult
 from .complexity import ComplexityLevel, analyze_loop_complexity
 from .mixins import resolve_source
@@ -29,21 +31,25 @@ class SolutionAuditStdTool(Tool):
                 "constraints": {"type": "object"},
                 "claimed_complexity": {"type": "string"},
             },
-            "anyOf": [
-                {"required": ["code"]},
-                {"required": ["source_path"]},
-            ],
         }
 
     async def execute(
         self,
         code: str | None = None,
         source_path: str | None = None,
-        problem_dir: str = ".",
+        problem_dir: str | None = None,
         constraints: dict | None = None,
         claimed_complexity: str | None = None,
     ) -> ToolResult:
-        resolved, err = resolve_source(problem_dir, code, source_path)
+        if code is None and source_path is None and not problem_dir:
+            return ToolResult.fail("Either 'code', 'source_path', or 'problem_dir' must be provided")
+
+        resolved, err = resolve_source(
+            problem_dir or ".",
+            code,
+            source_path,
+            default_source_path=os.path.join("solutions", "sol.cpp"),
+        )
         if err is not None:
             return err
         assert resolved is not None
@@ -102,21 +108,25 @@ class SolutionAuditBruteTool(Tool):
                 "std_complexity": {"type": "string"},
                 "constraints": {"type": "object"},
             },
-            "anyOf": [
-                {"required": ["code"]},
-                {"required": ["source_path"]},
-            ],
         }
 
     async def execute(
         self,
         code: str | None = None,
         source_path: str | None = None,
-        problem_dir: str = ".",
+        problem_dir: str | None = None,
         std_complexity: str | None = None,
         constraints: dict | None = None,
     ) -> ToolResult:
-        resolved, err = resolve_source(problem_dir, code, source_path)
+        if code is None and source_path is None and not problem_dir:
+            return ToolResult.fail("Either 'code', 'source_path', or 'problem_dir' must be provided")
+
+        resolved, err = resolve_source(
+            problem_dir or ".",
+            code,
+            source_path,
+            default_source_path=os.path.join("solutions", "brute.cpp"),
+        )
         if err is not None:
             return err
         assert resolved is not None

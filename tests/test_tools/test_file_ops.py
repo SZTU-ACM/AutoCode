@@ -48,6 +48,110 @@ async def test_file_save_absolute_path():
 
 
 @pytest.mark.asyncio
+async def test_file_save_relative_path_requires_problem_dir():
+    """测试相对路径保存必须指定题目目录。"""
+    tool = FileSaveTool()
+
+    result = await tool.execute(
+        path="test.txt",
+        content="Hello, World!",
+    )
+
+    assert not result.success
+    assert "problem_dir" in result.error
+
+
+def test_file_save_schema_allows_absolute_path_without_problem_dir():
+    """schema 不应让绝对路径保存强制依赖 problem_dir。"""
+    tool = FileSaveTool()
+
+    assert "problem_dir" not in tool.input_schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_file_save_canonicalizes_bare_problem_filenames():
+    """测试裸文件名保存到 AutoCode 规范目录。"""
+    tool = FileSaveTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await tool.execute(
+            path="val.cpp",
+            content="int main(){}",
+            problem_dir=tmpdir,
+        )
+
+        expected_path = os.path.join(tmpdir, "files", "val.cpp")
+        assert result.success
+        assert result.data["path"] == expected_path
+        assert os.path.exists(expected_path)
+        assert not os.path.exists(os.path.join(tmpdir, "val.cpp"))
+
+
+@pytest.mark.asyncio
+async def test_file_read_canonicalizes_bare_problem_filenames():
+    """测试裸文件名读取 AutoCode 规范目录。"""
+    tool = FileReadTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "files")
+        os.makedirs(files_dir, exist_ok=True)
+        with open(os.path.join(files_dir, "gen.cpp"), "w", encoding="utf-8") as f:
+            f.write("generator")
+
+        result = await tool.execute(
+            path="gen.cpp",
+            problem_dir=tmpdir,
+        )
+
+        assert result.success
+        assert result.data["content"] == "generator"
+
+
+@pytest.mark.asyncio
+async def test_file_read_prefers_existing_literal_relative_file():
+    """裸文件名已在题目根目录存在时不应被重定向到规范目录。"""
+    tool = FileReadTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        statements_dir = os.path.join(tmpdir, "statements")
+        os.makedirs(statements_dir)
+        with open(os.path.join(tmpdir, "README.md"), "w", encoding="utf-8") as f:
+            f.write("root")
+        with open(os.path.join(statements_dir, "README.md"), "w", encoding="utf-8") as f:
+            f.write("statement")
+
+        result = await tool.execute(path="README.md", problem_dir=tmpdir)
+
+        assert result.success
+        assert result.data["content"] == "root"
+
+
+@pytest.mark.asyncio
+async def test_file_save_prefers_existing_literal_relative_file():
+    """裸文件名已在题目根目录存在时保存仍写原文件。"""
+    tool = FileSaveTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "files")
+        os.makedirs(files_dir)
+        root_path = os.path.join(tmpdir, "val.cpp")
+        canonical_path = os.path.join(files_dir, "val.cpp")
+        with open(root_path, "w", encoding="utf-8") as f:
+            f.write("old root")
+        with open(canonical_path, "w", encoding="utf-8") as f:
+            f.write("old canonical")
+
+        result = await tool.execute(path="val.cpp", content="new root", problem_dir=tmpdir)
+
+        assert result.success
+        assert result.data["path"] == root_path
+        with open(root_path, encoding="utf-8") as f:
+            assert f.read() == "new root"
+        with open(canonical_path, encoding="utf-8") as f:
+            assert f.read() == "old canonical"
+
+
+@pytest.mark.asyncio
 async def test_file_read():
     """测试文件读取。"""
     tool = FileReadTool()

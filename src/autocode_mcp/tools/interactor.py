@@ -50,11 +50,11 @@ class InteractorBuildTool(Tool):
                 },
                 "code": {
                     "type": "string",
-                    "description": "C++ 源代码（与 source_path 二选一）",
+                    "description": "C++ 源代码（可选；缺省时读取 files/interactor.cpp）",
                 },
                 "source_path": {
                     "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。与 code 二选一，优先级高于 code",
+                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
                 },
                 "reference_solution_path": {
                     "type": "string",
@@ -90,10 +90,6 @@ class InteractorBuildTool(Tool):
                 },
             },
             "required": ["problem_dir"],
-            "anyOf": [
-                {"required": ["code"]},
-                {"required": ["source_path"]},
-            ],
         }
 
     async def execute(
@@ -107,7 +103,12 @@ class InteractorBuildTool(Tool):
         compiler: str = "g++",
     ) -> ToolResult:
         """执行 Interactor 构建。"""
-        resolved, err = resolve_source(problem_dir, code, source_path)
+        resolved, err = resolve_source(
+            problem_dir,
+            code,
+            source_path,
+            default_source_path=os.path.join("files", "interactor.cpp"),
+        )
         if err is not None:
             return err
         assert resolved is not None

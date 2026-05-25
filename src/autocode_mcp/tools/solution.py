@@ -11,6 +11,12 @@ from .base import Tool, ToolResult
 from .mixins import BuildToolMixin, RunToolMixin, resolve_source
 
 
+def _is_safe_solution_stem(value: str) -> bool:
+    if not value or value in {".", ".."}:
+        return False
+    return not any(sep and sep in value for sep in (os.sep, os.altsep, "/", "\\", ":"))
+
+
 class SolutionBuildTool(Tool, BuildToolMixin):
     """构建并编译解法。"""
 
@@ -54,11 +60,11 @@ class SolutionBuildTool(Tool, BuildToolMixin):
                 },
                 "code": {
                     "type": "string",
-                    "description": "C++ 源代码（与 source_path 二选一）",
+                    "description": "C++ 源代码（可选；缺省时读取 solutions/{solution_type}.cpp）",
                 },
                 "source_path": {
                     "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。与 code 二选一，优先级高于 code",
+                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
                 },
                 "compiler": {
                     "type": "string",
@@ -67,10 +73,6 @@ class SolutionBuildTool(Tool, BuildToolMixin):
                 },
             },
             "required": ["problem_dir", "solution_type"],
-            "anyOf": [
-                {"required": ["code"]},
-                {"required": ["source_path"]},
-            ],
         }
 
     async def execute(
@@ -83,7 +85,17 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         compiler: str = "g++",
     ) -> ToolResult:
         """执行解法构建。"""
-        resolved, err = resolve_source(problem_dir, code, source_path)
+        if solution_type not in {"sol", "brute"}:
+            return ToolResult.fail("solution_type must be 'sol' or 'brute'")
+        if name is not None and not _is_safe_solution_stem(name):
+            return ToolResult.fail("name must be a file name stem without path separators")
+
+        resolved, err = resolve_source(
+            problem_dir,
+            code,
+            source_path,
+            default_source_path=os.path.join("solutions", f"{solution_type}.cpp"),
+        )
         if err is not None:
             return err
         assert resolved is not None

@@ -6,10 +6,12 @@ Complexity 分析工具 - 分析解法复杂度。
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
 from .base import Tool, ToolResult
+from .mixins import resolve_source
 
 
 class ComplexityLevel:
@@ -68,6 +70,7 @@ def analyze_loop_complexity(code: str) -> str:
 
     max_nesting = 0
     brace_depth = 0
+    saw_loop = False
 
     lines = code.split("\n")
     for line in lines:
@@ -82,6 +85,7 @@ def analyze_loop_complexity(code: str) -> str:
         # brace_depth 表示当前所在的大括号层级
         # 循环嵌套数 = 当前大括号层级
         if has_loop:
+            saw_loop = True
             max_nesting = max(max_nesting, brace_depth)
 
         # 处理大括号
@@ -92,8 +96,10 @@ def analyze_loop_complexity(code: str) -> str:
                 brace_depth = max(0, brace_depth - 1)
 
     # 根据嵌套层数估算复杂度
+    if not saw_loop:
+        return ComplexityLevel.CONSTANT
     if max_nesting == 0:
-        return ComplexityLevel.LINEAR  # 默认假设
+        return ComplexityLevel.LINEAR
     elif max_nesting == 1:
         return ComplexityLevel.LINEAR
     elif max_nesting == 2:
@@ -218,7 +224,7 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
     memory_mb = max(1, memory_bytes // (1024 * 1024))
 
     if total_elements == 0:
-        return "O(1) - O(n)", 64
+        return "O(1)", 64
     elif total_elements < 10000:
         return "O(n)", memory_mb
     elif total_elements < 1000000:
@@ -260,6 +266,20 @@ class SolutionAnalyzeTool(Tool):
                     "type": "string",
                     "description": "C++ 源代码",
                 },
+                "problem_dir": {
+                    "type": "string",
+                    "description": "题目目录路径（可选；缺省时读取 solutions/sol.cpp）",
+                },
+                "solution_type": {
+                    "type": "string",
+                    "enum": ["sol", "brute"],
+                    "description": "缺省源文件类型，默认 sol",
+                    "default": "sol",
+                },
+                "source_path": {
+                    "type": "string",
+                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
+                },
                 "constraints": {
                     "type": "object",
                     "description": "已知的题目约束（可选）",
@@ -269,15 +289,33 @@ class SolutionAnalyzeTool(Tool):
                     },
                 },
             },
-            "required": ["code"],
         }
 
     async def execute(
         self,
-        code: str,
+        code: str | None = None,
+        problem_dir: str | None = None,
+        solution_type: str = "sol",
+        source_path: str | None = None,
         constraints: dict | None = None,
     ) -> ToolResult:
         """执行复杂度分析。"""
+        if solution_type not in {"sol", "brute"}:
+            return ToolResult.fail("solution_type must be 'sol' or 'brute'")
+        if code is None and source_path is None and not problem_dir:
+            return ToolResult.fail("Either 'code', 'source_path', or 'problem_dir' must be provided")
+
+        resolved, err = resolve_source(
+            problem_dir or ".",
+            code,
+            source_path,
+            default_source_path=os.path.join("solutions", f"{solution_type}.cpp"),
+        )
+        if err is not None:
+            return err
+        assert resolved is not None
+        code = resolved.code
+
         # 1. 分析循环复杂度
         loop_complexity = analyze_loop_complexity(code)
 

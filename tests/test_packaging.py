@@ -531,7 +531,7 @@ async def test_solution_build_source_path_not_found():
 
 @pytest.mark.asyncio
 async def test_solution_build_neither_code_nor_source_path():
-    """测试既不提供 code 也不提供 source_path 时报错。"""
+    """测试既不提供 code/source_path 且默认源文件不存在时报错。"""
     from autocode_mcp.server import call_tool, register_all_tools
 
     register_all_tools()
@@ -545,7 +545,7 @@ async def test_solution_build_neither_code_nor_source_path():
         )
         assert result.isError is True
         error = result.structuredContent.get("error", "").lower()
-        assert "either" in error or "must be provided" in error
+        assert "not found" in error
 
 
 @pytest.mark.asyncio
