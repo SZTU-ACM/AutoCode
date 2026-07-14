@@ -73,7 +73,7 @@ AutoCode/
 
 ## 工具列表
 
-AutoCode 当前暴露 21 个 MCP 工具：
+AutoCode 当前暴露 22 个 MCP 工具：
 
 | 分组 | 工具 |
 |------|------|
@@ -83,7 +83,7 @@ AutoCode 当前暴露 21 个 MCP 工具：
 | Generator | `generator_build`, `generator_run` |
 | Checker / Interactor | `checker_build`, `interactor_build` |
 | Stress | `stress_test_run` |
-| Problem | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_audit`, `problem_pack_polygon` |
+| Problem | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_audit`, `problem_pack_polygon`, `problem_build_all` |
 
 ## 题目目录结构
 

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-07-14
+
+### Improvements
+
+- **性能与健壮性优化（纯内部重构，不改变工具对外契约）**
+  - 并发批处理：`problem_generate_tests`、`problem_verify_tests`、`stress_test_run` 改为有界并发执行（默认并发上限 4、可配置），结果与原串行实现一致。
+  - 统一门禁：`workflow/guard.py` 暴露 `check_gates`，`problem_pack_polygon` 与 `problem_audit` 共用唯一门禁真值；`autocode.json` 缺失或不可解析时显式阻断，而非静默宽松回退。
+  - 进程生命周期加固：`problem_cleanup_processes` 默认回收残留生成器/编译器进程（`psutil` 存活校验、POSIX 整进程树回收），取消路径主动终止在途工作。
+  - Hook 脚本拆分：`scripts/workflow_guard.py` 拆为 `hook_payload.py` / `hook_state.py` / `hook_gates.py` 纯函数，门禁复用 `manifest_uses_testlib_checker` 单一实现。
+  - 知识源单一真值：全部 22 个工具的 `input_schema` 改由 Pydantic 模型推导（`input_schema_from_model`），消除手写 JSON Schema 漂移；prompts 与 `skills/*.md` 共享 canonical 事实并由一致性测试守护。
+  - 新增 `problem_build_all` 工具，一次性构建题面所需的全部二进制（solution/generator/validator/checker/interactor），MCP 工具总数 21 → 22。
+
+### Tests
+
+- 新增并发 / 门禁 / 进程 / 钩子 / hook 去重 / 输入 schema / prompts 一致性等回归测试；全量 pytest 通过，`ruff` 与 `mypy` 干净。
+
 ## [1.0.5] - 2026-05-21
 
 ### Features
