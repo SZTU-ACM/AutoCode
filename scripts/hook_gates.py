@@ -164,10 +164,8 @@ def _manifest_uses_testlib_checker(manifest: dict[str, Any] | None) -> bool:
         return False
     if _SRC_DIR not in sys.path:
         sys.path.insert(0, _SRC_DIR)
-    from autocode_mcp.workflow.manifest import (  # type: ignore[import-untyped]
-        AutoCodeManifest,
-        manifest_uses_testlib_checker,
-    )
+    from autocode_mcp.workflow.manifest import manifest_uses_testlib_checker
+    from autocode_mcp.workflow.models import AutoCodeManifest
     try:
         model = AutoCodeManifest.model_validate(manifest)
     except ValidationError:
