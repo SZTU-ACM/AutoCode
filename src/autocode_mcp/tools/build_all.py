@@ -11,8 +11,9 @@ import os
 
 from .. import TEMPLATES_DIR
 from ..utils.compiler import BuildSpec, compile_all
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin
+from .schemas import ProblemBuildAllInput
 
 # (相对源路径, include 目录相对名) —— include 目录用于解析 testlib.h
 _STANDARD_SOURCES = (
@@ -47,32 +48,7 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-                "max_concurrent": {
-                    "type": "integer",
-                    "description": "最大并发编译数",
-                    "default": 4,
-                },
-                "include_extra_dirs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "额外的 include 目录（相对于 problem_dir），用于 testlib.h 等",
-                    "default": [],
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemBuildAllInput)
 
     async def execute(
         self,

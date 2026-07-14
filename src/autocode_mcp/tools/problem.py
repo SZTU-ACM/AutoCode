@@ -28,7 +28,13 @@ from ..workflow import (
     manifest_uses_testlib_checker,
     save_manifest,
 )
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
+from .schemas import (
+    ProblemCleanupProcessesInput,
+    ProblemCreateInput,
+    ProblemGenerateTestsInput,
+    ProblemPackPolygonInput,
+)
 
 
 @dataclass
@@ -78,25 +84,7 @@ class ProblemCreateTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "problem_name": {
-                    "type": "string",
-                    "description": "题目名称",
-                },
-                "interactive": {
-                    "type": "boolean",
-                    "description": "是否为交互题",
-                    "default": False,
-                },
-            },
-            "required": ["problem_dir", "problem_name"],
-        }
+        return input_schema_from_model(ProblemCreateInput)
 
     async def execute(
         self,
@@ -252,125 +240,7 @@ class ProblemGenerateTestsTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "test_count": {
-                    "type": "integer",
-                    "description": "测试数据组数",
-                    "default": 20,
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "单次执行超时（秒）",
-                    "default": 60,
-                },
-                "constraints": {
-                    "type": "object",
-                    "description": "题目约束条件。不提供 test_configs 时，系统将根据 constraints 自动生成覆盖边界、随机、极限、TLE 诱导等策略的测试配置（smart mode）",
-                    "properties": {
-                        "n_max": {
-                            "type": "integer",
-                            "description": "N 的最大值约束",
-                        },
-                        "t_max": {
-                            "type": "integer",
-                            "description": "T 的最大值约束",
-                        },
-                        "sum_n_max": {
-                            "type": "integer",
-                            "description": "sum(N) 的最大值约束",
-                        },
-                    },
-                },
-                "test_configs": {
-                    "type": "array",
-                    "description": "自定义测试配置列表（可选，不提供则根据 constraints 自动生成）",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "seed_offset": {
-                                "type": "integer",
-                                "description": "种子偏移量",
-                                "default": 0,
-                            },
-                            "type": {
-                                "type": "string",
-                                "enum": ["1", "2", "3", "4"],
-                                "description": "生成策略 (1=tiny, 2=random, 3=extreme, 4=tle)",
-                            },
-                            "n_min": {"type": "integer", "description": "N 最小值"},
-                            "n_max": {"type": "integer", "description": "N 最大值"},
-                            "t_min": {"type": "integer", "description": "T 最小值"},
-                            "t_max": {"type": "integer", "description": "T 最大值"},
-                            "extra_args": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "附加命令行参数，追加在标准 6 参数之后传递给 generator",
-                            },
-                        },
-                        "required": ["type", "n_min", "n_max", "t_min", "t_max"],
-                    },
-                },
-                "output_dir": {
-                    "type": "string",
-                    "description": "测试数据输出目录路径，默认为 problem_dir/tests。必须位于 problem_dir 下，且不能是题目根目录或 files/solutions/statements 等保留目录",
-                },
-                "sol_name": {
-                    "type": "string",
-                    "description": "标准解法文件名（不含扩展名），默认 'sol'",
-                },
-                "enable_dedup": {
-                    "type": "boolean",
-                    "description": "启用去重（基于 MD5 signature）",
-                    "default": True,
-                },
-                "enable_validator_filter": {
-                    "type": "boolean",
-                    "description": "启用 Validator 过滤（自动检测 val.exe）",
-                    "default": True,
-                },
-                "enable_balance": {
-                    "type": "boolean",
-                    "description": "启用平衡分布：在已满足「至少一半为 extreme/tle」后，将剩余名额在各非极限类型间尽量均衡分配；关闭时剩余名额按确定性的 (type_param, signature) 顺序填充",
-                    "default": True,
-                },
-                "oversample_ratio": {
-                    "type": "number",
-                    "description": "超额采样比例（生成候选数据 = test_count * ratio）",
-                    "default": 1.5,
-                },
-                "answer_ext": {
-                    "type": "string",
-                    "description": "答案文件后缀，默认 .ans，可配置为 .out",
-                    "default": ".ans",
-                },
-                "resume": {
-                    "type": "boolean",
-                    "description": "是否尝试从状态文件恢复中断任务",
-                    "default": False,
-                },
-                "hard_timeout_seconds": {
-                    "type": "integer",
-                    "description": "工具级硬超时（秒），超时后保存状态并返回失败",
-                },
-                "checkpoint_every": {
-                    "type": "integer",
-                    "description": "每生成多少候选写一次 checkpoint，默认 10",
-                    "default": 10,
-                },
-                "concurrency_limit": {
-                    "type": "integer",
-                    "description": "候选生成的最大并发子进程数（gen/validator/sol 流水），默认 4，不超过可用内存",
-                    "default": 4,
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemGenerateTestsInput)
 
     async def execute(
         self,
@@ -1248,18 +1118,7 @@ class ProblemCleanupProcessesTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {"type": "string", "description": "题目目录路径"},
-                "kill_all_generators": {
-                    "type": "boolean",
-                    "description": "保留参数（向后兼容）；无论真假都仅按记录的 PID 精准清理，不会全局按进程名误杀",
-                    "default": True,
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemCleanupProcessesInput)
 
     async def execute(self, problem_dir: str, kill_all_generators: bool = True) -> ToolResult:
         # 默认即巡检并回收残留 PID（不再直接返回 success）；回收前用 psutil 校验存活，
@@ -1457,26 +1316,7 @@ class ProblemPackPolygonTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "time_limit": {
-                    "type": "integer",
-                    "description": "时间限制（秒）",
-                    "default": 1,
-                },
-                "memory_limit": {
-                    "type": "integer",
-                    "description": "内存限制（MB）",
-                    "default": 256,
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemPackPolygonInput)
 
     async def execute(
         self,

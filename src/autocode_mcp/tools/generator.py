@@ -12,8 +12,9 @@ import re
 
 from ..utils.compiler import run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, resolve_source
+from .schemas import GeneratorBuildInput, GeneratorRunInput
 
 
 class GeneratorBuildTool(Tool, BuildToolMixin):
@@ -39,39 +40,7 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码（可选；缺省时读取 files/gen.cpp）",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-                "enable_semantic_check": {
-                    "type": "boolean",
-                    "description": "是否启用 type=3/type=4 语义静态检查",
-                    "default": True,
-                },
-                "strict_semantic_check": {
-                    "type": "boolean",
-                    "description": "语义静态检查不通过时是否直接失败",
-                    "default": False,
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(GeneratorBuildInput)
 
     async def execute(
         self,
@@ -237,64 +206,7 @@ class GeneratorRunTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "strategies": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["tiny", "random", "extreme", "tle"],
-                    },
-                    "description": "要运行的策略列表",
-                },
-                "test_count": {
-                    "type": "integer",
-                    "description": "目标测试数量",
-                    "default": 20,
-                },
-                "validator_path": {
-                    "type": "string",
-                    "description": "已编译的 Validator 路径（可选，用于过滤）",
-                },
-                "seed_start": {
-                    "type": "integer",
-                    "description": "随机种子起始值",
-                    "default": 1,
-                },
-                "n_min": {
-                    "type": "integer",
-                    "description": "N 最小值",
-                    "default": 1,
-                },
-                "n_max": {
-                    "type": "integer",
-                    "description": "N 最大值",
-                    "default": 100000,
-                },
-                "t_min": {
-                    "type": "integer",
-                    "description": "T 最小值",
-                    "default": 1,
-                },
-                "t_max": {
-                    "type": "integer",
-                    "description": "T 最大值",
-                    "default": 1,
-                },
-                "extra_args": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "附加命令行参数，追加在标准 6 参数之后传递给 generator",
-                    "default": [],
-                },
-            },
-            "required": ["problem_dir", "strategies"],
-        }
+        return input_schema_from_model(GeneratorRunInput)
 
     async def execute(
         self,

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import os
 
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import ComplexityLevel, analyze_loop_complexity
 from .mixins import resolve_source
+from .schemas import SolutionAuditBruteInput, SolutionAuditStdInput
 
 
 class SolutionAuditStdTool(Tool):
@@ -22,16 +23,7 @@ class SolutionAuditStdTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string"},
-                "source_path": {"type": "string"},
-                "problem_dir": {"type": "string"},
-                "constraints": {"type": "object"},
-                "claimed_complexity": {"type": "string"},
-            },
-        }
+        return input_schema_from_model(SolutionAuditStdInput)
 
     async def execute(
         self,
@@ -99,16 +91,7 @@ class SolutionAuditBruteTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string"},
-                "source_path": {"type": "string"},
-                "problem_dir": {"type": "string"},
-                "std_complexity": {"type": "string"},
-                "constraints": {"type": "object"},
-            },
-        }
+        return input_schema_from_model(SolutionAuditBruteInput)
 
     async def execute(
         self,

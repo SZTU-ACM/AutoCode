@@ -7,8 +7,9 @@ import shutil
 from typing import Literal
 
 from ..utils.platform import get_exe_extension
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, RunToolMixin, resolve_source
+from .schemas import SolutionBuildInput, SolutionRunInput
 
 
 def _is_safe_solution_stem(value: str) -> bool:
@@ -42,38 +43,7 @@ class SolutionBuildTool(Tool, BuildToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "solution_type": {
-                    "type": "string",
-                    "enum": ["sol", "brute"],
-                    "description": "解法类型：sol（标准解法）或 brute（暴力解法）",
-                },
-                "name": {
-                    "type": "string",
-                    "description": "自定义文件名（不含扩展名），默认使用 solution_type。例如 'brute_force' 替代 'brute'",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码（可选；缺省时读取 solutions/{solution_type}.cpp）",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-            },
-            "required": ["problem_dir", "solution_type"],
-        }
+        return input_schema_from_model(SolutionBuildInput)
 
     async def execute(
         self,
@@ -179,34 +149,7 @@ class SolutionRunTool(Tool, RunToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "solution_type": {
-                    "type": "string",
-                    "enum": ["sol", "brute"],
-                    "description": "解法类型：sol 或 brute",
-                },
-                "name": {
-                    "type": "string",
-                    "description": "自定义文件名（不含扩展名），默认使用 solution_type",
-                },
-                "input_data": {
-                    "type": "string",
-                    "description": "输入数据",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "执行超时（秒）",
-                    "default": 30,
-                },
-            },
-            "required": ["problem_dir", "solution_type", "input_data"],
-        }
+        return input_schema_from_model(SolutionRunInput)
 
     async def execute(
         self,

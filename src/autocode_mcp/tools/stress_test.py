@@ -17,7 +17,8 @@ from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
+from .schemas import StressTestRunInput
 
 _STRESS_CONCURRENCY = 4
 
@@ -67,101 +68,7 @@ class StressTestRunTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "trials": {
-                    "type": "integer",
-                    "description": "测试轮数",
-                    "default": 1000,
-                },
-                "n_max": {
-                    "type": "integer",
-                    "description": "小数据测试的 N 上限（stress test 保持小规模以确保 brute 快速运行）。同时作为 generator_args.n_max 的默认值",
-                    "default": 100,
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "单次执行超时（秒）",
-                    "default": 30,
-                },
-                "sol_name": {
-                    "type": "string",
-                    "description": "标准解法文件名（不含扩展名），默认 'sol'",
-                },
-                "brute_name": {
-                    "type": "string",
-                    "description": "暴力解法文件名（不含扩展名），默认 'brute'",
-                },
-                "types": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["1", "2", "3", "4"],
-                    },
-                    "description": "生成策略类型列表，轮次之间循环使用。例如 ['1','2','3','4'] 表示依次使用 tiny, random, extreme, tle。未指定时使用 generator_args.type 或默认 '2'",
-                },
-                "generator_args": {
-                    "type": "object",
-                    "description": "Generator 命令行参数。调用协议: gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max> [extra_args...]。seed 由系统自动填充为当前轮次，其余参数在此指定",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "default": "2",
-                            "description": "生成策略类型: 1=tiny(小数据穷举), 2=random(随机数据), 3=extreme(极端数据:溢出/精度/hash碰撞), 4=tle(TLE诱导数据)",
-                        },
-                        "n_min": {
-                            "type": "integer",
-                            "default": 1,
-                            "description": "每次测试中 N 的最小值（N 表示问题规模，如数组长度、节点数等）",
-                        },
-                        "n_max": {
-                            "type": "integer",
-                            "description": "每次测试中 N 的最大值。未指定时使用顶层 n_max 参数值",
-                        },
-                        "t_min": {
-                            "type": "integer",
-                            "default": 1,
-                            "description": "测试组数 T 的最小值（T 表示多组测试时的组数）",
-                        },
-                        "t_max": {
-                            "type": "integer",
-                            "default": 1,
-                            "description": "测试组数 T 的最大值",
-                        },
-                        "extra_args": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "附加命令行参数，追加在标准 6 参数之后传递给 generator",
-                            "default": [],
-                        },
-                    },
-                },
-                "stress_profiles": {
-                    "type": "array",
-                    "description": "多轮对拍配置，每个 profile 可覆盖 trials/types/generator_args",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "trials": {"type": "integer"},
-                            "types": {"type": "array", "items": {"type": "string", "enum": ["1", "2", "3", "4"]}},
-                            "generator_args": {"type": "object"},
-                        },
-                    },
-                },
-                "concurrency_limit": {
-                    "type": "integer",
-                    "description": "对拍轮次的最大并发数（gen/validator/sol/brute 流水），默认 4",
-                    "default": 4,
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(StressTestRunInput)
 
     async def _run_round(
         self,

@@ -22,7 +22,8 @@ from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from ..workflow.models import AutoCodeManifest
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
+from .schemas import ProblemVerifyTestsInput
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
 _TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
@@ -58,65 +59,7 @@ class ProblemVerifyTestsTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "tests_dir": {
-                    "type": "string",
-                    "description": "测试数据目录路径，默认为 problem_dir/tests",
-                },
-                "verify_types": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "file_count",
-                            "answer_consistency",
-                            "validator",
-                            "no_empty",
-                            "limit_ratio",
-                            "limit_semantics",
-                            "wrong_solution_kill",
-                            "duplicate_inputs",
-                            "scale_distribution",
-                            "purpose_coverage",
-                            "validator_self_test",
-                            "checker_self_test",
-                            "interactor_self_test",
-                        ],
-                    },
-                    "description": "要执行的验证类型，默认全部执行",
-                },
-                "sol_name": {
-                    "type": "string",
-                    "description": "标准解法文件名（不含扩展名），默认 'sol'",
-                },
-                "enable_limit_ratio": {
-                    "type": "boolean",
-                    "description": "是否启用 extreme/tle 占比检查（默认开启；设为 false 可关闭）",
-                    "default": True,
-                },
-                "answer_ext": {
-                    "type": "string",
-                    "description": "答案文件后缀，默认自动从 manifest 推断（否则使用 .ans）",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "单次执行超时（秒）",
-                    "default": 60,
-                },
-                "wrong_solution_names": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "需要验证必须被杀掉的错解名称列表（不含扩展名）",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemVerifyTestsInput)
 
     async def execute(
         self,

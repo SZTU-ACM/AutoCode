@@ -10,8 +10,9 @@ import os
 
 from ..utils.compiler import run_binary
 from ..utils.platform import get_exe_extension
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, resolve_source
+from .schemas import ValidatorBuildInput, ValidatorSelectInput
 
 
 class ValidatorBuildTool(Tool, BuildToolMixin):
@@ -41,41 +42,7 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码（可选；缺省时读取 files/val.cpp）",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "test_cases": {
-                    "type": "array",
-                    "description": "测试用例列表，每个用例包含 input 和 expected_valid",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string"},
-                            "expected_valid": {"type": "boolean"},
-                        },
-                        "required": ["input", "expected_valid"],
-                    },
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ValidatorBuildInput)
 
     async def execute(
         self,
@@ -201,24 +168,7 @@ class ValidatorSelectTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "candidates": {
-                    "type": "array",
-                    "description": "候选 Validator 的评分结果",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "score": {"type": "integer"},
-                            "binary_path": {"type": "string"},
-                        },
-                    },
-                },
-            },
-            "required": ["candidates"],
-        }
+        return input_schema_from_model(ValidatorSelectInput)
 
     async def execute(self, candidates: list[dict]) -> ToolResult:
         """执行 Validator 选择。"""

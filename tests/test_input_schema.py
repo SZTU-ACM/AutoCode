@@ -11,15 +11,50 @@ from typing import Any
 
 from autocode_mcp.tools.audit import ProblemAuditTool
 from autocode_mcp.tools.base import input_schema_from_model
+from autocode_mcp.tools.build_all import ProblemBuildAllTool
+from autocode_mcp.tools.checker import CheckerBuildTool
+from autocode_mcp.tools.complexity import SolutionAnalyzeTool
 from autocode_mcp.tools.file_ops import FileReadTool, FileSaveTool
+from autocode_mcp.tools.generator import GeneratorBuildTool, GeneratorRunTool
+from autocode_mcp.tools.interactor import InteractorBuildTool
+from autocode_mcp.tools.problem import (
+    ProblemCleanupProcessesTool,
+    ProblemCreateTool,
+    ProblemGenerateTestsTool,
+    ProblemPackPolygonTool,
+)
 from autocode_mcp.tools.schemas import (
+    CheckerBuildInput,
     FileReadInput,
     FileSaveInput,
+    GeneratorBuildInput,
+    GeneratorRunInput,
+    InteractorBuildInput,
     ProblemAuditInput,
+    ProblemBuildAllInput,
+    ProblemCleanupProcessesInput,
+    ProblemCreateInput,
+    ProblemGenerateTestsInput,
+    ProblemPackPolygonInput,
     ProblemValidateInput,
+    ProblemVerifyTestsInput,
+    SolutionAnalyzeInput,
+    SolutionAuditBruteInput,
+    SolutionAuditStdInput,
+    SolutionBuildInput,
+    SolutionRunInput,
     StatementSample,
+    StressGeneratorArgs,
+    StressTestRunInput,
+    ValidatorBuildInput,
+    ValidatorSelectInput,
 )
+from autocode_mcp.tools.solution import SolutionBuildTool, SolutionRunTool
+from autocode_mcp.tools.solution_audit import SolutionAuditBruteTool, SolutionAuditStdTool
+from autocode_mcp.tools.stress_test import StressTestRunTool
+from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
 from autocode_mcp.tools.validation import ProblemValidateTool
+from autocode_mcp.tools.validator import ValidatorBuildTool, ValidatorSelectTool
 
 
 def _non_null(spec: object) -> dict[str, Any]:
@@ -123,3 +158,56 @@ def test_migrated_tools_expose_derived_schema():
     assert FileReadTool().input_schema == input_schema_from_model(FileReadInput)
     assert FileSaveTool().input_schema == input_schema_from_model(FileSaveInput)
     assert ProblemValidateTool().input_schema == input_schema_from_model(ProblemValidateInput)
+
+
+# Every migrated tool paired with the Pydantic model that is its single source of truth.
+_MIGRATED = [
+    (ProblemAuditTool, ProblemAuditInput),
+    (FileReadTool, FileReadInput),
+    (FileSaveTool, FileSaveInput),
+    (ProblemValidateTool, ProblemValidateInput),
+    (CheckerBuildTool, CheckerBuildInput),
+    (ProblemBuildAllTool, ProblemBuildAllInput),
+    (InteractorBuildTool, InteractorBuildInput),
+    (GeneratorBuildTool, GeneratorBuildInput),
+    (GeneratorRunTool, GeneratorRunInput),
+    (ValidatorBuildTool, ValidatorBuildInput),
+    (ValidatorSelectTool, ValidatorSelectInput),
+    (SolutionAnalyzeTool, SolutionAnalyzeInput),
+    (SolutionBuildTool, SolutionBuildInput),
+    (SolutionRunTool, SolutionRunInput),
+    (ProblemVerifyTestsTool, ProblemVerifyTestsInput),
+    (StressTestRunTool, StressTestRunInput),
+    (SolutionAuditStdTool, SolutionAuditStdInput),
+    (SolutionAuditBruteTool, SolutionAuditBruteInput),
+    (ProblemCreateTool, ProblemCreateInput),
+    (ProblemGenerateTestsTool, ProblemGenerateTestsInput),
+    (ProblemCleanupProcessesTool, ProblemCleanupProcessesInput),
+    (ProblemPackPolygonTool, ProblemPackPolygonInput),
+]
+
+
+def test_all_migrated_tools_use_derived_schema():
+    # Each migrated tool's input_schema MUST equal the model-derived schema:
+    # the Pydantic model is the single source of truth, no hand-written dict.
+    for tool_cls, model in _MIGRATED:
+        derived = input_schema_from_model(model)
+        assert tool_cls().input_schema == derived, f"{tool_cls.__name__} schema drifted"
+
+
+def test_all_migrated_schemas_are_self_contained():
+    # Derived schemas must be client-friendly: no $ref / $defs, and a top-level object.
+    for _tool_cls, model in _MIGRATED:
+        schema = input_schema_from_model(model)
+        assert schema["type"] == "object"
+        assert "$defs" not in schema
+        assert "$ref" not in json.dumps(schema)
+
+
+def test_stress_generator_args_defaults():
+    # Verify nested StressGeneratorArgs inlines cleanly (used by StressTestRunInput).
+    schema = input_schema_from_model(StressGeneratorArgs)
+    assert schema["type"] == "object"
+    assert schema["properties"]["type"]["default"] == "2"
+    assert schema["properties"]["extra_args"]["default"] == []
+    assert "$defs" not in schema

@@ -13,8 +13,9 @@ import tempfile
 from ..utils.checker_judge import verdict_from_run
 from ..utils.compiler import compile_cpp, run_binary_with_args
 from ..utils.platform import get_exe_extension
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import resolve_source
+from .schemas import InteractorBuildInput
 
 
 class InteractorBuildTool(Tool):
@@ -41,56 +42,7 @@ class InteractorBuildTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码（可选；缺省时读取 files/interactor.cpp）",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "reference_solution_path": {
-                    "type": "string",
-                    "description": "参考解法路径（旧式双进程管道验证；testlib interactor 优先使用 interaction_scenarios）",
-                },
-                "mutant_solutions": {
-                    "type": "array",
-                    "description": "变异解法路径列表（旧式双进程管道验证；testlib interactor 优先使用 interaction_scenarios）",
-                    "items": {"type": "string"},
-                },
-                "interaction_scenarios": {
-                    "type": "array",
-                    "description": "脚本化交互场景。按 testlib registerInteraction 约定运行 interactor <input-file> <output-file> <answer-file>，并把 contestant_output 送入 interactor stdin。",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string", "description": "测试输入文件内容，供 inf 读取"},
-                            "answer": {"type": "string", "description": "可选标准答案文件内容，供 ans 读取"},
-                            "contestant_output": {"type": "string", "description": "模拟选手在整个交互过程中的输出，供 ouf 读取"},
-                            "expected_verdict": {
-                                "type": "string",
-                                "enum": ["AC", "WA", "PE", "FAIL", "TLE"],
-                                "description": "期望 verdict，默认 AC",
-                            },
-                        },
-                        "required": ["input", "contestant_output"],
-                    },
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(InteractorBuildInput)
 
     async def execute(
         self,

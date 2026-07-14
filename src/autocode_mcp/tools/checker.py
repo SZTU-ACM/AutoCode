@@ -10,8 +10,9 @@ import os
 
 from ..utils.compiler import run_binary_with_args
 from ..utils.platform import get_exe_extension
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, resolve_source
+from .schemas import CheckerBuildInput
 
 
 class CheckerBuildTool(Tool, BuildToolMixin):
@@ -37,46 +38,7 @@ class CheckerBuildTool(Tool, BuildToolMixin):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码（可选；缺省时读取 files/checker.cpp）",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "test_scenarios": {
-                    "type": "array",
-                    "description": "测试场景列表",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string"},
-                            "contestant_output": {"type": "string"},
-                            "reference_output": {"type": "string"},
-                            "expected_verdict": {
-                                "type": "string",
-                                "enum": ["AC", "WA", "PE", "FAIL"],
-                            },
-                        },
-                        "required": ["input", "contestant_output", "reference_output"],
-                    },
-                },
-                "compiler": {
-                    "type": "string",
-                    "description": "编译器名称",
-                    "default": "g++",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(CheckerBuildInput)
 
     async def execute(
         self,

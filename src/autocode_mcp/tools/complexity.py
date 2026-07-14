@@ -10,8 +10,9 @@ import os
 import re
 from typing import Any
 
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import resolve_source
+from .schemas import SolutionAnalyzeInput
 
 
 class ComplexityLevel:
@@ -259,37 +260,7 @@ class SolutionAnalyzeTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "C++ 源代码",
-                },
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径（可选；缺省时读取 solutions/sol.cpp）",
-                },
-                "solution_type": {
-                    "type": "string",
-                    "enum": ["sol", "brute"],
-                    "description": "缺省源文件类型，默认 sol",
-                    "default": "sol",
-                },
-                "source_path": {
-                    "type": "string",
-                    "description": "源文件路径，相对于 problem_dir 或绝对路径。优先级高于 code",
-                },
-                "constraints": {
-                    "type": "object",
-                    "description": "已知的题目约束（可选）",
-                    "properties": {
-                        "n_max": {"type": "integer"},
-                        "time_limit_ms": {"type": "integer"},
-                    },
-                },
-            },
-        }
+        return input_schema_from_model(SolutionAnalyzeInput)
 
     async def execute(
         self,
