@@ -6,11 +6,18 @@ duplications. Manifest reads use ``load_manifest`` from ``hook_state``.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from hook_state import load_manifest
+from pydantic import ValidationError
+
+# Path to the MCP-side package so the hook can reuse its single source of truth
+# for the testlib-checker decision (imported lazily inside the helper below).
+_SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 Gate = tuple[Callable[[dict[str, Any], dict[str, Any]], bool], str]
 
@@ -146,9 +153,26 @@ def _stress_prereq_core_ok(state: dict[str, Any], tool_input: dict[str, Any]) ->
     )
 
 
-def _manifest_dict_uses_testlib_checker(manifest: dict[str, Any]) -> bool:
-    """与 Pydantic manifest 的 manifest_uses_testlib_checker 一致（仅用 JSON 真值）。"""
-    return manifest.get("special_judge") is True and manifest.get("stress_comparison") == "checker"
+def _manifest_uses_testlib_checker(manifest: dict[str, Any] | None) -> bool:
+    """Delegate to the single MCP-side truth ``manifest_uses_testlib_checker``.
+
+    The hook previously duplicated this logic in ``_manifest_dict_uses_testlib_checker``;
+    that copy is removed so there is exactly one source of truth for whether a problem
+    uses the testlib checker path.
+    """
+    if not isinstance(manifest, dict):
+        return False
+    if _SRC_DIR not in sys.path:
+        sys.path.insert(0, _SRC_DIR)
+    from autocode_mcp.workflow.manifest import (  # type: ignore[import-untyped]
+        AutoCodeManifest,
+        manifest_uses_testlib_checker,
+    )
+    try:
+        model = AutoCodeManifest.model_validate(manifest)
+    except ValidationError:
+        return False
+    return bool(manifest_uses_testlib_checker(model))
 
 
 def _checker_build_prereq_ok(state: dict[str, Any], tool_input: dict[str, Any]) -> bool:
@@ -159,7 +183,7 @@ def _checker_build_prereq_ok(state: dict[str, Any], tool_input: dict[str, Any]) 
     if not isinstance(problem_dir, str) or not problem_dir.strip():
         return False
     manifest = load_manifest(problem_dir.strip())
-    if not _manifest_dict_uses_testlib_checker(manifest):
+    if not _manifest_uses_testlib_checker(manifest):
         return False
     return _stress_prereq_core_ok(state, tool_input)
 
@@ -170,7 +194,7 @@ def _stress_spj_checker_ready_ok(state: dict[str, Any], tool_input: dict[str, An
     if not isinstance(problem_dir, str) or not problem_dir.strip():
         return True
     manifest = load_manifest(problem_dir.strip())
-    if not _manifest_dict_uses_testlib_checker(manifest):
+    if not _manifest_uses_testlib_checker(manifest):
         return True
     return bool(state.get("checker_ready"))
 

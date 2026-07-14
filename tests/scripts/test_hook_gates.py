@@ -5,7 +5,7 @@ from __future__ import annotations
 from hook_gates import (
     DEFAULT_QUALITY_GATES,
     PRE_GATES,
-    _manifest_dict_uses_testlib_checker,
+    _manifest_uses_testlib_checker,
     _min_limit_ratio_gate_ok,
     _validator_gate_ok,
 )
@@ -16,16 +16,25 @@ def test_default_quality_gates_present():
     assert "require_validator_check" in DEFAULT_QUALITY_GATES
 
 
-def test_manifest_dict_uses_testlib_checker():
+def test_manifest_uses_testlib_checker():
     assert (
-        _manifest_dict_uses_testlib_checker({"special_judge": True, "stress_comparison": "checker"})
+        _manifest_uses_testlib_checker(
+            {"problem_name": "p", "special_judge": True, "stress_comparison": "checker"}
+        )
         is True
     )
     assert (
-        _manifest_dict_uses_testlib_checker({"special_judge": True, "stress_comparison": "exact"})
+        _manifest_uses_testlib_checker(
+            {"problem_name": "p", "special_judge": True, "stress_comparison": "exact"}
+        )
         is False
     )
-    assert _manifest_dict_uses_testlib_checker({"special_judge": False}) is False
+    assert (
+        _manifest_uses_testlib_checker({"problem_name": "p", "special_judge": False}) is False
+    )
+    # 缺失/损坏 manifest 一律视为未使用 testlib checker
+    assert _manifest_uses_testlib_checker({}) is False
+    assert _manifest_uses_testlib_checker(None) is False
 
 
 def test_pre_gates_requires_validator_before_generator():
