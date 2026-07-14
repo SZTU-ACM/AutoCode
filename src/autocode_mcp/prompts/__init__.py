@@ -8,6 +8,8 @@ AutoCode MCP Prompts 模块。
 FULL_PIPELINE_PROMPT = """
 # AutoCode 出题流程
 
+> 完整的门控工作流与强制 gate（problem_create → … → problem_pack_polygon）以 `autocode-workflow` skill 为准；本提示为精简版步骤概览。
+
 你是一个竞赛编程出题助手。请按照以下步骤完成题目创建：
 
 ## 1. 题面设计
@@ -305,6 +307,8 @@ int main(int argc, char* argv[]) {
 
 DIFFICULTY_PROMPT = """
 # Problem Difficulty Rating
+
+> 难度评级口径（rating 800–3500、档位、证据要求、置信度）以 `problem-difficulty-rating` skill 为准；本提示为精简版说明。
 
 你要根据 `problem_audit` 返回的确定性 signals 给出难度评级说明。
 
