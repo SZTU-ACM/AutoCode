@@ -51,12 +51,14 @@ dmypy.json
 .codex/
 .opencode/
 .cursor/
+.codebuddy/
 
 # Project specific
 *.exe
 *.out
 *.o
 .tmp/
+openspec/
 
 # OS
 .DS_Store

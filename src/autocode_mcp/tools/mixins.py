@@ -10,7 +10,14 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
-from ..utils.compiler import CompileResult, RunResult, compile_cpp, run_binary
+from ..utils.compiler import (
+    BuildSpec,
+    CompileResult,
+    RunResult,
+    compile_all,
+    compile_cpp,
+    run_binary,
+)
 from ..utils.resource_limit import get_resource_limit
 from .base import ToolResult
 
@@ -92,6 +99,15 @@ class BuildToolMixin:
             opt_level=opt_level,
             include_dirs=include_dirs,
         )
+
+    async def build_all(
+        self,
+        problem_dir: str,
+        specs: list[BuildSpec],
+        max_concurrent: int = 4,
+    ) -> dict[str, CompileResult]:
+        """并发编译多个源文件，返回 source -> 编译结果。"""
+        return await compile_all(problem_dir, specs, max_concurrent=max_concurrent)
 
 
 class RunToolMixin:

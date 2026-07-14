@@ -67,7 +67,9 @@ strict = true
 warn_return_any = true
 warn_unused_ignores = true
 exclude = ["tests/", ".venv/"]
-disable_error_code = ["override", "no-untyped-call", "untyped-decorator", "no-untyped-def", "var-annotated", "type-arg", "no-any-return", "index", "type-var", "arg-type"]
+# 收紧：已移除实测可修复或零触发的 no-untyped-def / no-any-return / index / type-var。
+# 保留 no-untyped-call 因其主要由 MCP 框架装饰器误报触发。
+disable_error_code = ["override", "untyped-decorator", "var-annotated", "type-arg", "arg-type", "no-untyped-call"]
 
 [tool.coverage.run]
 source = ["src/autocode_mcp"]

@@ -8,6 +8,7 @@ Windows Job Objects 模块。
 from __future__ import annotations
 
 import sys
+from types import TracebackType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -154,7 +155,12 @@ class WinJobObject:
         """上下文管理器入口。"""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """上下文管理器退出，自动清理资源。"""
         self.terminate()
 

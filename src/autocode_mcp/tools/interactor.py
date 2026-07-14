@@ -412,7 +412,11 @@ class InteractorBuildTool(Tool):
         solution.stdout -> interactor.stdin
         """
 
-        async def pipe_data(reader, writer, name: str):
+        async def pipe_data(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+            name: str,
+        ) -> None:
             """从 reader 读取数据并写入 writer"""
             try:
                 while True:

@@ -133,3 +133,52 @@ def test_cache_directory_creation():
         CompileCache(cache_dir)
 
         assert os.path.exists(cache_dir)
+
+
+def test_cache_path_bucketing():
+    """不同源文件应落入不同分桶目录，避免相互污染。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source1 = os.path.join(tmpdir, "a.cpp")
+        source2 = os.path.join(tmpdir, "b.cpp")
+        for path in (source1, source2):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("int main() { return 0; }")
+        binary = os.path.join(tmpdir, "bin")
+        with open(binary, "wb") as f:
+            f.write(b"x")
+
+        cache = CompileCache(os.path.join(tmpdir, ".cache"))
+        cached1 = cache.set(source1, binary, "g++", "c++2c", "-O2")
+        cached2 = cache.set(source2, binary, "g++", "c++2c", "-O2")
+
+        # 内容相同但源路径不同，应位于不同分桶目录。
+        assert os.path.dirname(cached1) != os.path.dirname(cached2)
+        assert cache.get(source1, "g++", "c++2c", "-O2") == cached1
+        assert cache.get(source2, "g++", "c++2c", "-O2") == cached2
+
+
+def test_cache_mtime_fast_path_builds_index():
+    """稳定（非最近修改）源文件应在索引中留下 mtime/size 记录以走快速路径。"""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = os.path.join(tmpdir, "stable.cpp")
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write("int main() { return 0; }")
+        # 将 mtime 回拨到安全窗口之外，触发快速路径的索引写入。
+        old = _time.time() - 3600
+        _os.utime(source_path, (old, old))
+
+        cache = CompileCache(os.path.join(tmpdir, ".cache"))
+        key1 = cache._resolve_key(source_path, "g++", "c++2c", "-O2")
+        bucket_dir = cache._bucket_dir(source_path)
+        index = _json.loads((bucket_dir / "index.json").read_text(encoding="utf-8"))
+        entry = index["g++:c++2c:-O2"]
+        assert entry["key"] == key1
+        assert entry["size"] == os.path.getsize(source_path)
+
+        # 再次解析应命中快速路径，键保持一致。
+        key2 = cache._resolve_key(source_path, "g++", "c++2c", "-O2")
+        assert key2 == key1

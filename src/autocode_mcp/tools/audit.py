@@ -14,7 +14,8 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from ..workflow import load_manifest, manifest_uses_testlib_checker
+from ..workflow import check_gates, load_manifest, manifest_uses_testlib_checker
+from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from ..workflow.models import AutoCodeManifest
 from .base import Tool, ToolResult
 from .complexity import analyze_loop_complexity, detect_algorithm_patterns
@@ -255,22 +256,14 @@ class ProblemAuditTool(Tool):
         blocking: list[dict[str, str]],
         next_actions: list[dict[str, object]],
     ) -> None:
-        if not bool(workflow_state.get("tests_verified")):
-            blocking.append({"gate": "tests_verified", "reason": "run problem_verify_tests first"})
-            next_actions.append({"tool": "problem_verify_tests", "arguments": {}})
-
-        required = [
-            ("limit_semantics", manifest.quality_gates.require_limit_semantics),
-            ("validator_check", manifest.quality_gates.require_validator_check),
-            ("wrong_solution_kill", manifest.quality_gates.require_wrong_solution_kill),
-        ]
-        for name, enabled in required:
-            if not enabled:
-                continue
-            signal = quality_signals.get(name, {})
-            if not self._signal_satisfied(signal):
-                blocking.append({"gate": name, "reason": f"verification signal `{name}` not satisfied"})
-                verify_type = "validator" if name == "validator_check" else name
+        # 验证信号类质量门禁统一委托 workflow.guard.check_gates 判定，
+        # 与 problem_pack_polygon 共享同一真值来源；此处仅补充 next_actions 提示。
+        for issue in check_gates(manifest, workflow_state, quality_signals):
+            blocking.append({"gate": issue.gate, "reason": issue.reason})
+            if issue.gate == "tests_verified":
+                next_actions.append({"tool": "problem_verify_tests", "arguments": {}})
+            else:
+                verify_type = "validator" if issue.gate == "validator_check" else issue.gate
                 next_actions.append({"tool": "problem_verify_tests", "arguments": {"verify_types": [verify_type]}})
 
     async def _require_special_artifact_gates(
@@ -528,4 +521,4 @@ class ProblemAuditTool(Tool):
         return {"executed": True, "passed": passed, "evidence": evidence}
 
     def _signal_satisfied(self, signal: object) -> bool:
-        return isinstance(signal, dict) and bool(signal.get("executed")) and bool(signal.get("passed"))
+        return _guard_signal_satisfied(signal)

@@ -12,11 +12,13 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
+from ..utils.answer_ext import normalize_answer_ext
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker, verdict_from_run
-from ..utils.compiler import run_binary, run_binary_with_args
+from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from ..workflow.models import AutoCodeManifest
@@ -24,6 +26,7 @@ from .base import Tool, ToolResult
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
 _TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
+_VERIFY_CONCURRENCY = 4
 
 
 class ProblemVerifyTestsTool(Tool):
@@ -146,7 +149,9 @@ class ProblemVerifyTestsTool(Tool):
             )
             return ToolResult.fail(f"Tests directory not found: {tests_dir}")
 
-        resolved_answer_ext = self._resolve_answer_ext(tests_dir, answer_ext)
+        # tests manifest 一次性加载并透传，避免各检查重复 open。
+        tests_manifest = self._read_tests_manifest(tests_dir)
+        resolved_answer_ext = self._resolve_answer_ext(tests_dir, answer_ext, tests_manifest)
         try:
             manifest_model = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
@@ -212,12 +217,12 @@ class ProblemVerifyTestsTool(Tool):
 
         # 5. 极限数据占比检查
         if "limit_ratio" in verify_types:
-            result = self._check_limit_ratio(tests_dir)
+            result = self._check_limit_ratio(tests_dir, tests_manifest)
             results["limit_ratio"] = result
             if not result["passed"]:
                 all_passed = False
         if "limit_semantics" in verify_types:
-            result = self._check_limit_semantics(tests_dir)
+            result = self._check_limit_semantics(tests_dir, tests_manifest)
             results["limit_semantics"] = result
             if not result["passed"]:
                 all_passed = False
@@ -525,13 +530,13 @@ class ProblemVerifyTestsTool(Tool):
                     "mode": "checker",
                 }
 
-        for in_file in in_files:
+        async def _check_one(in_file: str) -> tuple[str, Any] | None:
             in_path = os.path.join(tests_dir, in_file)
             ans_file = Path(in_file).with_suffix(answer_ext).name
             ans_path = os.path.join(tests_dir, ans_file)
 
             if not os.path.exists(ans_path):
-                continue
+                return None
 
             with open(in_path, encoding="utf-8") as f:
                 input_data = f.read()
@@ -542,13 +547,9 @@ class ProblemVerifyTestsTool(Tool):
             result = await run_binary(sol_exe, input_data, timeout=timeout)
 
             if result.timed_out:
-                timed_out.append(in_file)
-                continue
-
+                return ("timed_out", in_file)
             if not result.success:
-                errors.append({"file": in_file, "stderr": result.stderr})
-                continue
-
+                return ("error", {"file": in_file, "stderr": result.stderr})
             if verify_with_checker:
                 with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
                     out_path = os.path.join(tmp, "output.txt")
@@ -562,17 +563,37 @@ class ProblemVerifyTestsTool(Tool):
                         timeout=timeout,
                     )
                     if verdict != "AC":
-                        mismatches.append({
-                            "file": in_file,
-                            "checker_verdict": verdict,
-                            "checker_stderr": (chk_run.stderr or "")[:500],
-                        })
-            elif result.stdout.strip() != expected.strip():
-                mismatches.append({
-                    "file": in_file,
-                    "expected": expected[:200],
-                    "actual": result.stdout[:200],
-                })
+                        return (
+                            "mismatch",
+                            {
+                                "file": in_file,
+                                "checker_verdict": verdict,
+                                "checker_stderr": (chk_run.stderr or "")[:500],
+                            },
+                        )
+                return None
+            if result.stdout.strip() != expected.strip():
+                return (
+                    "mismatch",
+                    {
+                        "file": in_file,
+                        "expected": expected[:200],
+                        "actual": result.stdout[:200],
+                    },
+                )
+            return None
+
+        outcomes = await run_batch(in_files, _check_one, limit=_VERIFY_CONCURRENCY)
+        for outcome in outcomes:
+            if outcome is None:
+                continue
+            kind, payload = outcome
+            if kind == "timed_out":
+                timed_out.append(payload)
+            elif kind == "error":
+                errors.append(payload)
+            elif kind == "mismatch":
+                mismatches.append(payload)
 
         passed = not mismatches and not timed_out and not errors
         out: dict = {
@@ -605,8 +626,7 @@ class ProblemVerifyTestsTool(Tool):
             f for f in os.listdir(tests_dir) if f.endswith(".in")
         )
 
-        invalid = []
-        for in_file in in_files:
+        async def _validate_one(in_file: str) -> dict | None:
             in_path = os.path.join(tests_dir, in_file)
 
             with open(in_path, encoding="utf-8") as f:
@@ -615,10 +635,14 @@ class ProblemVerifyTestsTool(Tool):
             result = await run_binary(val_exe, input_data, timeout=timeout)
 
             if result.return_code != 0:
-                invalid.append({
+                return {
                     "file": in_file,
                     "stderr": result.stderr[:200] if result.stderr else "",
-                })
+                }
+            return None
+
+        outcomes = await run_batch(in_files, _validate_one, limit=_VERIFY_CONCURRENCY)
+        invalid = [o for o in outcomes if o is not None]
 
         return {
             "passed": len(invalid) == 0,
@@ -626,30 +650,22 @@ class ProblemVerifyTestsTool(Tool):
             "invalid": invalid,
         }
 
-    def _check_limit_ratio(self, tests_dir: str) -> dict:
-        """检查最终测试中 type=3/4 是否不少于一半。"""
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-        if not os.path.exists(manifest_path):
-            return {
-                "passed": False,
-                "total": 0,
-                "limit_case_count": 0,
-                "limit_case_minimum_required": 0,
-                "limit_case_ratio": 0.0,
-                "error": f"manifest not found: {manifest_path}",
-            }
+    def _check_limit_ratio(self, tests_dir: str, manifest: dict | None = None) -> dict:
+        """检查最终测试中 type=3/4 是否不少于一半。
 
-        try:
-            with open(manifest_path, encoding="utf-8") as f:
-                manifest = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        manifest 可来自一次性加载并透传，缺省时回退为读取 tests manifest。
+        """
+        if manifest is None:
+            manifest = self._read_tests_manifest(tests_dir)
+        if not manifest:
+            manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
             return {
                 "passed": False,
                 "total": 0,
                 "limit_case_count": 0,
                 "limit_case_minimum_required": 0,
                 "limit_case_ratio": 0.0,
-                "error": f"failed to read manifest: {e}",
+                "error": f"tests manifest missing or unreadable: {manifest_path}",
             }
 
         tests = manifest.get("tests", [])
@@ -712,15 +728,16 @@ class ProblemVerifyTestsTool(Tool):
             "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
         }
 
-    def _check_limit_semantics(self, tests_dir: str) -> dict:
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-        if not os.path.exists(manifest_path):
-            return {"passed": False, "error": f"manifest not found: {manifest_path}"}
-        try:
-            with open(manifest_path, encoding="utf-8") as f:
-                manifest = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            return {"passed": False, "error": f"failed to read manifest: {exc}"}
+    def _check_limit_semantics(self, tests_dir: str, manifest: dict | None = None) -> dict:
+        """检查 type=3/4 是否存在以及语义门禁。
+
+        manifest 可来自一次性加载并透传，缺省时回退为读取 tests manifest。
+        """
+        if manifest is None:
+            manifest = self._read_tests_manifest(tests_dir)
+        if not manifest:
+            manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
+            return {"passed": False, "error": f"tests manifest missing or unreadable: {manifest_path}"}
         tests = manifest.get("tests", [])
         type3 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "3"]
         type4 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "4"]
@@ -1080,37 +1097,22 @@ class ProblemVerifyTestsTool(Tool):
                 categories.add(fallback)
         return categories
 
-    def _resolve_answer_ext(self, tests_dir: str, answer_ext: str | None) -> str:
+    def _resolve_answer_ext(
+        self, tests_dir: str, answer_ext: str | None, manifest: dict | None = None
+    ) -> str:
         normalized = self._normalize_answer_ext(answer_ext)
         if normalized:
             return normalized
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-        if os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, encoding="utf-8") as f:
-                    manifest = json.load(f)
-                ext = self._normalize_answer_ext(manifest.get("answer_ext"))
-                if ext:
-                    return ext
-            except (json.JSONDecodeError, OSError):
-                pass
+        if manifest is None:
+            manifest = self._read_tests_manifest(tests_dir)
+        if manifest:
+            ext = self._normalize_answer_ext(manifest.get("answer_ext"))
+            if ext:
+                return ext
         return ".ans"
 
     def _normalize_answer_ext(self, answer_ext: str | None) -> str | None:
-        if not isinstance(answer_ext, str):
-            return None
-        ext = answer_ext.strip()
-        if not ext:
-            return None
-        if not ext.startswith("."):
-            ext = f".{ext}"
-        if not any(ch != "." for ch in ext[1:]):
-            return None
-        if any(ch in ext for ch in ('/', '\\', ':', '*', '?', '"', "<", ">", "|")):
-            return None
-        if ext == ".in":
-            return None
-        return ext
+        return normalize_answer_ext(answer_ext)
 
     def _wrong_expected(self, wrong_name: str, manifest: AutoCodeManifest | None) -> str:
         if manifest:
@@ -1157,20 +1159,18 @@ class ProblemVerifyTestsTool(Tool):
 
             exp = self._wrong_expected(wrong_name, manifest)
             # 与 checker 一致：每测 "AC" / 非 AC；expected=fail 须至少一测非 AC；expected=pass 须全部 AC
-            per_test: list[str] = []
 
-            if verify_with_checker:
-                for in_file in in_files:
-                    ans_file = in_file.with_suffix(answer_ext)
-                    if not ans_file.exists():
-                        continue
-                    input_data = in_file.read_text(encoding="utf-8")
+            async def _run_wrong_check(in_file: Path, _binary_path: Path = binary_path) -> str:
+                ans_file = in_file.with_suffix(answer_ext)
+                if not ans_file.exists():
+                    return "SKIP"
+                input_data = in_file.read_text(encoding="utf-8")
+                run = await run_binary(str(_binary_path), input_data, timeout=timeout)
+                if run.timed_out or not run.success:
+                    return "FAIL"
+                if verify_with_checker:
                     in_path = str(in_file)
                     ans_path = str(ans_file)
-                    run = await run_binary(str(binary_path), input_data, timeout=timeout)
-                    if run.timed_out or not run.success:
-                        per_test.append("FAIL")
-                        continue
                     with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
                         out_path = os.path.join(tmp, "output.txt")
                         with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
@@ -1182,22 +1182,15 @@ class ProblemVerifyTestsTool(Tool):
                             ans_path,
                             timeout=timeout,
                         )
-                    per_test.append(verdict)
-            else:
-                for in_file in in_files:
-                    ans_file = in_file.with_suffix(answer_ext)
-                    if not ans_file.exists():
-                        continue
-                    input_data = in_file.read_text(encoding="utf-8")
-                    run = await run_binary(str(binary_path), input_data, timeout=timeout)
-                    if run.timed_out or not run.success:
-                        per_test.append("FAIL")
-                        continue
-                    expected = ans_file.read_text(encoding="utf-8").strip()
-                    if run.stdout.strip() != expected:
-                        per_test.append("FAIL")
-                    else:
-                        per_test.append("AC")
+                    return verdict
+                expected = ans_file.read_text(encoding="utf-8").strip()
+                return "AC" if run.stdout.strip() == expected else "FAIL"
+
+            per_test = [
+                v
+                for v in await run_batch(in_files, _run_wrong_check, limit=_VERIFY_CONCURRENCY)
+                if v != "SKIP"
+            ]
 
             if not per_test:
                 killed = False

@@ -12,12 +12,14 @@ import pytest
 
 import autocode_mcp.utils.compiler as compiler_module
 from autocode_mcp.utils.compiler import (
+    BuildSpec,
     CompileResult,
     _normalize_windows_stdin,
     cleanup_work_dir,
     compile_all,
     compile_cpp,
     get_work_dir,
+    run_batch,
     run_binary,
     run_binary_with_args,
 )
@@ -150,6 +152,32 @@ async def test_run_binary_success():
         assert result.success
         assert "Hello, World!" in result.stdout
         assert result.return_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_binary_large_output_streams_to_temp():
+    """大输出应正确捕获：输出重定向到临时文件，避免全量读入内存。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = os.path.join(tmpdir, "big.cpp")
+        binary_path = os.path.join(tmpdir, "big" + (".exe" if os.name == "nt" else ""))
+        # 打印 300_000 行，单靠管道缓冲会更易触发内存/阻塞问题。
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write(
+                "#include <iostream>\n"
+                "int main(){\n"
+                "for(int i=0;i<300000;i++) std::cout<<\"line \"<<i<<\"\\n\";\n"
+                "return 0;}\n"
+            )
+        compile_result = await compile_cpp(source_path, binary_path)
+        if not compile_result.success:
+            pytest.skip("compilation failed")
+
+        result = await run_binary(binary_path)
+        assert result.success, result.error
+        # 输出至少应覆盖首尾，证明完整捕获。
+        assert result.stdout.startswith("line 0")
+        assert "line 299999" in result.stdout
+        assert result.stdout.count("\n") == 300000
 
 
 @pytest.mark.asyncio
@@ -292,6 +320,34 @@ async def test_compile_all_partial_failure():
         assert not results[invalid_source].success
 
 
+@pytest.mark.asyncio
+async def test_compile_all_uses_build_spec_options():
+    """BuildSpec 应可指定输出路径与超时，且按 source key 索引结果。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = os.path.join(tmpdir, "prog.cpp")
+        out = os.path.join(tmpdir, "custom", "prog.bin")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(HELLO_WORLD_CODE)
+
+        results = await compile_all(
+            tmpdir,
+            [BuildSpec(source="prog.cpp", binary=out, timeout=60)],
+        )
+
+        assert "prog.cpp" in results
+        assert results["prog.cpp"].success
+        assert os.path.exists(out)
+
+
+@pytest.mark.asyncio
+async def test_compile_all_missing_source_reports_failure():
+    """缺失源文件应返回失败而非抛异常。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results = await compile_all(tmpdir, ["nope.cpp"])
+        assert results["nope.cpp"].success is False
+        assert "not found" in (results["nope.cpp"].error or "")
+
+
 def test_get_work_dir():
     """测试工作目录生成。"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -409,3 +465,63 @@ def test_normalize_windows_stdin_handles_mixed_newlines():
     raw = "1 2\n3 4\r\n5 6\r7 8\n"
     normalized = _normalize_windows_stdin(raw)
     assert normalized == "1 2\r\n3 4\r\n5 6\r\n7 8\r\n"
+
+
+@pytest.mark.asyncio
+async def test_run_batch_preserves_order():
+    """run_batch 应保持与输入一致的返回顺序，即使各任务完成时间不同。"""
+    items = [5, 1, 3, 2, 4]
+
+    async def worker(x: int) -> int:
+        # 让较小的值睡得更久，确保完成顺序与输入顺序不同
+        await asyncio.sleep(0.01 * (6 - x))
+        return x * 10
+
+    result = await run_batch(items, worker, limit=2)
+    assert result == [50, 10, 30, 20, 40]
+
+
+@pytest.mark.asyncio
+async def test_run_batch_respects_concurrency_limit():
+    """run_batch 的并发峰值不应超过 limit。"""
+    state = {"active": 0, "peak": 0}
+
+    async def worker(x: int) -> int:
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+        await asyncio.sleep(0.01)
+        state["active"] -= 1
+        return x
+
+    result = await run_batch(list(range(10)), worker, limit=3)
+    assert result == list(range(10))
+    assert state["peak"] <= 3
+
+
+@pytest.mark.asyncio
+async def test_run_batch_empty_input():
+    """空输入应直接返回空列表，不调用 worker。"""
+    called = {"value": False}
+
+    async def worker(x: int) -> int:
+        called["value"] = True
+        return x
+
+    result = await run_batch([], worker, limit=4)
+    assert result == []
+    assert called["value"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_batch_limit_degrades_to_one():
+    """limit<=0 应退化为串行（1 并发）且结果正确。"""
+    order: list[int] = []
+
+    async def worker(x: int) -> int:
+        order.append(x)
+        await asyncio.sleep(0)
+        return x
+
+    result = await run_batch([1, 2, 3], worker, limit=0)
+    assert result == [1, 2, 3]
+    assert order == [1, 2, 3]

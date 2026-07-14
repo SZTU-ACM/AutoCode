@@ -15,13 +15,14 @@ import os
 import shutil
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
+from .process import POSIX_KILL_SIGNAL as _POSIX_KILL_SIGNAL
 
 if TYPE_CHECKING:
     from .win_job import WinJobObject
@@ -52,6 +53,19 @@ class CompileResult:
     error: str | None = None
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass
+class BuildSpec:
+    """单个源文件的并发编译规格（供 ``compile_all`` 使用）。"""
+
+    source: str
+    binary: str | None = None
+    include_dirs: list[str] | None = None
+    compiler: str = "g++"
+    std: str = "c++20"
+    opt_level: str = "O2"
+    timeout: int = 30
 
 
 @dataclass
@@ -256,6 +270,16 @@ async def _force_terminate_process(
         except OSError as e:
             _logger.debug("Job object terminate failed: %s", e)
 
+    # POSIX 上子进程以 start_new_session 启动，优先按进程组整树回收，
+    # 避免 generator 派生的子进程残留。
+    if os.name != "nt" and process.pid:
+        try:
+            os.killpg(os.getpgid(process.pid), _POSIX_KILL_SIGNAL)  # type: ignore[attr-defined]
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError as e:
+            _logger.debug("killpg failed (pid=%s): %s", process.pid, e)
+
     # 再尝试正常终止
     try:
         process.kill()
@@ -286,19 +310,28 @@ async def _run_process(
     process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """运行进程的公共逻辑。"""
+    import tempfile
     import time
 
     start_time = time.time()
     job = None
     process = None
+    out_f = err_f = None
+    stdout_path = stderr_path = None
 
     try:
+        # 大输出重定向到临时文件，避免全量读入内存：运行期间输出由 OS 落盘，
+        # 峰值内存仅受单次写入块大小限制，而非整份输出。
+        out_f = tempfile.NamedTemporaryFile("wb", delete=False, suffix=".autocode.out")
+        err_f = tempfile.NamedTemporaryFile("wb", delete=False, suffix=".autocode.err")
+        stdout_path, stderr_path = out_f.name, err_f.name
+
         if sys.platform == "win32":
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=out_f,
+                stderr=err_f,
             )
             if process.pid:
                 try:
@@ -316,16 +349,19 @@ async def _run_process(
                     )
                     job = None
         elif sys.platform == "darwin":
-            # macOS: 使用 preexec_fn 设置资源限制
+            # macOS: 使用 preexec_fn 设置资源限制；start_new_session 使子进程成为
+            # 独立进程组 leader，便于超时/取消/清理时以 os.killpg 整树回收。
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=out_f,
+                stderr=err_f,
                 preexec_fn=lambda: _set_macos_resource_limit(memory_mb),
+                start_new_session=True,
             )
         else:
-            # Linux: 使用 prlimit 设置资源限制
+            # Linux: 使用 prlimit 设置资源限制；start_new_session 使子进程成为
+            # 独立进程组 leader，便于以 os.killpg 整树回收子进程。
             memory_bytes = memory_mb * 1024 * 1024
             process = await asyncio.create_subprocess_exec(
                 "prlimit",
@@ -333,8 +369,9 @@ async def _run_process(
                 f"--data={memory_bytes}",
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=out_f,
+                stderr=err_f,
+                start_new_session=True,
             )
 
         if process and process.pid and process_start_hook:
@@ -350,7 +387,7 @@ async def _run_process(
             if sys.platform == "win32" and stdin:
                 processed_stdin = _normalize_windows_stdin(stdin)
 
-            stdout, stderr = await asyncio.wait_for(
+            await asyncio.wait_for(
                 process.communicate(input=processed_stdin.encode("utf-8") if processed_stdin else None),
                 timeout=timeout,
             )
@@ -375,11 +412,16 @@ async def _run_process(
         if job:
             job.close()
 
+        out_f.close()
+        err_f.close()
+        with open(stdout_path, "rb") as _out, open(stderr_path, "rb") as _err:
+            stdout_data = _out.read()
+            stderr_data = _err.read()
         return RunResult(
             success=process.returncode == 0,
             return_code=process.returncode if process.returncode is not None else -1,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout=stdout_data.decode("utf-8", errors="replace"),
+            stderr=stderr_data.decode("utf-8", errors="replace"),
             time_ms=elapsed_ms,
         )
 
@@ -396,6 +438,19 @@ async def _run_process(
             success=False,
             error=f"Execution error: {str(e)}",
         )
+    finally:
+        for _fh in (out_f, err_f):
+            if _fh is not None:
+                try:
+                    _fh.close()
+                except OSError:
+                    pass
+        for _p in (stdout_path, stderr_path):
+            if _p and os.path.exists(_p):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
 
 
 async def run_binary(
@@ -462,40 +517,93 @@ async def run_binary_with_args(
     )
 
 
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+async def run_batch(
+    items: list[T],
+    worker: Callable[[T], Awaitable[R]],
+    limit: int = 4,
+) -> list[R]:
+    """使用有上限的并发运行 ``worker``，保持输入顺序。
+
+    用于把原本严格串行的多子进程步骤（生成/校验/对拍等）改为有限并发，
+    在不改变单步正确性、超时与失败语义的前提下提升吞吐。
+
+    Args:
+        items: 待处理的输入项列表
+        worker: 单项的异步处理函数
+        limit: 最大并发数（<=0 时退化为 1）
+
+    Returns:
+        与 ``items`` 顺序一致的 ``worker`` 返回值列表
+    """
+    safe_limit = max(1, int(limit))
+    if not items:
+        return []
+    if safe_limit >= len(items):
+        return await asyncio.gather(*(worker(it) for it in items))
+    semaphore = asyncio.Semaphore(safe_limit)
+
+    async def bounded(item: T) -> R:
+        async with semaphore:
+            return await worker(item)
+
+    return await asyncio.gather(*(bounded(it) for it in items))
+
+
 async def compile_all(
     problem_dir: str,
-    sources: list[str],
-    compiler: str = "g++",
+    specs: list[str | BuildSpec],
     max_concurrent: int = 4,
 ) -> dict[str, CompileResult]:
     """
     并发编译多个源文件。
 
+    源路径相对于 ``problem_dir``（或绝对路径）。默认输出二进制与源文件同目录、
+    同名换扩展名；可通过 :class:`BuildSpec` 指定输出路径、include 目录与编译选项。
+
     Args:
-        problem_dir: 题目目录
-        sources: 源文件名列表（如 ["gen.cpp", "val.cpp", "sol.cpp", "brute.cpp"]）
-        compiler: 编译器名称
+        problem_dir: 题目目录（用于解析相对路径与默认输出目录）
+        specs: 源文件名或 :class:`BuildSpec` 列表（如 ["gen.cpp", "val.cpp"]）
         max_concurrent: 最大并发编译数
 
     Returns:
-        dict: 源文件名 -> 编译结果
+        dict: 传入的源名/规格 source -> 编译结果
     """
-    semaphore = asyncio.Semaphore(max_concurrent)
+    semaphore = asyncio.Semaphore(max(1, max_concurrent))
     exe_ext = get_exe_extension()
 
-    async def compile_one(source: str) -> tuple[str, CompileResult]:
-        async with semaphore:
-            source_path = os.path.join(problem_dir, source)
-            if not os.path.exists(source_path):
-                return source, CompileResult(
-                    success=False,
-                    error=f"Source file not found: {source}",
-                )
-            base_name = os.path.splitext(source)[0]
-            binary_path = os.path.join(problem_dir, base_name + exe_ext)
-            result = await compile_cpp(source_path, binary_path, compiler=compiler)
-            return source, result
+    def _resolve(spec: str | BuildSpec) -> BuildSpec:
+        if isinstance(spec, str):
+            return BuildSpec(source=spec)
+        return spec
 
-    tasks = [compile_one(src) for src in sources]
+    async def compile_one(spec: BuildSpec) -> tuple[str, CompileResult]:
+        async with semaphore:
+            source_key = spec.source
+            source_path = spec.source if os.path.isabs(spec.source) else os.path.join(problem_dir, spec.source)
+            if not os.path.exists(source_path):
+                return source_key, CompileResult(
+                    success=False,
+                    error=f"Source file not found: {source_path}",
+                )
+            if spec.binary:
+                binary_path = spec.binary if os.path.isabs(spec.binary) else os.path.join(problem_dir, spec.binary)
+            else:
+                binary_path = os.path.splitext(source_path)[0] + exe_ext
+            result = await compile_cpp(
+                source_path,
+                binary_path,
+                timeout=spec.timeout,
+                compiler=spec.compiler,
+                std=spec.std,
+                opt_level=spec.opt_level,
+                include_dirs=spec.include_dirs,
+            )
+            return source_key, result
+
+    tasks = [compile_one(_resolve(s)) for s in specs]
     results = await asyncio.gather(*tasks)
     return dict(results)

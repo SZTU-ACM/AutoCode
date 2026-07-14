@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from autocode_mcp.tools.build_all import ProblemBuildAllTool
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.problem import (
     CandidateTest,
@@ -1159,6 +1160,8 @@ async def test_problem_cleanup_processes_kills_tracked_pids(monkeypatch):
         return _FakeProc()
 
     monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    # 存活校验桩：让记录的 PID 视为存活，从而进入回收路径。
+    monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
@@ -1193,6 +1196,7 @@ async def test_problem_cleanup_processes_keeps_failed_pid_for_retry(monkeypatch)
         return _FakeProc(0 if calls["count"] == 1 else 1)
 
     monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
@@ -1228,6 +1232,7 @@ async def test_problem_cleanup_processes_preserves_checkpoint_fields(monkeypatch
         return _FakeProc()
 
     monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
@@ -1250,13 +1255,103 @@ async def test_problem_cleanup_processes_preserves_checkpoint_fields(monkeypatch
         assert result.success
         with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
-        if os.name == "nt":
-            assert state.get("active_pids") == []
-        else:
-            assert state.get("active_pids") == [555]
+        # 成功回收后 active_pids 清空，但 checkpoint 其他字段应完整保留。
+        assert state.get("active_pids") == []
         assert state.get("phase") == "partial"
         assert state.get("next_seed") == 9
         assert state.get("answer_ext") == ".out"
+
+
+@pytest.mark.asyncio
+async def test_problem_cleanup_processes_skips_stale_pids(monkeypatch):
+    """已退出的残留 PID 应被跳过（不报错），并从状态中移除。"""
+    tool = ProblemCleanupProcessesTool()
+    terminated: list[int] = []
+
+    async def fake_terminate(pid):
+        terminated.append(pid)
+        return True, ""
+
+    # 所有记录的 PID 都已退出。
+    monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: False)
+    monkeypatch.setattr("autocode_mcp.tools.problem.terminate_pid_tree", fake_terminate)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"active_pids": [777, 888]}, f)
+
+        result = await tool.execute(problem_dir=tmpdir)
+        assert result.success
+        assert terminated == []  # 已退出 PID 不应触发实际回收
+        assert result.data.get("skipped_pids") == [777, 888]
+        assert result.data.get("killed_pids") == []
+        assert result.data.get("failed_pids") == []
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        assert state.get("active_pids") == []
+
+
+_SIMPLE_CPP = "#include <iostream>\nint main(){std::cout<<\"x\";return 0;}\n"
+
+
+@pytest.mark.asyncio
+async def test_problem_build_all_compiles_standard_sources(tmp_path):
+    """problem_build_all 应并发编译存在的标准源文件。"""
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    files_dir = tmp_path / "files"
+    sol_dir = tmp_path / "solutions"
+    files_dir.mkdir()
+    sol_dir.mkdir()
+    files_dir.joinpath("gen.cpp").write_text(_SIMPLE_CPP, encoding="utf-8")
+    sol_dir.joinpath("sol.cpp").write_text(_SIMPLE_CPP, encoding="utf-8")
+
+    tool = ProblemBuildAllTool()
+    result = await tool.execute(problem_dir=str(tmp_path))
+    assert result.success, result.error
+    assert set(result.data["compiled"].keys()) == {"files/gen.cpp", "solutions/sol.cpp"}
+    exe_ext = get_exe_extension()
+    assert os.path.exists(files_dir / f"gen{exe_ext}")
+    assert os.path.exists(sol_dir / f"sol{exe_ext}")
+
+
+@pytest.mark.asyncio
+async def test_problem_build_all_reports_failure_without_overall_success(tmp_path):
+    """任一源编译失败时整体应失败，但其它源仍可编译成功。"""
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    files_dir = tmp_path / "files"
+    sol_dir = tmp_path / "solutions"
+    files_dir.mkdir()
+    sol_dir.mkdir()
+    files_dir.joinpath("gen.cpp").write_text(_SIMPLE_CPP, encoding="utf-8")
+    sol_dir.joinpath("sol.cpp").write_text("int main(){ this is not valid c++ }\n", encoding="utf-8")
+
+    tool = ProblemBuildAllTool()
+    result = await tool.execute(problem_dir=str(tmp_path))
+    assert not result.success
+    assert "solutions/sol.cpp" in result.data["failures"]
+    exe_ext = get_exe_extension()
+    assert os.path.exists(files_dir / f"gen{exe_ext}")
+
+
+@pytest.mark.asyncio
+async def test_problem_build_all_missing_dir_fails(tmp_path):
+    """题目目录不存在时应直接失败。"""
+    tool = ProblemBuildAllTool()
+    result = await tool.execute(problem_dir=str(tmp_path / "nope"))
+    assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_problem_build_all_no_sources_fails(tmp_path):
+    """无任何可编译源文件时应失败。"""
+    tool = ProblemBuildAllTool()
+    result = await tool.execute(problem_dir=str(tmp_path))
+    assert not result.success
 
 
 @pytest.mark.asyncio
@@ -2037,3 +2132,72 @@ int main() {
         candidates = result.data.get("candidates_generated", 0)
         assert candidates >= 10  # 至少生成了 10 个候选
         assert "from" in result.data.get("message", "")  # 消息中应该包含候选数量
+
+
+async def _run_generate_with_concurrency(concurrency_limit: int) -> list[tuple]:
+    """用确定性 mock 运行 generate_tests，返回生成测试的 (type, signature, in, ans) 序列。
+
+    generator 的输出依赖 seed（argv[1]），从而产生可去重、可排序的确定性候选，
+    用于对比串行（limit=1）与并发（limit>1）的产物是否一致。
+    """
+    tool = ProblemGenerateTestsTool()
+
+    async def fake_run_binary_with_args(binary_path, args, timeout=5, process_start_hook=None, **kwargs):
+        seed = int(args[0])
+        return RunResult(success=True, stdout=f"{seed}\n")
+
+    async def fake_run_binary(binary_path, stdin="", timeout=5, memory_mb=256):
+        value = int(stdin.strip())
+        return RunResult(success=True, stdout=f"{value * value}\n")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, f"concurrency_{concurrency_limit}")
+        files_dir = os.path.join(problem_dir, "files")
+        solutions_dir = os.path.join(problem_dir, "solutions")
+        tests_dir = os.path.join(problem_dir, "tests")
+        os.makedirs(files_dir)
+        os.makedirs(solutions_dir)
+
+        exe_ext = get_exe_extension()
+        open(os.path.join(files_dir, f"gen{exe_ext}"), "w").close()
+        open(os.path.join(solutions_dir, f"sol{exe_ext}"), "w").close()
+
+        import unittest.mock as mock
+
+        with (
+            mock.patch("autocode_mcp.tools.problem.run_binary_with_args", fake_run_binary_with_args),
+            mock.patch("autocode_mcp.tools.problem.run_binary", fake_run_binary),
+        ):
+            result = await tool.execute(
+                problem_dir=problem_dir,
+                test_count=8,
+                enable_dedup=True,
+                enable_balance=False,
+                oversample_ratio=1.0,
+                concurrency_limit=concurrency_limit,
+            )
+
+        assert result.success, result.error
+        manifest_path = os.path.join(tests_dir, ".autocode_tests_manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        summary = []
+        for t in manifest["tests"]:
+            in_path = os.path.join(tests_dir, t["in_file"])
+            ans_path = os.path.join(tests_dir, t["ans_file"])
+            with open(in_path, encoding="utf-8") as fin:
+                in_data = fin.read()
+            with open(ans_path, encoding="utf-8") as fans:
+                ans_data = fans.read()
+            summary.append((t["type_param"], t["signature"], in_data, ans_data))
+        return summary
+
+
+@pytest.mark.asyncio
+async def test_problem_generate_tests_serial_matches_concurrent():
+    """串行（limit=1）与并发（limit=4）在确定性 generator 下应产出一致的测试集。"""
+    serial = await _run_generate_with_concurrency(1)
+    concurrent = await _run_generate_with_concurrency(4)
+
+    assert serial == concurrent
+    assert len(serial) == 8

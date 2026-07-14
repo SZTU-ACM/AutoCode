@@ -9,14 +9,32 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker
-from ..utils.compiler import run_binary, run_binary_with_args
+from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from .base import Tool, ToolResult
+
+_STRESS_CONCURRENCY = 4
+
+
+@dataclass
+class _StressRoundResult:
+    """单轮对拍的结果。"""
+
+    status: str  # ok | gen_failed | validator_failed | sol_failed | brute_failed | mismatch
+    global_round: int
+    input_data: str | None = None
+    sol_output: str | None = None
+    brute_output: str | None = None
+    gen_detail: dict | None = None
+    validator_detail: dict | None = None
+    stats: dict | None = None
+
 
 
 class StressTestRunTool(Tool):
@@ -136,9 +154,198 @@ class StressTestRunTool(Tool):
                         },
                     },
                 },
+                "concurrency_limit": {
+                    "type": "integer",
+                    "description": "对拍轮次的最大并发数（gen/validator/sol/brute 流水），默认 4",
+                    "default": 4,
+                },
             },
             "required": ["problem_dir"],
         }
+
+    async def _run_round(
+        self,
+        *,
+        gen_exe: str,
+        val_exe: str,
+        sol_exe: str,
+        brute_exe: str,
+        global_round: int,
+        temp_dir: str,
+        timeout: int,
+        n_max: int,
+        generator_args: dict | None,
+        types: list[str] | None,
+        use_checker_stress: bool,
+        checker_exe: str,
+        manifest_model: object | None,
+        sol_name: str,
+        brute_name: str,
+    ) -> _StressRoundResult:
+        """运行单轮对拍（gen→validator→sol→brute→compare），作为并发单元。"""
+        input_path = os.path.join(temp_dir, f"input_{global_round}.txt")
+        gen_result = await self._generate_input(
+            gen_exe, input_path, global_round, seed=global_round, timeout=timeout, n_max=n_max,
+            generator_args=generator_args, types=types,
+        )
+        if not gen_result["success"]:
+            return _StressRoundResult(
+                status="gen_failed", global_round=global_round, gen_detail=gen_result
+            )
+        input_data = str(gen_result["input_data"])
+
+        # 验证输入（如果有 validator）
+        if os.path.exists(val_exe):
+            val_result = await run_binary(val_exe, input_data, timeout=timeout)
+            if val_result.return_code != 0:
+                return _StressRoundResult(
+                    status="validator_failed",
+                    global_round=global_round,
+                    input_data=input_data,
+                    validator_detail={
+                        "validator_return_code": val_result.return_code,
+                        "validator_stderr": (val_result.stderr or "")[:2000],
+                        "validator_stdout": (val_result.stdout or "")[:2000],
+                    },
+                )
+
+        # 运行 sol 和 brute，比较输出
+        sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
+        if sol_result.timed_out or not sol_result.success:
+            return _StressRoundResult(
+                status="sol_failed",
+                global_round=global_round,
+                input_data=input_data,
+                sol_output=sol_result.stdout,
+                gen_detail={"stderr": sol_result.stderr},
+            )
+        sol_output = sol_result.stdout
+
+        brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
+        if brute_result.timed_out:
+            return _StressRoundResult(
+                status="brute_failed",
+                global_round=global_round,
+                input_data=input_data,
+                sol_output=sol_output,
+                gen_detail={"timed_out": True},
+            )
+        if not brute_result.success:
+            return _StressRoundResult(
+                status="brute_failed",
+                global_round=global_round,
+                input_data=input_data,
+                sol_output=sol_output,
+                gen_detail={"stderr": brute_result.stderr},
+            )
+        brute_output = brute_result.stdout
+
+        stats = {
+            "round": global_round,
+            "sol_time_ms": sol_result.time_ms,
+            "brute_time_ms": brute_result.time_ms,
+            "input_size": len(input_data),
+            "n_value": self._extract_n_value(input_data),
+        }
+
+        # 比较输出（普通题字符串一致；SPJ+checker 用 testlib checker，answer=brute）
+        if use_checker_stress:
+            sol_path = os.path.join(temp_dir, f"sol_out_{global_round}.txt")
+            brute_path = os.path.join(temp_dir, f"brute_out_{global_round}.txt")
+            with open(sol_path, "w", encoding="utf-8", newline="\n") as sf:
+                sf.write(sol_output)
+            with open(brute_path, "w", encoding="utf-8", newline="\n") as bf:
+                bf.write(brute_output)
+            v1, _ = await run_testlib_checker(
+                checker_exe, input_path, sol_path, brute_path, timeout=timeout
+            )
+            v2_ok = True
+            if manifest_model is not None and getattr(manifest_model, "stress_checker_bidirectional", False):
+                v2, _ = await run_testlib_checker(
+                    checker_exe, input_path, brute_path, sol_path, timeout=timeout
+                )
+                v2_ok = v2 == "AC"
+            if v1 != "AC" or not v2_ok:
+                return _StressRoundResult(
+                    status="mismatch",
+                    global_round=global_round,
+                    input_data=input_data,
+                    sol_output=sol_output,
+                    brute_output=brute_output,
+                )
+        elif sol_output.strip() != brute_output.strip():
+            return _StressRoundResult(
+                status="mismatch",
+                global_round=global_round,
+                input_data=input_data,
+                sol_output=sol_output,
+                brute_output=brute_output,
+            )
+
+        return _StressRoundResult(
+            status="ok",
+            global_round=global_round,
+            input_data=input_data,
+            sol_output=sol_output,
+            brute_output=brute_output,
+            stats=stats,
+        )
+
+    def _build_round_failure(
+        self,
+        res: _StressRoundResult,
+        round_stats: list[dict],
+        n_max_advisory: str,
+        sol_name: str,
+        brute_name: str,
+    ) -> ToolResult:
+        """gen/sol/brute 失败时构造与串行实现一致的结构化失败结果。"""
+        gr = res.global_round
+        statistics = self._compute_summary(round_stats)
+        if res.status == "gen_failed":
+            gd = res.gen_detail or {}
+            error_detail = gd.get("error", "Unknown error")
+            if "timed out" in error_detail:
+                hint = "Generator may contain an infinite loop or be too slow. Try increasing the timeout parameter."
+            else:
+                hint = "Generator crashed unexpectedly. Check stderr for details."
+            return ToolResult.fail(
+                f"Generator failed at round {gr}: {error_detail}. {hint}",
+                round=gr,
+                seed=gd.get("seed", gr),
+                stderr=gd.get("stderr", ""),
+                stdout=gd.get("stdout", ""),
+                cmd_args=gd.get("cmd_args", []),
+                last_input=res.input_data,
+                statistics=statistics,
+                n_max_warning=n_max_advisory,
+                n_max_advisory=n_max_advisory,
+            )
+        if res.status == "sol_failed":
+            return ToolResult.fail(
+                f"{sol_name} failed at round {gr}",
+                round=gr,
+                input_data=res.input_data,
+                stderr=(res.gen_detail or {}).get("stderr", ""),
+                statistics=statistics,
+            )
+        if (res.gen_detail or {}).get("timed_out"):
+            return ToolResult.fail(
+                f"{brute_name} timed out at round {gr} (N may be too large)",
+                round=gr,
+                input_data=res.input_data,
+                suggestion="Try reducing n_max parameter",
+                n_max_warning=n_max_advisory,
+                n_max_advisory=n_max_advisory,
+                statistics=statistics,
+            )
+        return ToolResult.fail(
+            f"{brute_name} failed at round {gr}",
+            round=gr,
+            input_data=res.input_data,
+            stderr=(res.gen_detail or {}).get("stderr", ""),
+            statistics=statistics,
+        )
 
     async def execute(
         self,
@@ -151,6 +358,7 @@ class StressTestRunTool(Tool):
         types: list[str] | None = None,
         generator_args: dict | None = None,
         stress_profiles: list[dict] | None = None,
+        concurrency_limit: int = 4,
     ) -> ToolResult:
         """执行对拍测试。"""
         exe_ext = get_exe_extension()
@@ -202,6 +410,8 @@ class StressTestRunTool(Tool):
         effective_n_max = first_profile_args.get("n_max", n_max) if first_profile_args else n_max
         complexity_context = self._load_complexity_context(problem_dir)
 
+        concurrency_limit = max(1, int(concurrency_limit))
+
         failed_round = None
         last_input = None
         sol_output = None
@@ -215,8 +425,6 @@ class StressTestRunTool(Tool):
         profile_reports: list[dict] = []
 
         with tempfile.TemporaryDirectory(dir=problem_dir) as temp_dir:
-            input_path = os.path.join(temp_dir, "input.txt")
-
             global_round = 0
             for profile in profiles:
                 profile_name = str(profile.get("name", f"profile-{len(profile_reports) + 1}"))
@@ -226,128 +434,63 @@ class StressTestRunTool(Tool):
                 start_count = len(round_stats)
                 profile_failed_round = None
 
-                for _ in range(profile_trials):
-                    global_round += 1
-                    # 1. 生成输入数据
-                    gen_result = await self._generate_input(
-                        gen_exe, input_path, global_round, seed=global_round, timeout=timeout, n_max=n_max,
-                        generator_args=profile_generator_args, types=profile_types,
-                    )
-                    if not gen_result["success"]:
-                        error_detail = gen_result.get("error", "Unknown error")
-                        if "timed out" in error_detail:
-                            hint = "Generator may contain an infinite loop or be too slow. Try increasing the timeout parameter."
-                        elif "no output" in error_detail:
-                            hint = "Check that the generator follows the protocol: gen.exe <seed> <type> <n_min> <n_max> <t_min> <t_max> [extra_args...]"
-                        else:
-                            hint = "Generator crashed unexpectedly. Check stderr for details."
-                        return ToolResult.fail(
-                            f"Generator failed at round {global_round}: {error_detail}. {hint}",
-                            round=global_round,
-                            seed=gen_result.get("seed", global_round),
-                            stderr=gen_result.get("stderr", ""),
-                            stdout=gen_result.get("stdout", ""),
-                            cmd_args=gen_result.get("cmd_args", []),
-                            last_input=last_input,
-                            statistics=self._compute_summary(round_stats),
-                            n_max_warning=n_max_advisory,
-                            n_max_advisory=n_max_advisory,
+                while not failed_round and (len(round_stats) - start_count) < profile_trials:
+                    # 凑一批轮次，有限并发处理，保持轮序与串行一致的失败传播。
+                    batch: list[int] = []
+                    while (
+                        len(batch) < _STRESS_CONCURRENCY
+                        and (len(round_stats) - start_count + len(batch)) < profile_trials
+                    ):
+                        global_round += 1
+                        batch.append(global_round)
+
+                    async def _worker(
+                        round_no: int,
+                        _gen_args: dict | None = profile_generator_args,
+                        _types: list[str] | None = profile_types,
+                    ) -> _StressRoundResult:
+                        return await self._run_round(
+                            gen_exe=gen_exe,
+                            val_exe=val_exe,
+                            sol_exe=sol_exe,
+                            brute_exe=brute_exe,
+                            global_round=round_no,
+                            temp_dir=temp_dir,
+                            timeout=timeout,
+                            n_max=n_max,
+                            generator_args=_gen_args,
+                            types=_types,
+                            use_checker_stress=use_checker_stress,
+                            checker_exe=checker_exe,
+                            manifest_model=manifest_model,
+                            sol_name=effective_sol_name,
+                            brute_name=effective_brute_name,
                         )
 
-                    # 2. 验证输入（如果有 validator）
-                    input_data = str(gen_result["input_data"])
-                    if os.path.exists(input_path):
-                        with open(input_path, "w", encoding="utf-8", newline="") as f:
-                            f.write(input_data)
-                    if os.path.exists(val_exe):
-                        val_result = await run_binary(val_exe, input_data, timeout=timeout)
-                        if val_result.return_code != 0:
-                            validator_failed = True
-                            last_input = input_data
-                            failed_round = global_round
-                            profile_failed_round = global_round
-                            validator_failure_detail = {
-                                "validator_return_code": val_result.return_code,
-                                "validator_stderr": (val_result.stderr or "")[:2000],
-                                "validator_stdout": (val_result.stdout or "")[:2000],
-                            }
-                            break
+                    results = await run_batch(batch, _worker, limit=_STRESS_CONCURRENCY)
 
-                    # 3. 运行 sol 和 brute，比较输出
-                    last_input = input_data
-
-                    # 运行 sol
-                    sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
-                    if sol_result.timed_out or not sol_result.success:
-                        return ToolResult.fail(
-                            f"{effective_sol_name} failed at round {global_round}",
-                            round=global_round,
-                            input_data=input_data,
-                            stderr=sol_result.stderr,
-                            statistics=self._compute_summary(round_stats),
-                        )
-                    sol_output = sol_result.stdout
-
-                    # 运行 brute
-                    brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
-                    if brute_result.timed_out:
-                        return ToolResult.fail(
-                            f"{effective_brute_name} timed out at round {global_round} (N may be too large)",
-                            round=global_round,
-                            input_data=input_data,
-                            suggestion="Try reducing n_max parameter",
-                            n_max_warning=n_max_advisory,
-                            n_max_advisory=n_max_advisory,
-                            statistics=self._compute_summary(round_stats),
-                        )
-                    if not brute_result.success:
-                        return ToolResult.fail(
-                            f"{effective_brute_name} failed at round {global_round}",
-                            round=global_round,
-                            input_data=input_data,
-                            stderr=brute_result.stderr,
-                            statistics=self._compute_summary(round_stats),
-                        )
-                    brute_output = brute_result.stdout
-
-                    # 收集统计信息
-                    round_stats.append({
-                        "round": global_round,
-                        "sol_time_ms": sol_result.time_ms,
-                        "brute_time_ms": brute_result.time_ms,
-                        "input_size": len(input_data),
-                        "n_value": self._extract_n_value(input_data),
-                    })
-
-                    # 5. 比较输出（普通题字符串一致；SPJ+checker 用 testlib checker，answer=brute）
-                    if use_checker_stress:
-                        sol_path = os.path.join(temp_dir, f"sol_out_{global_round}.txt")
-                        brute_path = os.path.join(temp_dir, f"brute_out_{global_round}.txt")
-                        with open(sol_path, "w", encoding="utf-8", newline="\n") as sf:
-                            sf.write(sol_output)
-                        with open(brute_path, "w", encoding="utf-8", newline="\n") as bf:
-                            bf.write(brute_output)
-                        v1, _ = await run_testlib_checker(
-                            checker_exe, input_path, sol_path, brute_path, timeout=timeout
-                        )
-                        v2_ok = True
-                        if (
-                            manifest_model is not None
-                            and manifest_model.stress_checker_bidirectional
-                        ):
-                            v2, _ = await run_testlib_checker(
-                                checker_exe, input_path, brute_path, sol_path, timeout=timeout
+                    for res in results:  # 按轮序遍历，保证与串行一致的失败传播
+                        if res.status == "ok":
+                            round_stats.append(res.stats)
+                            continue
+                        if res.status in ("gen_failed", "sol_failed", "brute_failed"):
+                            # 这些失败在串行实现中直接返回，此处同样立即返回。
+                            return self._build_round_failure(
+                                res,
+                                round_stats,
+                                n_max_advisory,
+                                effective_sol_name,
+                                effective_brute_name,
                             )
-                            v2_ok = v2 == "AC"
-                        if v1 != "AC" or not v2_ok:
-                            last_input = input_data
-                            failed_round = global_round
-                            profile_failed_round = global_round
-                            break
-                    elif sol_output.strip() != brute_output.strip():
-                        last_input = input_data
-                        failed_round = global_round
-                        profile_failed_round = global_round
+                        # validator_failed / mismatch：记录并停止后续批次
+                        failed_round = res.global_round
+                        profile_failed_round = res.global_round
+                        last_input = res.input_data
+                        sol_output = res.sol_output
+                        brute_output = res.brute_output
+                        if res.status == "validator_failed":
+                            validator_failed = True
+                            validator_failure_detail = res.validator_detail or {}
                         break
 
                 profile_reports.append(

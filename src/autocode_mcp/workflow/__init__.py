@@ -1,3 +1,4 @@
+from .guard import GateIssue, check_gates, signal_satisfied
 from .manifest import (
     MANIFEST_NAME,
     default_manifest,
@@ -16,4 +17,7 @@ __all__ = [
     "save_manifest",
     "default_manifest",
     "manifest_uses_testlib_checker",
+    "check_gates",
+    "GateIssue",
+    "signal_satisfied",
 ]

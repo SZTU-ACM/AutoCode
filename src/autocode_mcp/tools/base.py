@@ -34,12 +34,12 @@ class ToolResult:
         return result
 
     @classmethod
-    def ok(cls, **data) -> ToolResult:
+    def ok(cls, **data: Any) -> ToolResult:
         """创建成功的返回结果。"""
         return cls(success=True, data=data)
 
     @classmethod
-    def fail(cls, error: str, **data) -> ToolResult:
+    def fail(cls, error: str, **data: Any) -> ToolResult:
         """创建失败的返回结果。"""
         return cls(success=False, error=error, data=data)
 
@@ -79,7 +79,7 @@ class Tool(ABC):
         }
 
     @abstractmethod
-    async def execute(self, **kwargs) -> ToolResult:
+    async def execute(self, **kwargs: Any) -> ToolResult:
         """
         执行工具逻辑。
 

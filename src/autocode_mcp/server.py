@@ -28,6 +28,7 @@ from . import prompts, resources
 from .tools.audit import ProblemAuditTool
 from .tools.base import Tool as BaseTool
 from .tools.base import ToolResult
+from .tools.build_all import ProblemBuildAllTool
 from .tools.checker import CheckerBuildTool
 from .tools.complexity import SolutionAnalyzeTool
 from .tools.file_ops import FileReadTool, FileSaveTool
@@ -82,6 +83,7 @@ def register_all_tools() -> None:
     register_tool(ProblemAuditTool())
     register_tool(ProblemPackPolygonTool())
     register_tool(ProblemValidateTool())
+    register_tool(ProblemBuildAllTool())
 
     # Validator 工具组
     register_tool(ValidatorBuildTool())
@@ -142,7 +144,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except Exception as e:
-        error_result = ToolResult.fail(str(e))
+        import traceback
+
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        error_result = ToolResult.fail(
+            f"{type(e).__name__}: {e}",
+            exc_type=type(e).__name__,
+            traceback=tb,
+        )
         error_dict = error_result.to_dict()
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(error_dict, ensure_ascii=False))],

@@ -9,14 +9,25 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import time
+import xml.etree.ElementTree as ET
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from xml.sax.saxutils import escape
+from typing import Any
 
-from ..utils.compiler import RunResult, run_binary, run_binary_with_args
+from pydantic import ValidationError
+
+from ..utils.answer_ext import normalize_answer_ext
+from ..utils.compiler import RunResult, run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
-from ..workflow import default_manifest, save_manifest
+from ..utils.process import filter_alive_pids, is_pid_alive, terminate_pid_tree
+from ..workflow import (
+    check_gates,
+    default_manifest,
+    load_manifest,
+    manifest_uses_testlib_checker,
+    save_manifest,
+)
 from .base import Tool, ToolResult
 
 
@@ -30,26 +41,19 @@ class CandidateTest:
     signature: str
 
 
+@dataclass
+class _CandidateOutcome:
+    """单个候选并发处理的结果。"""
+
+    candidate: CandidateTest | None = None
+    error: tuple[int, str] | None = None
+    fallback_used: bool = False
+
+
 # 最终测试集中「极限类」占比下限：至少一半来自 generator type 3/4（extreme + TLE 压力）
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
 _TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
 _GENERATE_STATE_FILENAME = ".autocode_generate_state.json"
-_POSIX_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
-
-
-def _normalize_answer_ext_value(answer_ext: str | None) -> str | None:
-    ext = (answer_ext or "").strip()
-    if not ext:
-        return None
-    if not ext.startswith("."):
-        ext = f".{ext}"
-    if not any(ch != "." for ch in ext[1:]):
-        return None
-    if any(ch in ext for ch in ('/', '\\', ':', '*', '?', '"', "<", ">", "|", "&")):
-        return None
-    if ext == ".in":
-        return None
-    return ext
 
 
 class ProblemCreateTool(Tool):
@@ -359,6 +363,11 @@ class ProblemGenerateTestsTool(Tool):
                     "description": "每生成多少候选写一次 checkpoint，默认 10",
                     "default": 10,
                 },
+                "concurrency_limit": {
+                    "type": "integer",
+                    "description": "候选生成的最大并发子进程数（gen/validator/sol 流水），默认 4，不超过可用内存",
+                    "default": 4,
+                },
             },
             "required": ["problem_dir"],
         }
@@ -380,6 +389,7 @@ class ProblemGenerateTestsTool(Tool):
         resume: bool = False,
         hard_timeout_seconds: int | None = None,
         checkpoint_every: int = 10,
+        concurrency_limit: int = 4,
     ) -> ToolResult:
         """执行测试数据生成。
 
@@ -449,6 +459,7 @@ class ProblemGenerateTestsTool(Tool):
             return answer_ext_error
         assert normalized_answer_ext is not None
         checkpoint_every = max(1, checkpoint_every)
+        concurrency_limit = max(1, int(concurrency_limit))
 
         # 检查必要文件
         gen_exe = os.path.join(problem_dir, "files", f"gen{exe_ext}")
@@ -525,7 +536,10 @@ class ProblemGenerateTestsTool(Tool):
                 errors = [(int(e.get("seed", 0)), str(e.get("error", ""))) for e in restored.get("errors", []) if isinstance(e, dict)]
                 raw_active_pids = restored.get("active_pids", [])
                 if isinstance(raw_active_pids, list):
-                    active_pids = {int(pid) for pid in raw_active_pids if isinstance(pid, int)}
+                    # resume 时过滤掉已退出的残留 PID，只保留仍存活者供后续 cleanup。
+                    active_pids = set(
+                        filter_alive_pids(int(pid) for pid in raw_active_pids if isinstance(pid, int))
+                    )
                 progress_snapshot["phase"] = str(restored.get("phase", "resumed"))
                 progress_snapshot["candidates_generated"] = len(candidates)
             else:
@@ -564,93 +578,43 @@ class ProblemGenerateTestsTool(Tool):
                     resume_hint="Set resume=true to continue from checkpoint",
                     generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
                 )
-            # 循环使用配置
-            cfg_idx = (seed - 1) % len(test_configs_list)
-            test_cfg = test_configs_list[cfg_idx]
 
-            seed_offset, type_param, n_min, n_max, t_min, t_max, extra_args = test_cfg
-            base_cmd = [
-                str(seed + int(seed_offset)),
-                type_param,
-                str(n_min),
-                str(n_max),
-                str(t_min),
-                str(t_max),
-            ]
-            cmd_args = base_cmd + extra_args
+            # 凑一批待处理候选（最多 concurrency_limit 个），有限并发处理，保持种子顺序。
+            batch: list[tuple[int, tuple[str, str, str, str, str, str, list[str]]]] = []
+            while (
+                len(batch) < concurrency_limit
+                and seed < candidate_count * 10
+                and len(candidates) + len(batch) < candidate_count
+            ):
+                cfg_idx = (seed - 1) % len(test_configs_list)
+                test_cfg = test_configs_list[cfg_idx]
+                batch.append((seed, test_cfg))
+                seed += 1
+
+            def _make_worker(
+                current_val_exe: str, current_validator_available: bool
+            ) -> Callable[[tuple[int, Any]], Awaitable[Any]]:
+                async def _worker(item: tuple[int, Any]) -> Any:
+                    s, cfg = item
+                    return await self._process_candidate(
+                        s,
+                        cfg,
+                        gen_exe,
+                        sol_exe,
+                        current_val_exe,
+                        timeout,
+                        current_validator_available,
+                        active_pids,
+                    )
+
+                return _worker
 
             try:
-                # 生成输入
-                gen_result = await self._run_with_retry(
-                    gen_exe,
-                    cmd_args,
-                    timeout=timeout,
-                    active_pids=active_pids,
+                outcomes = await run_batch(
+                    batch,
+                    _make_worker(val_exe, validator_available),
+                    limit=concurrency_limit,
                 )
-                if (
-                    self._generator_run_failed(gen_result)
-                    and type_param == "4"
-                    and extra_args
-                ):
-                    fb_result = await self._run_with_retry(
-                        gen_exe,
-                        base_cmd,
-                        timeout=timeout,
-                        active_pids=active_pids,
-                    )
-                    if not self._generator_run_failed(fb_result):
-                        generator_tle_extra_args_fallbacks += 1
-                        gen_result = fb_result
-
-                return_code = gen_result.return_code
-                if self._generator_run_failed(gen_result):
-                    errors.append(
-                        (
-                            seed,
-                            "Generator failed: "
-                            f"return_code={return_code}, "
-                            f"stderr={gen_result.stderr}",
-                        )
-                    )
-                    seed += 1
-                    continue
-
-                input_data = gen_result.stdout
-
-                # 去重检查
-                if enable_dedup:
-                    sig = hashlib.md5(input_data.encode()).hexdigest()
-                    if sig in signatures:
-                        seed += 1
-                        continue
-                    signatures.add(sig)
-                else:
-                    sig = hashlib.md5(input_data.encode()).hexdigest()
-
-                # Validator 过滤
-                if validator_available:
-                    val_result = await run_binary(val_exe, input_data, timeout=timeout)
-                    if val_result.return_code != 0:
-                        # 输入无效，跳过
-                        seed += 1
-                        continue
-
-                # 生成答案
-                sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
-                if not sol_result.success:
-                    errors.append((seed, f"sol failed: {sol_result.stderr}"))
-                    seed += 1
-                    continue
-
-                candidates.append(
-                    CandidateTest(
-                        input_data=input_data,
-                        output_data=sol_result.stdout,
-                        type_param=type_param,
-                        signature=sig,
-                    )
-                )
-
             except asyncio.CancelledError:
                 self._save_state(
                     state_path,
@@ -663,8 +627,19 @@ class ProblemGenerateTestsTool(Tool):
                     message="Cancelled by upstream request",
                 )
                 raise
-            except Exception as e:
-                errors.append((seed, str(e)))
+
+            # 按种子顺序合并结果，确保与串行实现产物一致。
+            for (_seed_val, _cfg), outcome in zip(batch, outcomes, strict=True):
+                if outcome.candidate is not None:
+                    if enable_dedup and outcome.candidate.signature in signatures:
+                        continue
+                    if enable_dedup:
+                        signatures.add(outcome.candidate.signature)
+                    candidates.append(outcome.candidate)
+                elif outcome.error is not None:
+                    errors.append(outcome.error)
+                if outcome.fallback_used:
+                    generator_tle_extra_args_fallbacks += 1
 
             progress_snapshot["phase"] = "candidate_generation"
             progress_snapshot["candidates_generated"] = len(candidates)
@@ -678,7 +653,6 @@ class ProblemGenerateTestsTool(Tool):
                     answer_ext=normalized_answer_ext,
                     active_pids=active_pids,
                 )
-            seed += 1
 
         # 极限占比 + 平衡/确定性采样
         progress_snapshot["phase"] = "sampling"
@@ -873,7 +847,7 @@ class ProblemGenerateTestsTool(Tool):
         return None
 
     def _normalize_answer_ext(self, answer_ext: str) -> tuple[str | None, ToolResult | None]:
-        ext = _normalize_answer_ext_value(answer_ext or ".ans")
+        ext = normalize_answer_ext(answer_ext or ".ans")
         if not ext:
             return None, ToolResult.fail("invalid answer_ext")
         return ext, None
@@ -881,6 +855,81 @@ class ProblemGenerateTestsTool(Tool):
     @staticmethod
     def _generator_run_failed(result: RunResult) -> bool:
         return result.timed_out or not result.success or not (result.stdout or "").strip()
+
+    async def _process_candidate(
+        self,
+        seed: int,
+        test_cfg: tuple[str, str, str, str, str, str, list[str]],
+        gen_exe: str,
+        sol_exe: str,
+        val_exe: str | None,
+        timeout: int,
+        validator_available: bool,
+        active_pids: set[int],
+    ) -> _CandidateOutcome:
+        """处理单个候选的 gen→(validator)→sol 流水（并发单元）。
+
+        保持与原串行实现一致的失败/超时语义：生成失败记 error，validator 拒绝则跳过，
+        sol 失败记 error。type=4 带 extra_args 时先做去参数重试兜底。
+        """
+        seed_offset, type_param, n_min, n_max, t_min, t_max, extra_args = test_cfg
+        base_cmd = [
+            str(seed + int(seed_offset)),
+            type_param,
+            str(n_min),
+            str(n_max),
+            str(t_min),
+            str(t_max),
+        ]
+        cmd_args = base_cmd + extra_args
+
+        gen_result = await self._run_with_retry(
+            gen_exe, cmd_args, timeout=timeout, active_pids=active_pids
+        )
+        fallback_used = False
+        if self._generator_run_failed(gen_result) and type_param == "4" and extra_args:
+            fb_result = await self._run_with_retry(
+                gen_exe, base_cmd, timeout=timeout, active_pids=active_pids
+            )
+            if not self._generator_run_failed(fb_result):
+                fallback_used = True
+                gen_result = fb_result
+
+        if self._generator_run_failed(gen_result):
+            return _CandidateOutcome(
+                error=(
+                    seed,
+                    "Generator failed: "
+                    f"return_code={gen_result.return_code}, "
+                    f"stderr={gen_result.stderr}",
+                ),
+                fallback_used=fallback_used,
+            )
+
+        input_data = gen_result.stdout
+
+        if validator_available and val_exe:
+            val_result = await run_binary(val_exe, input_data, timeout=timeout)
+            if val_result.return_code != 0:
+                return _CandidateOutcome(fallback_used=fallback_used)
+
+        sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
+        if not sol_result.success:
+            return _CandidateOutcome(
+                error=(seed, f"sol failed: {sol_result.stderr}"),
+                fallback_used=fallback_used,
+            )
+
+        sig = hashlib.md5(input_data.encode()).hexdigest()
+        return _CandidateOutcome(
+            candidate=CandidateTest(
+                input_data=input_data,
+                output_data=sol_result.stdout,
+                type_param=type_param,
+                signature=sig,
+            ),
+            fallback_used=fallback_used,
+        )
 
     async def _run_with_retry(
         self,
@@ -963,7 +1012,8 @@ class ProblemGenerateTestsTool(Tool):
             return None
         try:
             with open(state_path, encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -1194,7 +1244,7 @@ class ProblemCleanupProcessesTool(Tool):
 
     @property
     def description(self) -> str:
-        return "清理生成器残留进程与状态文件。"
+        return "巡检并回收生成器残留进程（默认执行），仅按当前问题记录的 PID 精准清理。"
 
     @property
     def input_schema(self) -> dict:
@@ -1204,14 +1254,16 @@ class ProblemCleanupProcessesTool(Tool):
                 "problem_dir": {"type": "string", "description": "题目目录路径"},
                 "kill_all_generators": {
                     "type": "boolean",
-                    "description": "是否尝试清理当前问题任务记录的 generator PID（不会全局按进程名误杀）",
-                    "default": False,
+                    "description": "保留参数（向后兼容）；无论真假都仅按记录的 PID 精准清理，不会全局按进程名误杀",
+                    "default": True,
                 },
             },
             "required": ["problem_dir"],
         }
 
-    async def execute(self, problem_dir: str, kill_all_generators: bool = False) -> ToolResult:
+    async def execute(self, problem_dir: str, kill_all_generators: bool = True) -> ToolResult:
+        # 默认即巡检并回收残留 PID（不再直接返回 success）；回收前用 psutil 校验存活，
+        # 已退出的 PID 跳过不报错，POSIX 下按进程组整树回收。
         tests_dir = os.path.join(problem_dir, "tests")
         state_path = os.path.join(tests_dir, _GENERATE_STATE_FILENAME)
         state = self._load_cleanup_state(state_path) or {}
@@ -1219,65 +1271,35 @@ class ProblemCleanupProcessesTool(Tool):
         pids = state.get("active_pids", []) if isinstance(state, dict) else []
         if not isinstance(pids, list):
             pids = []
-        if kill_all_generators:
-            try:
-                killed: list[int] = []
-                failed: list[dict[str, str | int]] = []
-                for pid in pids:
-                    if not isinstance(pid, int) or pid <= 0:
-                        continue
-                    if os.name == "nt":
-                        proc = await asyncio.create_subprocess_exec(
-                            "taskkill",
-                            "/PID",
-                            str(pid),
-                            "/F",
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        stdout, stderr = await proc.communicate()
-                        if proc.returncode == 0:
-                            killed.append(pid)
-                        else:
-                            failed.append(
-                                {
-                                    "pid": pid,
-                                    "stdout": stdout.decode("utf-8", errors="replace"),
-                                    "stderr": stderr.decode("utf-8", errors="replace"),
-                                }
-                            )
-                    else:
-                        try:
-                            os.kill(pid, _POSIX_KILL_SIGNAL)
-                            killed.append(pid)
-                        except OSError as exc:
-                            failed.append(
-                                {
-                                    "pid": pid,
-                                    "stdout": "",
-                                    "stderr": str(exc),
-                                }
-                            )
-                # 仅移除已成功清理的 PID；失败 PID 保留，支持后续重试。
-                remaining_pids = [pid for pid in pids if isinstance(pid, int) and pid not in killed]
-                self._write_cleanup_state(state_path, remaining_pids)
-                return ToolResult.ok(
-                    removed_files=removed_files,
-                    killed_pids=killed,
-                    failed_pids=failed,
-                    warning="No tracked generator PID found; skipped process termination" if not pids else "",
-                    message="Cleanup finished",
-                )
-            except Exception as exc:
-                return ToolResult.fail(f"cleanup failed: {exc}", removed_files=removed_files)
-        # 未请求 kill：不删除 checkpoint，仅返回状态。
-        return ToolResult.ok(
-            removed_files=removed_files,
-            killed_pids=[],
-            failed_pids=[],
-            warning="",
-            message="Cleanup finished",
-        )
+        valid_pids = [pid for pid in pids if isinstance(pid, int) and pid > 0]
+        try:
+            killed: list[int] = []
+            skipped: list[int] = []
+            failed: list[dict[str, str | int]] = []
+            for pid in valid_pids:
+                if not is_pid_alive(pid):
+                    # 已退出的残留 PID：跳过且不报错。
+                    skipped.append(pid)
+                    continue
+                ok, err = await terminate_pid_tree(pid)
+                if ok:
+                    killed.append(pid)
+                else:
+                    failed.append({"pid": pid, "stdout": "", "stderr": err})
+            # 仅保留仍失败的 PID 供重试；已杀与已退出的均从状态移除。
+            failed_pid_set = {int(item["pid"]) for item in failed}
+            remaining_pids = [pid for pid in valid_pids if pid in failed_pid_set]
+            self._write_cleanup_state(state_path, remaining_pids)
+            return ToolResult.ok(
+                removed_files=removed_files,
+                killed_pids=killed,
+                skipped_pids=skipped,
+                failed_pids=failed,
+                warning="No tracked generator PID found; nothing to reclaim" if not valid_pids else "",
+                message="Cleanup finished",
+            )
+        except Exception as exc:
+            return ToolResult.fail(f"cleanup failed: {exc}", removed_files=removed_files)
 
     def _load_cleanup_state(self, state_path: str) -> dict | None:
         if not os.path.exists(state_path):
@@ -1299,6 +1321,119 @@ class ProblemCleanupProcessesTool(Tool):
         state["active_pids"] = remaining_pids
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _pack_polygon_files(problem_dir: str) -> dict[str, list[str]]:
+    """创建 Polygon 标准目录并拷贝源文件，返回操作汇总。"""
+    results: dict[str, list[str]] = {
+        "files_copied": [],
+        "files_removed": [],
+        "directories_created": [],
+    }
+    for dir_name in ["files", "solutions", "statements", "scripts"]:
+        dir_path = os.path.join(problem_dir, dir_name)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            results["directories_created"].append(dir_name)
+
+    files_dir = os.path.join(problem_dir, "files")
+    for src in ["testlib.h", "gen.cpp", "val.cpp", "interactor.cpp"]:
+        src_path = os.path.join(problem_dir, src)
+        if os.path.exists(src_path):
+            shutil.copy2(src_path, os.path.join(files_dir, src))
+            results["files_copied"].append(f"{src} -> files/{src}")
+
+    solutions_dir = os.path.join(problem_dir, "solutions")
+    for src in ["sol.cpp", "brute.cpp"]:
+        src_path = os.path.join(problem_dir, src)
+        if os.path.exists(src_path):
+            shutil.copy2(src_path, os.path.join(solutions_dir, src))
+            results["files_copied"].append(f"{src} -> solutions/{src}")
+
+    readme_src = os.path.join(problem_dir, "README.md")
+    if os.path.exists(readme_src):
+        shutil.copy2(readme_src, os.path.join(problem_dir, "statements", "README.md"))
+        results["files_copied"].append("README.md -> statements/README.md")
+
+    return results
+
+
+def _add_executable(parent: ET.Element, source_path: str) -> ET.Element:
+    exe = ET.SubElement(parent, "executable")
+    ET.SubElement(exe, "source", {"path": source_path})
+    return exe
+
+
+def _build_problem_xml(
+    problem_dir: str,
+    *,
+    time_limit_ms: int,
+    memory_limit_bytes: int,
+    test_count: int,
+    answer_ext: str,
+    is_interactive_problem: bool,
+    has_checker: bool,
+    has_interactor: bool,
+) -> str:
+    """基于 xml.etree.ElementTree 生成 problem.xml 内容。"""
+    problem_name = os.path.basename(os.path.normpath(problem_dir))
+    include_validator = (not is_interactive_problem) or os.path.isfile(
+        os.path.join(problem_dir, "files", "val.cpp")
+    )
+
+    problem = ET.Element("problem", {"revision": "1", "short-name": problem_name})
+    names = ET.SubElement(problem, "names")
+    ET.SubElement(names, "name", {"language": "chinese", "value": problem_name})
+
+    statements = ET.SubElement(problem, "statements")
+    ET.SubElement(
+        statements,
+        "statement",
+        {
+            "charset": "UTF-8",
+            "language": "chinese",
+            "mathjax": "true",
+            "path": "statements/README.md",
+            "type": "application/x-tex",
+        },
+    )
+
+    judging = ET.SubElement(problem, "judging")
+    testset = ET.SubElement(judging, "testset", {"name": "tests"})
+    ET.SubElement(testset, "time-limit").text = str(time_limit_ms)
+    ET.SubElement(testset, "memory-limit").text = str(memory_limit_bytes)
+    ET.SubElement(testset, "test-count").text = str(test_count)
+    ET.SubElement(testset, "input-path-pattern").text = "tests/%02d.in"
+    ET.SubElement(testset, "answer-path-pattern").text = f"tests/%02d{answer_ext}"
+    if has_checker:
+        ET.SubElement(testset, "checker", {"type": "testlib", "path": "files/checker.cpp"})
+    if has_interactor:
+        ET.SubElement(testset, "interactor", {"type": "testlib", "path": "files/interactor.cpp"})
+
+    files = ET.SubElement(problem, "files")
+    resources = ET.SubElement(files, "resources")
+    ET.SubElement(resources, "file", {"path": "files/testlib.h"})
+
+    executables = ET.SubElement(files, "executables")
+    _add_executable(executables, "files/gen.cpp")
+    if include_validator:
+        _add_executable(executables, "files/val.cpp")
+    if has_checker:
+        _add_executable(executables, "files/checker.cpp")
+    if has_interactor:
+        _add_executable(executables, "files/interactor.cpp")
+
+    assets = ET.SubElement(problem, "assets")
+    solutions = ET.SubElement(assets, "solutions")
+    main = ET.SubElement(solutions, "solution", {"tag": "main"})
+    ET.SubElement(main, "source", {"path": "solutions/sol.cpp"})
+    rejected = ET.SubElement(solutions, "solution", {"tag": "rejected"})
+    ET.SubElement(rejected, "source", {"path": "solutions/brute.cpp"})
+
+    ET.indent(problem)
+    return '<?xml version="1.0" encoding="utf-8" standalone="no"?>\n' + ET.tostring(
+        problem, encoding="unicode"
+    )
 
 
 class ProblemPackPolygonTool(Tool):
@@ -1366,7 +1501,7 @@ class ProblemPackPolygonTool(Tool):
             try:
                 with open(manifest_path, encoding="utf-8") as mf:
                     manifest = json.load(mf)
-                answer_ext = _normalize_answer_ext_value(str(manifest.get("answer_ext", ".ans"))) or ".ans"
+                answer_ext = normalize_answer_ext(str(manifest.get("answer_ext", ".ans"))) or ".ans"
             except (OSError, json.JSONDecodeError):
                 answer_ext = ".ans"
 
@@ -1391,61 +1526,26 @@ class ProblemPackPolygonTool(Tool):
             return ToolResult.fail("main solution source missing: solutions/sol.cpp")
 
         workflow_state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
-        require_tests_verified = True
-        min_limit_case_ratio = 0.5
-        require_full_audit = False
-        is_interactive_problem = False
-        problem_manifest_path = os.path.join(problem_dir, "autocode.json")
-        problem_manifest: dict[str, object] = {}
-        if os.path.exists(problem_manifest_path):
-            try:
-                with open(problem_manifest_path, encoding="utf-8") as pmf:
-                    problem_manifest = json.load(pmf)
-                is_interactive_problem = bool(problem_manifest.get("interactive", False))
-                quality_gates = problem_manifest.get("quality_gates", {})
-                if isinstance(quality_gates, dict):
-                    require_tests_verified = bool(quality_gates.get("require_tests_verified", True))
-                    min_limit_case_ratio = float(quality_gates.get("min_limit_case_ratio", 0.5))
-                audit_gates = problem_manifest.get("audit_gates", {})
-                if isinstance(audit_gates, dict):
-                    require_full_audit = bool(audit_gates.get("require_full_audit", False))
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                require_tests_verified = True
-                min_limit_case_ratio = 0.5
-                require_full_audit = False
-        min_limit_case_ratio = min(1.0, max(0.0, min_limit_case_ratio))
-        required_limit_semantics = True
-        required_wrong_solution_kill = True
-        required_validator_check = True
-        required_validator_self_test = False
-        required_checker_self_test = True
-        required_interactor_self_test = True
-        if os.path.exists(problem_manifest_path):
-            try:
-                with open(problem_manifest_path, encoding="utf-8") as pmf:
-                    problem_manifest = json.load(pmf)
-                is_interactive_problem = bool(problem_manifest.get("interactive", is_interactive_problem))
-                quality_gates = problem_manifest.get("quality_gates", {})
-                if isinstance(quality_gates, dict):
-                    required_limit_semantics = bool(quality_gates.get("require_limit_semantics", True))
-                    required_wrong_solution_kill = bool(quality_gates.get("require_wrong_solution_kill", True))
-                    required_validator_check = bool(quality_gates.get("require_validator_check", True))
-                audit_gates = problem_manifest.get("audit_gates", {})
-                if isinstance(audit_gates, dict):
-                    require_full_audit = bool(audit_gates.get("require_full_audit", require_full_audit))
-                    required_validator_self_test = bool(
-                        audit_gates.get("require_validator_self_test", required_validator_self_test)
-                    )
-                    required_checker_self_test = bool(
-                        audit_gates.get("require_checker_self_test", required_checker_self_test)
-                    )
-                    required_interactor_self_test = bool(
-                        audit_gates.get("require_interactor_self_test", required_interactor_self_test)
-                    )
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                required_limit_semantics = True
-                required_wrong_solution_kill = True
-                required_validator_check = True
+        # 门禁配置统一从 Pydantic manifest 读取；存在但损坏即阻断，缺失则回退默认门禁（保持向后兼容）。
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(
+                f"invalid or unreadable autocode.json: {exc}",
+                stage="problem_pack_polygon",
+                gate="manifest_readable",
+                required=True,
+                actual=False,
+            )
+        if manifest_model is None:
+            manifest_model = default_manifest(os.path.basename(os.path.normpath(problem_dir)))
+
+        quality_gates_cfg = manifest_model.quality_gates
+        audit_gates_cfg = manifest_model.audit_gates
+        require_tests_verified = quality_gates_cfg.require_tests_verified
+        min_limit_case_ratio = min(1.0, max(0.0, quality_gates_cfg.min_limit_case_ratio))
+        require_full_audit = audit_gates_cfg.require_full_audit
+        is_interactive_problem = manifest_model.interactive
 
         interactor_cpp = os.path.join(problem_dir, "files", "interactor.cpp")
         root_interactor_cpp = os.path.join(problem_dir, "interactor.cpp")
@@ -1457,15 +1557,6 @@ class ProblemPackPolygonTool(Tool):
             try:
                 with open(workflow_state_path, encoding="utf-8") as sf:
                     workflow_state = json.load(sf)
-                if require_tests_verified and not bool(workflow_state.get("tests_verified", False)):
-                    return ToolResult.fail(
-                        "tests are not verified, run problem_verify_tests first",
-                        stage="problem_pack_polygon",
-                        gate="require_tests_verified",
-                        required=True,
-                        actual=False,
-                        tests_verified=False,
-                    )
             except (OSError, json.JSONDecodeError):
                 return ToolResult.fail(
                     "invalid workflow state file, rerun verification steps",
@@ -1473,6 +1564,17 @@ class ProblemPackPolygonTool(Tool):
                     gate="workflow_state_readable",
                     required=True,
                     actual=False,
+                )
+            if not isinstance(workflow_state, dict):
+                workflow_state = {}
+            if require_tests_verified and not bool(workflow_state.get("tests_verified", False)):
+                return ToolResult.fail(
+                    "tests are not verified, run problem_verify_tests first",
+                    stage="problem_pack_polygon",
+                    gate="require_tests_verified",
+                    required=True,
+                    actual=False,
+                    tests_verified=False,
                 )
         elif require_tests_verified:
             return ToolResult.fail(
@@ -1511,16 +1613,20 @@ class ProblemPackPolygonTool(Tool):
             audit_signals = full_audit.get("quality_signals", {})
             if not isinstance(audit_signals, dict):
                 audit_signals = {}
-            spj_checker = bool(problem_manifest.get("special_judge", False)) and (
-                problem_manifest.get("stress_comparison", "exact") == "checker"
-            )
+            spj_checker = manifest_uses_testlib_checker(manifest_model)
             audit_signal_rules = [
                 ("duplicate_inputs", True),
                 ("scale_distribution", True),
                 ("purpose_coverage", True),
-                ("validator_self_test", required_validator_self_test and not is_interactive_problem),
-                ("checker_self_test", required_checker_self_test and spj_checker),
-                ("interactor_self_test", required_interactor_self_test and is_interactive_problem),
+                (
+                    "validator_self_test",
+                    audit_gates_cfg.require_validator_self_test and not is_interactive_problem,
+                ),
+                ("checker_self_test", audit_gates_cfg.require_checker_self_test and spj_checker),
+                (
+                    "interactor_self_test",
+                    audit_gates_cfg.require_interactor_self_test and is_interactive_problem,
+                ),
             ]
             for signal_name, required in audit_signal_rules:
                 if not required:
@@ -1536,25 +1642,19 @@ class ProblemPackPolygonTool(Tool):
                         required=True,
                         actual=signal_data,
                     )
-        signal_rules = [
-            ("limit_semantics", required_limit_semantics),
-            ("wrong_solution_kill", required_wrong_solution_kill),
-            ("validator_check", required_validator_check),
-        ]
-        for signal_name, required in signal_rules:
-            if not required:
+
+        # 验证信号类质量门禁委托 workflow.guard.check_gates 判定，避免与 problem_audit 双份实现。
+        for issue in check_gates(manifest_model, workflow_state, verify_signals):
+            if issue.gate == "tests_verified":
+                # tests_verified 已在上面按文件存在/可读状态给出更精确报错，此处兜底跳过。
                 continue
-            signal_data = verify_signals.get(signal_name, {})
-            if not isinstance(signal_data, dict):
-                signal_data = {}
-            if not bool(signal_data.get("executed")) or not bool(signal_data.get("passed")):
-                return ToolResult.fail(
-                    f"verification signal `{signal_name}` not satisfied, run problem_verify_tests first",
-                    stage="problem_pack_polygon",
-                    gate=signal_name,
-                    required=True,
-                    actual=signal_data,
-                )
+            return ToolResult.fail(
+                f"verification signal `{issue.gate}` not satisfied, run problem_verify_tests first",
+                stage="problem_pack_polygon",
+                gate=issue.gate,
+                required=True,
+                actual=verify_signals.get(issue.gate, {}),
+            )
 
         limit_ratio_from_manifest = None
         if os.path.exists(manifest_path):
@@ -1587,138 +1687,28 @@ class ProblemPackPolygonTool(Tool):
         time_limit_ms = time_limit * 1000
         memory_limit_bytes = memory_limit * 1024 * 1024
 
-        results = {
-            "files_copied": [],
-            "files_removed": [],
-            "directories_created": [],
-        }
+        # 1~4. 创建标准目录并拷贝源文件。
+        results = _pack_polygon_files(problem_dir)
 
-        # 1. 创建目录
-        directories = ["files", "solutions", "statements", "scripts"]
-        for dir_name in directories:
-            dir_path = os.path.join(problem_dir, dir_name)
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path)
-                results["directories_created"].append(dir_name)
-
-        # 2. 移动文件到 files/
-        files_dir = os.path.join(problem_dir, "files")
-        for src in ["testlib.h", "gen.cpp", "val.cpp", "interactor.cpp"]:
-            src_path = os.path.join(problem_dir, src)
-            if os.path.exists(src_path):
-                dst_path = os.path.join(files_dir, src)
-                shutil.copy2(src_path, dst_path)
-                results["files_copied"].append(f"{src} -> files/{src}")
-
-        # 3. 移动文件到 solutions/
-        solutions_dir = os.path.join(problem_dir, "solutions")
-        for src in ["sol.cpp", "brute.cpp"]:
-            src_path = os.path.join(problem_dir, src)
-            if os.path.exists(src_path):
-                dst_path = os.path.join(solutions_dir, src)
-                shutil.copy2(src_path, dst_path)
-                results["files_copied"].append(f"{src} -> solutions/{src}")
-
-        # 4. 移动 README.md
-        statements_dir = os.path.join(problem_dir, "statements")
-        readme_src = os.path.join(problem_dir, "README.md")
-        if os.path.exists(readme_src):
-            readme_dst = os.path.join(statements_dir, "README.md")
-            shutil.copy2(readme_src, readme_dst)
-            results["files_copied"].append("README.md -> statements/README.md")
-
-        # 5. 创建 problem.xml
+        # 5. 创建 problem.xml（基于 xml.etree.ElementTree 生成，避免手工拼接）
         problem_xml = os.path.join(problem_dir, "problem.xml")
         if not os.path.exists(problem_xml):
-            # 动态计算测试数量
-            if os.path.exists(tests_dir):
-                test_files = [f for f in os.listdir(tests_dir) if f.endswith(".in")]
-                actual_test_count = len(test_files)
-            else:
-                actual_test_count = 0
-
-            problem_name = os.path.basename(problem_dir)
-            xml_problem_name = escape(problem_name, {'"': "&quot;"})
-            xml_answer_ext = escape(answer_ext, {'"': "&quot;"})
-            validator_cpp = os.path.join(files_dir, "val.cpp")
-            include_validator = (not is_interactive_problem) or os.path.isfile(validator_cpp)
-            checker_cpp = os.path.join(files_dir, "checker.cpp")
-            has_checker = os.path.isfile(checker_cpp)
-            interactor_cpp = os.path.join(files_dir, "interactor.cpp")
-            has_interactor = is_interactive_problem and os.path.isfile(interactor_cpp)
-            checker_testset_line = (
-                '\n            <checker type="testlib" path="files/checker.cpp"/>'
-                if has_checker
-                else ""
+            actual_test_count = len([f for f in os.listdir(tests_dir) if f.endswith(".in")])
+            files_dir = os.path.join(problem_dir, "files")
+            has_checker = os.path.isfile(os.path.join(files_dir, "checker.cpp"))
+            has_interactor = is_interactive_problem and os.path.isfile(
+                os.path.join(files_dir, "interactor.cpp")
             )
-            interactor_testset_line = (
-                '\n            <interactor type="testlib" path="files/interactor.cpp"/>'
-                if has_interactor
-                else ""
+            xml_content = _build_problem_xml(
+                problem_dir,
+                time_limit_ms=time_limit_ms,
+                memory_limit_bytes=memory_limit_bytes,
+                test_count=actual_test_count,
+                answer_ext=answer_ext,
+                is_interactive_problem=is_interactive_problem,
+                has_checker=has_checker,
+                has_interactor=has_interactor,
             )
-            checker_executable_block = (
-                """
-            <executable>
-                <source path="files/checker.cpp"/>
-            </executable>"""
-                if has_checker
-                else ""
-            )
-            validator_executable_block = (
-                """
-            <executable>
-                <source path="files/val.cpp"/>
-            </executable>"""
-                if include_validator
-                else ""
-            )
-            interactor_executable_block = (
-                """
-            <executable>
-                <source path="files/interactor.cpp"/>
-            </executable>"""
-                if has_interactor
-                else ""
-            )
-            xml_content = f'''<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<problem revision="1" short-name="{xml_problem_name}">
-    <names>
-        <name language="chinese" value="{xml_problem_name}"/>
-    </names>
-    <statements>
-        <statement charset="UTF-8" language="chinese" mathjax="true" path="statements/README.md" type="application/x-tex"/>
-    </statements>
-    <judging>
-        <testset name="tests">
-            <time-limit>{time_limit_ms}</time-limit>
-            <memory-limit>{memory_limit_bytes}</memory-limit>
-            <test-count>{actual_test_count}</test-count>
-            <input-path-pattern>tests/%02d.in</input-path-pattern>
-            <answer-path-pattern>tests/%02d{xml_answer_ext}</answer-path-pattern>{checker_testset_line}{interactor_testset_line}
-        </testset>
-    </judging>
-    <files>
-        <resources>
-            <file path="files/testlib.h"/>
-        </resources>
-        <executables>
-            <executable>
-                <source path="files/gen.cpp"/>
-            </executable>{validator_executable_block}{checker_executable_block}{interactor_executable_block}
-        </executables>
-    </files>
-    <assets>
-        <solutions>
-            <solution tag="main">
-                <source path="solutions/sol.cpp"/>
-            </solution>
-            <solution tag="rejected">
-                <source path="solutions/brute.cpp"/>
-            </solution>
-        </solutions>
-    </assets>
-</problem>
-'''
             with open(problem_xml, "w", encoding="utf-8") as f:
                 f.write(xml_content)
             results["files_copied"].append("problem.xml (created)")
