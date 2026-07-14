@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel
+
 
 @dataclass
 class ToolResult:
@@ -90,3 +92,37 @@ class Tool(ABC):
             ToolResult: 统一格式的返回结果
         """
         pass
+
+
+def input_schema_from_model(model: type[BaseModel]) -> dict[str, Any]:
+    """
+    Derive an MCP ``inputSchema`` JSON Schema from a Pydantic input model.
+
+    This is the single source of truth for a tool's ``input_schema``, replacing
+    hand-written JSON Schema dicts that can drift from the ``execute`` signature.
+    Nested models are inlined (``$defs`` resolved) so clients that do not follow
+    ``$ref`` still receive a complete, self-contained schema.
+    """
+    schema: dict[str, Any] = model.model_json_schema()
+    schema.pop("title", None)
+    for prop in schema.get("properties", {}).values():
+        if isinstance(prop, dict):
+            prop.pop("title", None)
+
+    defs: dict[str, Any] = schema.pop("$defs", {})
+
+    def _inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if ref:
+                name = ref.rsplit("/", 1)[-1]
+                resolved = {k: v for k, v in defs.get(name, {}).items() if k != "title"}
+                resolved.update({k: v for k, v in node.items() if k != "$ref"})
+                return _inline(resolved)
+            node.pop("title", None)
+            return {k: _inline(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_inline(v) for v in node]
+        return node
+
+    return _inline(schema)  # type: ignore[no-any-return]

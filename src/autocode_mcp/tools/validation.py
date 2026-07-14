@@ -15,7 +15,8 @@ from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_binary
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
+from .schemas import ProblemValidateInput
 
 
 class ProblemValidateTool(Tool):
@@ -44,47 +45,7 @@ class ProblemValidateTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径",
-                },
-                "validate_types": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["statement_samples", "sample_files", "all"],
-                    },
-                    "default": ["all"],
-                    "description": "验证类型：statement_samples（题面样例）、sample_files（样例文件）、all（全部）",
-                },
-                "statement_samples": {
-                    "type": "array",
-                    "description": "题面样例列表（可选，不提供则从 README.md 自动提取）",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "input": {"type": "string", "description": "样例输入"},
-                            "expected_output": {"type": "string", "description": "题面声称的输出"},
-                        },
-                        "required": ["input", "expected_output"],
-                    },
-                },
-                "tolerance": {
-                    "type": "number",
-                    "default": 1e-9,
-                    "description": "浮点数比较容差",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "default": 30,
-                    "description": "单次执行超时（秒）",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemValidateInput)
 
     async def execute(
         self,

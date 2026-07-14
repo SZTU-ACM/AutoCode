@@ -17,8 +17,9 @@ from pydantic import ValidationError
 from ..workflow import check_gates, load_manifest, manifest_uses_testlib_checker
 from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from ..workflow.models import AutoCodeManifest
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import analyze_loop_complexity, detect_algorithm_patterns
+from .schemas import ProblemAuditInput
 from .test_verify import ProblemVerifyTestsTool
 
 _WORKFLOW_STATE = ".autocode-workflow/state.json"
@@ -43,28 +44,7 @@ class ProblemAuditTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "problem_dir": {"type": "string", "description": "题目目录路径"},
-                "mode": {
-                    "type": "string",
-                    "enum": ["quick", "full"],
-                    "default": "full",
-                    "description": "quick 只做结构和已有证据聚合；full 执行打包前门禁判定",
-                },
-                "include_difficulty": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "是否输出难度评级 signals",
-                },
-                "report_path": {
-                    "type": "string",
-                    "description": "可选报告输出路径；相对路径按 problem_dir 解析",
-                },
-            },
-            "required": ["problem_dir"],
-        }
+        return input_schema_from_model(ProblemAuditInput)
 
     async def execute(
         self,

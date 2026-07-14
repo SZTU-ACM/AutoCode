@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import os
 
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, input_schema_from_model
+from .schemas import FileReadInput, FileSaveInput
 
 CANONICAL_PROBLEM_FILES = {
     "sol.cpp": "solutions/sol.cpp",
@@ -47,20 +48,7 @@ class FileReadTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径（绝对路径或相对于 problem_dir 的相对路径）",
-                },
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径（用于解析相对路径）",
-                },
-            },
-            "required": ["path"],
-        }
+        return input_schema_from_model(FileReadInput)
 
     async def execute(self, path: str, problem_dir: str | None = None) -> ToolResult:
         """执行文件读取。"""
@@ -117,24 +105,7 @@ class FileSaveTool(Tool):
 
     @property
     def input_schema(self) -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径（绝对路径或相对于 problem_dir 的相对路径）",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "文件内容",
-                },
-                "problem_dir": {
-                    "type": "string",
-                    "description": "题目目录路径（用于解析相对路径）",
-                },
-            },
-            "required": ["path", "content"],
-        }
+        return input_schema_from_model(FileSaveInput)
 
     async def execute(
         self,
