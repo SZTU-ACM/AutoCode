@@ -114,11 +114,21 @@ class ProblemCreateTool(Tool):
                 os.makedirs(dir_path)
                 created_dirs.append(dir_path)
 
-        # 题目级 .gitignore：忽略运行期副产物 .autocode/
-        gitignore_path = os.path.join(problem_dir, ".gitignore")
-        if not os.path.exists(gitignore_path):
-            with open(gitignore_path, "w", encoding="utf-8") as f:
-                f.write(".autocode/\n")
+        # 运行期副产物统一收纳到 .autocode/，并用其内部的 .gitignore（`*`）自忽略，
+        # `*` 同时忽略 .gitignore 自身，因此整个 .autocode/ 在 git status 中零痕迹，
+        # 无需在题目根再生成 .gitignore。
+        autocode_dir = os.path.join(problem_dir, ".autocode")
+        try:
+            os.makedirs(autocode_dir, exist_ok=True)
+        except OSError:
+            pass
+        gitignore_path = os.path.join(autocode_dir, ".gitignore")
+        try:
+            if not os.path.exists(gitignore_path):
+                with open(gitignore_path, "w", encoding="utf-8") as f:
+                    f.write("# AutoCode state — self-ignored\n*\n")
+        except OSError:
+            pass
 
         # 复制 testlib.h
         from .. import TEMPLATES_DIR
@@ -1330,7 +1340,7 @@ class ProblemPackPolygonTool(Tool):
             manifest_model = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
             return ToolResult.fail(
-                f"invalid or unreadable autocode.json: {exc}",
+                f"invalid or unreadable manifest.json: {exc}",
                 stage="problem_pack_polygon",
                 gate="manifest_readable",
                 required=True,

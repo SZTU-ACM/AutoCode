@@ -1,4 +1,4 @@
-"""autocode.json 读取与 manifest 归一化。"""
+"""manifest.json 读取与 manifest 归一化。"""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from autocode_mcp.workflow.models import AutoCodeManifest
 
 def test_load_manifest_bad_utf8_raises_value_error() -> None:
     with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / "autocode.json"
+        autocode_dir = Path(d) / ".autocode"
+        autocode_dir.mkdir()
+        p = autocode_dir / "manifest.json"
         p.write_bytes(b"\xff\xfe\xfd")
-        with pytest.raises(ValueError, match="cannot read autocode.json"):
+        with pytest.raises(ValueError, match="cannot read manifest.json"):
             load_manifest(d)
 
 

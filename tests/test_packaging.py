@@ -137,7 +137,7 @@ def test_all_template_files_exist():
         "generator_template.cpp",
         "checker_template.cpp",
         "interactor_template.cpp",
-        "autocode.json",
+        "manifest.json",
         "tutorial_template.md",
     ]
 
@@ -162,26 +162,28 @@ def test_autocode_verify_reports_invalid_manifest(monkeypatch, capsys, tmp_path)
     """CLI 在 manifest 损坏时不应抛 traceback。"""
     from autocode_mcp.cli.verify import main
 
-    (tmp_path / "autocode.json").write_text("{invalid", encoding="utf-8")
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_text("{invalid", encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
 
     assert main() == 1
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is False
-    assert "invalid autocode.json" in parsed["error"]
+    assert "invalid manifest.json" in parsed["error"]
 
 
 def test_autocode_verify_reports_unreadable_manifest(monkeypatch, capsys, tmp_path):
-    """非法 UTF-8 的 autocode.json 应返回结构化失败。"""
+    """非法 UTF-8 的 manifest.json 应返回结构化失败。"""
     from autocode_mcp.cli.verify import main
 
-    (tmp_path / "autocode.json").write_bytes(b"\xff\xfe\xfd")
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_bytes(b"\xff\xfe\xfd")
     monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
 
     assert main() == 1
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is False
-    assert "invalid autocode.json" in parsed["error"]
+    assert "invalid manifest.json" in parsed["error"]
 
 
 def test_autocode_verify_accepts_valid_manifest(monkeypatch, capsys, tmp_path):
@@ -224,7 +226,8 @@ def test_autocode_verify_special_judge_exact_skips_checker_warn(monkeypatch, cap
         "solutions": [],
         "case_plan": [],
     }
-    (tmp_path / "autocode.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
 
     assert main() == 0
@@ -238,7 +241,8 @@ async def test_problem_verify_tests_rejects_invalid_manifest(tmp_path):
     from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
 
     (tmp_path / "tests").mkdir()
-    (tmp_path / "autocode.json").write_text(
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_text(
         '{"schema_version":"1.0","problem_name":"m","interactive":false,'
         '"stress_comparison":"INVALID_ENUM"}',
         encoding="utf-8",
@@ -256,7 +260,8 @@ async def test_problem_verify_tests_rejects_unreadable_manifest(tmp_path):
     from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
 
     (tmp_path / "tests").mkdir()
-    (tmp_path / "autocode.json").write_bytes(b"\xff\xfe\xfd")
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_bytes(b"\xff\xfe\xfd")
     tool = ProblemVerifyTestsTool()
     result = await tool.execute(problem_dir=str(tmp_path), verify_types=["file_count"])
     assert not result.success
@@ -287,7 +292,8 @@ def test_autocode_verify_spj_warns_without_checker(monkeypatch, capsys, tmp_path
         "solutions": [],
         "case_plan": [],
     }
-    (tmp_path / "autocode.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".autocode" / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["autocode-verify", str(tmp_path)])
 
     assert main() == 1

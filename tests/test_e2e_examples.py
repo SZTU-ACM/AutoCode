@@ -23,10 +23,12 @@ EXAMPLES_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "e
 
 
 def _copy_example_manifest(name: str, problem_dir: str) -> None:
-    src = os.path.join(EXAMPLES_DIR, name, "autocode.json")
+    src = os.path.join(EXAMPLES_DIR, name, ".autocode", "manifest.json")
     with open(src, encoding="utf-8") as fin:
         content = fin.read()
-    with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as fout:
+    dest_dir = os.path.join(problem_dir, ".autocode")
+    os.makedirs(dest_dir, exist_ok=True)
+    with open(os.path.join(dest_dir, "manifest.json"), "w", encoding="utf-8") as fout:
         fout.write(content)
 
 

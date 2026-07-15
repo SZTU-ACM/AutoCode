@@ -12,7 +12,7 @@ The system SHALL provide a single module `workflow/guard.py` exposing `check_gat
 - **THEN** it delegates to `check_gates` and does not re-implement gate logic
 
 ### Requirement: Manifest load failure blocks, not permits
-The system SHALL fail gate evaluation when `autocode.json` is missing or unparseable, rather than silently falling back to permissive defaults.
+The system SHALL fail gate evaluation when `manifest.json` is missing or unparseable, rather than silently falling back to permissive defaults.
 
 #### Scenario: Corrupt manifest
 - **WHEN** the manifest is corrupt or unreadable during pack or audit

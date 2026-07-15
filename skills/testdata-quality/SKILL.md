@@ -8,9 +8,9 @@ disable-model-invocation: false
 
 Final test data must pass:
 
-1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`. When `autocode.json` has `special_judge: true` **and** `stress_comparison: "checker"`, `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they still compare strings to `.ans`.
+1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`. When `manifest.json` has `special_judge: true` **and** `stress_comparison: "checker"`, `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they still compare strings to `.ans`.
 2. `limit_ratio` and `limit_semantics` (type=3 and type=4 must not be semantically overlapping).
-3. `wrong_solution_kill`: for each `role=wrong` solution in `autocode.json`, behavior depends on `expected` (default `fail`). **`expected=fail`**: at least one final test must be non-AC under checker mode, or not match `.ans` under exact mode (wrong solution must be "killed"). **`expected=pass`**: every final test must be AC / match `.ans` (e.g. alternate valid output). The tool reports `killed`, `expected`, and a `hint` per wrong solution; interpret them together.
+3. `wrong_solution_kill`: for each `role=wrong` solution in `manifest.json`, behavior depends on `expected` (default `fail`). **`expected=fail`**: at least one final test must be non-AC under checker mode, or not match `.ans` under exact mode (wrong solution must be "killed"). **`expected=pass`**: every final test must be AC / match `.ans` (e.g. alternate valid output). The tool reports `killed`, `expected`, and a `hint` per wrong solution; interpret them together.
 
 ## Additional Required Checks
 

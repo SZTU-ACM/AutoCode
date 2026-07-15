@@ -229,7 +229,8 @@ class TestProblemValidateTool:
     async def test_interactive_protocol_validation_accepts_transcript(self, tmp_path):
         """交互题 transcript 样例不应被当作普通 stdin/stdout 样例执行。"""
         (tmp_path / "statements").mkdir()
-        (tmp_path / "autocode.json").write_text(
+        (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".autocode" / "manifest.json").write_text(
             '{"schema_version":"1.0","problem_name":"I","interactive":true}',
             encoding="utf-8",
         )
@@ -269,7 +270,8 @@ contestant: ! 63
     async def test_interactive_protocol_validation_rejects_missing_protocol(self, tmp_path):
         """交互题题面缺协议时应失败。"""
         (tmp_path / "statements").mkdir()
-        (tmp_path / "autocode.json").write_text(
+        (tmp_path / ".autocode").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".autocode" / "manifest.json").write_text(
             '{"schema_version":"1.0","problem_name":"I","interactive":true}',
             encoding="utf-8",
         )

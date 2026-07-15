@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-MANIFEST_FILE_NAME = "autocode.json"
+MANIFEST_FILE_NAME = "manifest.json"
 
 RUNTIME_DIR_NAME = ".autocode"
 RUNTIME_FILE_NAME = "runtime.json"
@@ -39,7 +39,7 @@ def _save_runtime(problem_dir: str, data: dict[str, Any]) -> None:
 
 
 def manifest_file(problem_dir: str) -> Path:
-    return Path(problem_dir) / MANIFEST_FILE_NAME
+    return Path(problem_dir) / RUNTIME_DIR_NAME / MANIFEST_FILE_NAME
 
 
 def load_manifest(problem_dir: str) -> dict[str, Any]:

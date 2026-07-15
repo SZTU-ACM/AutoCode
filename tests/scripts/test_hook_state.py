@@ -9,7 +9,8 @@ from hook_state import _extract_quality_gates, infer_state, load_state, save_sta
 
 
 def _write_manifest(problem_dir: Path, **manifest: object) -> None:
-    (problem_dir / "autocode.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (problem_dir / ".autocode").mkdir(parents=True, exist_ok=True)
+    (problem_dir / ".autocode" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_infer_state_created_requires_valid_manifest(tmp_path):

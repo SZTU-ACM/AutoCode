@@ -12,14 +12,14 @@ All non-problem runtime artifacts SHALL be stored in a single file `.autocode/ru
 - **THEN** they read/write `.autocode/runtime.json` under the appropriate key, and no separate `.autocode-workflow/state.json`, `tests/.autocode_tests_manifest.json`, `.autocode_generate_state.json`, or root `audit_report.json` file is created
 
 ### Requirement: Byproducts are git-ignored
-The `.autocode/` directory SHALL be git-ignored in the problem directory. `problem_create` SHALL generate a `.gitignore` in the new problem directory that lists `.autocode/` (the AutoCode repository root does NOT ignore it; problem directories are independent repos).
+The `.autocode/` directory SHALL be git-ignored in the problem directory. `problem_create` SHALL write a `.gitignore` inside `.autocode/` whose content is `*` (so `.autocode/` self-ignores, including the `.gitignore` itself); no `.gitignore` SHALL be created at the problem root. The AutoCode repository root does NOT ignore `.autocode/`; problem directories are independent repos.
 
 #### Scenario: Clean version control
 - **WHEN** a problem directory is inside a git repository
-- **THEN** `.autocode/` is ignored (via the problem-directory `.gitignore`) and the runtime store does not appear in `git status`
+- **THEN** `.autocode/` is ignored (via its own internal `.gitignore` containing `*`) and the runtime store does not appear in `git status`
 
 ### Requirement: Problem directory contains only problem artifacts plus the runtime store
-A problem directory SHALL contain the problem artifacts (statement, solutions, validator, generator, checker/interactor, tests, `autocode.json`, `problem.xml`) and the single `.autocode/` runtime store; no other hidden runtime JSON files SHALL be scattered at the root or under `tests/`.
+A problem directory SHALL contain the problem artifacts (statement, solutions, validator, generator, checker/interactor, tests, `.autocode/manifest.json`, `problem.xml`) and the single `.autocode/` runtime store; no other hidden runtime JSON files SHALL be scattered at the root or under `tests/`.
 
 #### Scenario: No scattered byproducts
 - **WHEN** a full authoring run completes

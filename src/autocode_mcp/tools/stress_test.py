@@ -51,7 +51,7 @@ class StressTestRunTool(Tool):
 
         用于验证解法正确性。支持自定义轮数和参数。
         使用小数据（N <= 100）确保暴力解法快速运行。
-        若 autocode.json 中 special_judge 为 true 且 stress_comparison 为 checker，则调用
+        若 manifest.json 中 special_judge 为 true 且 stress_comparison 为 checker，则调用
         checker(input, sol输出, brute输出)（须已编译 files/checker）；brute 作为 answer。
         若另设 stress_checker_bidirectional 为 true，会再调用 checker(input, brute, sol)，二者均须 AC。
         否则比较 sol/brute 输出字符串是否一致。
@@ -295,7 +295,7 @@ class StressTestRunTool(Tool):
         try:
             manifest_model = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
-            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         use_checker_stress = manifest_uses_testlib_checker(manifest_model)
         checker_exe = checker_exe_path(problem_dir, exe_ext) if use_checker_stress else ""
         if use_checker_stress and not os.path.isfile(checker_exe):

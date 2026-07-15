@@ -225,7 +225,8 @@ async def test_problem_pack_polygon_xml_includes_interactor_when_interactive():
         os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "files"), exist_ok=True)
-        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(problem_dir, ".autocode"), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "schema_version": "1.0",
@@ -1430,7 +1431,8 @@ async def test_problem_verify_tests_invalid_manifest_clears_stale_verified_state
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
         os.makedirs(tests_dir)
-        with open(os.path.join(tmpdir, "autocode.json"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(tmpdir, ".autocode"), exist_ok=True)
+        with open(os.path.join(tmpdir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
             f.write(
                 '{"schema_version":"1.0","problem_name":"m","interactive":false,'
                 '"stress_comparison":"INVALID_ENUM"}'
@@ -1713,7 +1715,8 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
-        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(problem_dir, ".autocode"), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "problem_name": "t",
@@ -1747,7 +1750,8 @@ async def test_problem_pack_polygon_requires_full_audit_when_enabled():
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
-        with open(os.path.join(problem_dir, "autocode.json"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(problem_dir, ".autocode"), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "problem_name": "t",
@@ -1846,8 +1850,9 @@ async def test_problem_pack_polygon_enforces_min_limit_case_ratio():
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
         write_verified_workflow_state(problem_dir)
+        os.makedirs(os.path.join(problem_dir, ".autocode"), exist_ok=True)
         with open(
-            os.path.join(problem_dir, "autocode.json"),
+            os.path.join(problem_dir, ".autocode", "manifest.json"),
             "w",
             encoding="utf-8",
         ) as f:

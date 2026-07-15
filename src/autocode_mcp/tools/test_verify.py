@@ -105,7 +105,7 @@ class ProblemVerifyTestsTool(Tool):
                 quality_signals={},
                 results={},
             )
-            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         verify_with_checker = manifest_uses_testlib_checker(manifest_model)
 
         # 默认执行所有验证

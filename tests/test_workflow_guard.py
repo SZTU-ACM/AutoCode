@@ -27,7 +27,8 @@ def write_manifest(problem_dir: Path, *, interactive: bool = False, quality_gate
     }
     if quality_gates is not None:
         manifest["quality_gates"] = quality_gates
-    (problem_dir / "autocode.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (problem_dir / ".autocode").mkdir(parents=True, exist_ok=True)
+    (problem_dir / ".autocode" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_pre_tool_denies_generator_before_validator(tmp_path, capsys):
@@ -353,7 +354,8 @@ def test_pre_tool_denies_interactive_generator_before_interactor(tmp_path, capsy
     problem_dir = tmp_path / "problem"
     (problem_dir / "files").mkdir(parents=True)
     (problem_dir / "solutions").mkdir(parents=True)
-    (problem_dir / "autocode.json").write_text('{"interactive": true}', encoding="utf-8")
+    (problem_dir / ".autocode").mkdir(parents=True, exist_ok=True)
+    (problem_dir / ".autocode" / "manifest.json").write_text('{"interactive": true}', encoding="utf-8")
     state = {
         "problem_dir": str(problem_dir),
         "created": True,
@@ -386,7 +388,8 @@ def test_pre_tool_allows_interactive_generator_with_scripted_interactor(tmp_path
     problem_dir = tmp_path / "problem"
     (problem_dir / "files").mkdir(parents=True)
     (problem_dir / "solutions").mkdir(parents=True)
-    (problem_dir / "autocode.json").write_text('{"interactive": true}', encoding="utf-8")
+    (problem_dir / ".autocode").mkdir(parents=True, exist_ok=True)
+    (problem_dir / ".autocode" / "manifest.json").write_text('{"interactive": true}', encoding="utf-8")
     state = {
         "problem_dir": str(problem_dir),
         "created": True,

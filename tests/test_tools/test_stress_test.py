@@ -439,7 +439,7 @@ int main(int argc, char* argv[]) {
 
 @pytest.mark.asyncio
 async def test_stress_rejects_invalid_autocode_manifest():
-    """损坏的 autocode.json 应返回结构化失败而非未捕获异常。"""
+    """损坏的 manifest.json 应返回结构化失败而非未捕获异常。"""
     tool = StressTestRunTool()
     build_tool = SolutionBuildTool()
     gen_tool = GeneratorBuildTool()
@@ -470,7 +470,8 @@ int main() {
         await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
         await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
         await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
-        with open(os.path.join(tmpdir, "autocode.json"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(tmpdir, ".autocode"), exist_ok=True)
+        with open(os.path.join(tmpdir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
             f.write(
                 '{"schema_version":"1.0","problem_name":"x","interactive":false,'
                 '"stress_comparison":"not-a-valid-mode"}'
@@ -484,7 +485,7 @@ int main() {
 
 @pytest.mark.asyncio
 async def test_stress_rejects_unreadable_autocode_manifest():
-    """非法 UTF-8 的 autocode.json 应返回结构化失败。"""
+    """非法 UTF-8 的 manifest.json 应返回结构化失败。"""
     tool = StressTestRunTool()
     build_tool = SolutionBuildTool()
     gen_tool = GeneratorBuildTool()
@@ -515,7 +516,8 @@ int main() {
         await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
         await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
         await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
-        with open(os.path.join(tmpdir, "autocode.json"), "wb") as f:
+        os.makedirs(os.path.join(tmpdir, ".autocode"), exist_ok=True)
+        with open(os.path.join(tmpdir, ".autocode", "manifest.json"), "wb") as f:
             f.write(b"\xff\xfe\xfd")
 
         result = await tool.execute(problem_dir=tmpdir, trials=2)

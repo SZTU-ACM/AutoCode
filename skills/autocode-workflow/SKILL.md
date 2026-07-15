@@ -71,7 +71,7 @@ Interactive tasks are not just "no validator". They require an explicit protocol
 
 | Gate | Requirement |
 |------|-------------|
-| Problem setup | `problem_create` must create directory structure and `autocode.json` |
+| Problem setup | `problem_create` must create directory structure and `manifest.json` |
 | Standard solution | `solution_build(solution_type="sol")` succeeds |
 | Brute solution | `solution_build(solution_type="brute")` succeeds after sol |
 | Complexity audit | `solution_analyze`, `solution_audit_std`, and `solution_audit_brute` reviewed |
@@ -98,7 +98,7 @@ Use these agents when the risk is material:
 
 Creates:
 
-- `autocode.json`
+- `manifest.json`
 - `solutions/`
 - `files/`
 - `statements/README.md`
@@ -236,7 +236,7 @@ Only package after `problem_verify_tests(passed=true)`.
 
 ## Manifest
 
-Each problem should maintain `autocode.json` as a readable contract. It should describe:
+Each problem should maintain `manifest.json` as a readable contract. It should describe:
 
 - problem name;
 - interactive or non-interactive mode;

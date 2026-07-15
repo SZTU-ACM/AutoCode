@@ -34,14 +34,14 @@ def main() -> int:
                 {
                     "success": False,
                     "problem_dir": str(problem_dir),
-                    "error": f"invalid autocode.json: {exc}",
+                    "error": f"invalid manifest.json: {exc}",
                 },
                 ensure_ascii=False,
             )
         )
         return 1
     if manifest_model is None:
-        print(json.dumps({"success": False, "error": "autocode.json not found"}, ensure_ascii=False))
+        print(json.dumps({"success": False, "error": "manifest.json not found"}, ensure_ascii=False))
         return 1
     manifest = manifest_model.model_dump(mode="json")
     missing = _check_paths(problem_dir, manifest)

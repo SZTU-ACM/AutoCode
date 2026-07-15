@@ -35,7 +35,7 @@ class ProblemAuditTool(Tool):
     def description(self) -> str:
         return """生成完整验题报告。
 
-        聚合 autocode.json、workflow state、测试数据 manifest、题面/题解/解法文件、
+        聚合 manifest.json、workflow state、测试数据 manifest、题面/题解/解法文件、
         problem_verify_tests 质量信号和难度评级 signals。工具只收集确定性证据，
         不调用 LLM。
         """
@@ -58,9 +58,9 @@ class ProblemAuditTool(Tool):
         try:
             manifest = load_manifest(str(problem_path))
         except (ValidationError, OSError, ValueError) as exc:
-            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         if manifest is None:
-            return ToolResult.fail("autocode.json not found")
+            return ToolResult.fail("manifest.json not found")
 
         workflow_state = get_section(problem_path, WORKFLOW) or {}
         tests_manifest = get_section(problem_path, TEST_MANIFEST) or {}
@@ -189,7 +189,7 @@ class ProblemAuditTool(Tool):
         tests_dir = problem_path / "tests"
         tests = sorted(tests_dir.glob("*.in")) if tests_dir.is_dir() else []
         signals = {
-            "manifest": self._signal(True, {"message": "autocode.json parsed"}),
+            "manifest": self._signal(True, {"message": "manifest.json parsed"}),
             "statement_path": self._signal(statement.is_file(), {"path": str(statement)}),
             "tutorial_path": self._signal(tutorial.is_file(), {"path": str(tutorial)}),
             "main_solution_source": self._signal(

@@ -40,7 +40,7 @@ AutoCode 把“AI 出题”拆成一组必须通过的质量门禁：
 | type=3/type=4 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限/TLE 数据差异 |
 | 错解与 manifest 预期不符 | `wrong_solution_kill`：`expected=fail`（默认）须至少一测非 AC 或与标答不一致；`expected=pass` 须全部测例通过（checker 或 exact） |
 | 工作流跳步 | Claude hooks 调用 `scripts/workflow_guard.py`，缺少前置步骤会直接拒绝工具调用 |
-| 打包前状态不清 | `autocode.json` 记录题目契约，`autocode-verify` 可快速检查基础完整性 |
+| 打包前状态不清 | `manifest.json` 记录题目契约，`autocode-verify` 可快速检查基础完整性 |
 
 核心原则：**AI 负责生成候选内容，AutoCode 负责让每一步必须被验证。**
 
@@ -133,7 +133,7 @@ validator_build / checker_build
 
 `files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `tout` 向选手输出并在每次响应后 `tout.flush()`，用 `ouf` 读取选手输出，所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。不要用 `std::cout` 向选手发送交互数据。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的 verdict。
 
-交互题的 `problem_validate` 会检查题面协议要素与 transcript，不会把 transcript 当作普通 stdin/stdout 样例执行。`problem_pack_polygon` 会在 `autocode.json` 标记 `interactive: true` 时声明 `files/interactor.cpp`，并避免无条件引用不存在的 `val.cpp`。
+交互题的 `problem_validate` 会检查题面协议要素与 transcript，不会把 transcript 当作普通 stdin/stdout 样例执行。`problem_pack_polygon` 会在 `manifest.json` 标记 `interactive: true` 时声明 `files/interactor.cpp`，并避免无条件引用不存在的 `val.cpp`。
 
 关键门禁：
 
@@ -151,7 +151,9 @@ validator_build / checker_build
 
 ```text
 <problem_dir>/
-├── autocode.json
+├── .autocode/
+│   ├── manifest.json
+│   └── runtime.json
 ├── solutions/
 │   ├── sol.cpp
 │   └── brute.cpp
@@ -169,9 +171,9 @@ validator_build / checker_build
     └── 01.ans / 01.out
 ```
 
-运行期副产物（workflow 状态、测试 manifest、生成 checkpoint、审计结果）统一收口到 `<problem_dir>/.autocode/runtime.json`，已被 git 忽略。
+运行期副产物（workflow 状态、测试 manifest、生成 checkpoint、审计结果）统一收口到 `<problem_dir>/.autocode/runtime.json`，且 `.autocode/` 通过自身内部的 `.gitignore`（`*`）自忽略，题目根不产生 `.gitignore`。
 
-`autocode.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。可选字段包括 `special_judge`、`stress_comparison`（`exact` | `checker`）、`stress_checker_bidirectional`（仅在与 checker 对拍联用时有效）；错解条目可设 `expected`（`fail` | `pass`）以配合 `wrong_solution_kill`。示例：
+`manifest.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。可选字段包括 `special_judge`、`stress_comparison`（`exact` | `checker`）、`stress_checker_bidirectional`（仅在与 checker 对拍联用时有效）；错解条目可设 `expected`（`fail` | `pass`）以配合 `wrong_solution_kill`。示例：
 
 ```json
 {
@@ -222,7 +224,7 @@ uv run autocode-verify examples/exact-sample
 最终测试数据不是“生成了就算完成”。AutoCode 会要求 `problem_verify_tests` 通过，默认检查：
 
 - `file_count`：每个 `.in` 都有对应答案文件，编号连续。
-- `answer_consistency`：用 `sol` 重跑每个 `.in`。若 `autocode.json` 为 `special_judge: true` 且 `stress_comparison: "checker"`（且已编译 `files/checker`），则用 testlib checker 比对标答；否则与答案文件逐字比对。
+- `answer_consistency`：用 `sol` 重跑每个 `.in`。若 `manifest.json` 为 `special_judge: true` 且 `stress_comparison: "checker"`（且已编译 `files/checker`），则用 testlib checker 比对标答；否则与答案文件逐字比对。
 - `validator`：用 `val` 检查所有输入合法性。
 - `no_empty`：没有空文件。
 - `limit_ratio`：最终数据中 `type=3/4` 至少占一半。
@@ -273,7 +275,7 @@ AutoCode 暴露 22 个 MCP 工具。一般用户不需要手动调用它们，`a
 uv run autocode-audit <problem_dir> --mode full --report audit_report.json
 ```
 
-若在 `autocode.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包。
+若在 `manifest.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包。
 
 ## 示例目录
 
@@ -283,7 +285,7 @@ uv run autocode-audit <problem_dir> --mode full --report audit_report.json
 - `examples/checker-sample`：特殊判题题。
 - `examples/interactive-sample`：交互题。
 
-这些样例主要用于展示 `autocode.json` 契约和 `autocode-verify` 检查，不是完整比赛题包。
+这些样例主要用于展示 `manifest.json` 契约和 `autocode-verify` 检查，不是完整比赛题包。
 
 ## 本地开发
 

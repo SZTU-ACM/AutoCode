@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - MCP server 移除 `prompts` 与 `resources` 能力面（原公开 MCP 契约的一部分）：删除对应模块与 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），仅保留 22 个 Tools。依赖这些端点的外部脚本或裸 MCP 客户端需迁移到 Skills 或 Tools。
+- **题目 manifest 迁移到 `.autocode/manifest.json`**：题目级 manifest 从题目根的 `autocode.json` 改为 `.autocode/manifest.json`。已存在的题目根 `autocode.json` 不再被读取，需迁移到 `.autocode/manifest.json`（字段不变）。`problem_create` 现在初始化 `.autocode/manifest.json` 而非 `autocode.json`。
 
 ### Features
 
@@ -26,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **运行期副产物收口**
   - 所有非题目运行期产物统一写入题目目录的 `.autocode/runtime.json`（键 `workflow` / `test_manifest` / `generate_checkpoint` / `audit`），消除散落的 `.autocode-workflow/state.json`、`tests/.autocode_tests_manifest.json`、`.autocode_generate_state.json`、根 `audit_report.json`。
   - 新增 `src/autocode_mcp/runtime_store.py` 统一收口文件名/路径；`problem.py` / `test_verify.py` / `audit.py` / `hook_state.py` 迁移到 `runtime_store`，删除各自重复的常量。
-  - `problem_create` 在新建题目目录时写入 `.gitignore`（含 `.autocode/`），由题目项目自身忽略运行期副产物（AutoCode 仓库根不忽略 `.autocode/`）。
+  - `problem_create` 现在只创建 `.autocode/` 目录并在其中写入自忽略 `.gitignore`（内容 `*`），使整个运行期副产物目录对题目 git 仓库零痕迹，不再在题目根生成 `.gitignore`（AutoCode 仓库根不忽略 `.autocode/`）。
+- **题目 manifest 收口到 `.autocode/`**
+  - 题目级 manifest 从题目根的 `autocode.json` 迁移到 `.autocode/manifest.json`；`workflow/manifest.py` 的 `manifest_path()` 改为返回 `problem_dir/.autocode/manifest.json`，并复用 `runtime_store.RUNTIME_DIR_NAME`。
+  - 全部读写路径（`problem.py`、`verify` / `validation` / `test_verify` / `stress_test` / `audit`、hook 脚本 `hook_state.py` / `hook_gates.py`）统一引用 `manifest.json`，错误文案与注释同步更新。
+  - 模板 `src/autocode_mcp/templates/autocode.json` 改名为 `templates/manifest.json`；`examples/*-sample` 的 `autocode.json` 重建为 `.autocode/manifest.json`（内容不变）。
 
 ### Documentation
 

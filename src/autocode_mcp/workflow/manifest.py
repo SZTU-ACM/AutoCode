@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..runtime_store import RUNTIME_DIR_NAME
 from .models import AutoCodeManifest, CasePlanItem, SolutionEntry
 
-MANIFEST_NAME = "autocode.json"
+MANIFEST_NAME = "manifest.json"
 
 
 def manifest_path(problem_dir: str) -> Path:
-    return Path(problem_dir) / MANIFEST_NAME
+    return Path(problem_dir) / RUNTIME_DIR_NAME / MANIFEST_NAME
 
 
 def default_manifest(problem_name: str, interactive: bool = False) -> AutoCodeManifest:
@@ -67,7 +68,7 @@ def load_manifest(problem_dir: str) -> AutoCodeManifest | None:
     try:
         content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise ValueError(f"cannot read autocode.json: {exc}") from exc
+        raise ValueError(f"cannot read manifest.json: {exc}") from exc
     return AutoCodeManifest.model_validate_json(content)
 
 

@@ -62,7 +62,7 @@ class ProblemValidateTool(Tool):
         try:
             manifest_model = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
-            return ToolResult.fail(f"invalid or unreadable autocode.json: {exc}")
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         if manifest_model is not None and manifest_model.interactive:
             return await self._validate_interactive_problem(
                 problem_dir=problem_dir,

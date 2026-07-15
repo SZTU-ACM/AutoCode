@@ -293,7 +293,7 @@ PRE_GATES: dict[str, list[Gate]] = {
         (_is_non_interactive, "交互题不应构建 checker，请使用 interactor_build。"),
         (
             _checker_build_prereq_ok,
-            "须先通过 stress_test_run；或在 autocode.json 设 special_judge 并完成与 stress 相同的前置步骤后再编译 checker。",
+            "须先通过 stress_test_run；或在 manifest.json 设 special_judge 并完成与 stress 相同的前置步骤后再编译 checker。",
         ),
     ],
     "problem_validate": [

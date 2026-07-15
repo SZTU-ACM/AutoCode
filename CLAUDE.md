@@ -62,7 +62,7 @@ AutoCode/
 │   ├── cli/               # autocode-verify 等 CLI
 │   ├── tools/             # MCP 工具实现
 │   ├── templates/         # 内置模板资源
-│   ├── workflow/          # autocode.json manifest 模型
+│   ├── workflow/          # manifest.json manifest 模型
 │   └── utils/             # 编译、运行、资源限制等工具函数
 ├── tests/                 # 测试用例
 ├── .mcp.json              # 本地 MCP 接入配置（开发/兼容用）
@@ -90,7 +90,9 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 ```text
 <problem_dir>/
-├── autocode.json
+├── .autocode/
+│   ├── manifest.json
+│   └── runtime.json
 ├── solutions/
 │   ├── sol.cpp
 │   └── brute.cpp
@@ -137,7 +139,7 @@ AutoCode 当前暴露 22 个 MCP 工具：
 4. 解法审计：`solution_analyze`、`solution_audit_std`、`solution_audit_brute`
 5. 非交互题：`validator_build(accuracy >= 0.9)`；交互题：`interactor_build`
 6. `generator_build`
-7. `checker_build` 与 `stress_test_run`：`scripts/workflow_guard.py` 规定，非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`（非交互）。若在 `autocode.json` 设置 `special_judge: true` 且 `stress_comparison: "checker"`，可在 stress **之前**先完成 `checker_build`，且 `stress_test_run` 会用 checker 判定 sol/brute（详见内置 checker 提示词中的 argv 约定）。
+7. `checker_build` 与 `stress_test_run`：`scripts/workflow_guard.py` 规定，非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`（非交互）。若在 `manifest.json` 设置 `special_judge: true` 且 `stress_comparison: "checker"`，可在 stress **之前**先完成 `checker_build`，且 `stress_test_run` 会用 checker 判定 sol/brute（详见内置 checker 提示词中的 argv 约定）。
 8. `problem_validate(validation_passed)`（交互题验证协议与 transcript，不按普通 stdin/stdout 样例执行）
 9. `problem_generate_tests(generated_test_count > 0)`
 10. `problem_verify_tests(passed)`（`special_judge` 时以 checker 校验终测与错解，而非仅字符串比对）
@@ -181,13 +183,13 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 ## Manifest
 
-每个题目应维护 `autocode.json` 作为人类和 CI 都可读的题目契约。模型位于 `src/autocode_mcp/workflow/`，模板位于 `src/autocode_mcp/templates/autocode.json`。
+每个题目应维护 `manifest.json`（位于 `.autocode/`）作为人类和 CI 都可读的题目契约。模型位于 `src/autocode_mcp/workflow/`，模板位于 `src/autocode_mcp/templates/manifest.json`。
 
 常用字段补充：
 
 - `special_judge` / `stress_comparison`（`exact` | `checker`）/ 可选 `stress_checker_bidirectional`：控制对拍、终测、错解杀伤与样例校验是否走 testlib checker（须 `checker_build` 且存在 `files/checker`）。仅 `special_judge` 而 `stress_comparison=exact` 时终测等仍以字符串比对标答文件为主。
 - `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
-- `load_manifest` 若遇 `autocode.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误而非裸 traceback。
+- `load_manifest` 若遇 `manifest.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误而非裸 traceback。
 - `audit_gates` 控制 full audit、validator/checker/interactor 自测、题面一致性与难度置信度等发布前门禁。
 - `difficulty` 记录规则/LLM 难度评级的结果字段；`problem_audit(include_difficulty=true)` 会先产出确定性 signals。
 
