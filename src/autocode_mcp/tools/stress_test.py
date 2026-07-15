@@ -12,10 +12,10 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
+from ..runtime_store import WORKFLOW, get_section
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
-from ..runtime_store import WORKFLOW, get_section
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import StressTestRunInput

@@ -16,13 +16,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ..runtime_store import TEST_MANIFEST, WORKFLOW, get_section, set_section
 from ..utils.answer_ext import normalize_answer_ext
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker, verdict_from_run
 from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from ..workflow.models import AutoCodeManifest
-from ..runtime_store import TEST_MANIFEST, WORKFLOW, get_section, set_section, update_section
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import ProblemVerifyTestsInput
 

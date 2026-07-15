@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from autocode_mcp.runtime_store import get_section, set_section
 from autocode_mcp.tools.build_all import ProblemBuildAllTool
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.problem import (
@@ -21,7 +22,6 @@ from autocode_mcp.tools.problem import (
 )
 from autocode_mcp.tools.solution import SolutionBuildTool
 from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
-from autocode_mcp.runtime_store import get_section, set_section
 from autocode_mcp.utils.compiler import RunResult
 from autocode_mcp.utils.platform import get_exe_extension
 from autocode_mcp.workflow.models import AutoCodeManifest, SolutionEntry

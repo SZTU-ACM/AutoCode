@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import shutil
 import time
@@ -17,6 +16,15 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ..runtime_store import (
+    AUDIT,
+    GENERATE_CHECKPOINT,
+    TEST_MANIFEST,
+    WORKFLOW,
+    get_section,
+    set_section,
+    update_section,
+)
 from ..utils.answer_ext import normalize_answer_ext
 from ..utils.compiler import RunResult, run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
@@ -27,15 +35,6 @@ from ..workflow import (
     load_manifest,
     manifest_uses_testlib_checker,
     save_manifest,
-)
-from ..runtime_store import (
-    AUDIT,
-    GENERATE_CHECKPOINT,
-    TEST_MANIFEST,
-    WORKFLOW,
-    get_section,
-    set_section,
-    update_section,
 )
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import (
@@ -1105,7 +1104,6 @@ class ProblemCleanupProcessesTool(Tool):
     async def execute(self, problem_dir: str, kill_all_generators: bool = True) -> ToolResult:
         # 默认即巡检并回收残留 PID（不再直接返回 success）；回收前用 psutil 校验存活，
         # 已退出的 PID 跳过不报错，POSIX 下按进程组整树回收。
-        tests_dir = os.path.join(problem_dir, "tests")
         state = self._load_cleanup_state(problem_dir) or {}
         removed_files: list[str] = []
         pids = state.get("active_pids", []) if isinstance(state, dict) else []

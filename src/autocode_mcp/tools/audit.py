@@ -14,10 +14,10 @@ from typing import Literal
 
 from pydantic import ValidationError
 
+from ..runtime_store import AUDIT, TEST_MANIFEST, WORKFLOW, get_section, set_section
 from ..workflow import check_gates, load_manifest, manifest_uses_testlib_checker
 from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from ..workflow.models import AutoCodeManifest
-from ..runtime_store import AUDIT, TEST_MANIFEST, WORKFLOW, get_section, set_section
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import analyze_loop_complexity, detect_algorithm_patterns
 from .schemas import ProblemAuditInput
