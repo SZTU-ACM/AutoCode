@@ -28,6 +28,15 @@ from ..workflow import (
     manifest_uses_testlib_checker,
     save_manifest,
 )
+from ..runtime_store import (
+    AUDIT,
+    GENERATE_CHECKPOINT,
+    TEST_MANIFEST,
+    WORKFLOW,
+    get_section,
+    set_section,
+    update_section,
+)
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import (
     ProblemCleanupProcessesInput,
@@ -58,8 +67,6 @@ class _CandidateOutcome:
 
 # 最终测试集中「极限类」占比下限：至少一半来自 generator type 3/4（extreme + TLE 压力）
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
-_TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
-_GENERATE_STATE_FILENAME = ".autocode_generate_state.json"
 
 
 class ProblemCreateTool(Tool):
@@ -107,6 +114,12 @@ class ProblemCreateTool(Tool):
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
                 created_dirs.append(dir_path)
+
+        # 题目级 .gitignore：忽略运行期副产物 .autocode/
+        gitignore_path = os.path.join(problem_dir, ".gitignore")
+        if not os.path.exists(gitignore_path):
+            with open(gitignore_path, "w", encoding="utf-8") as f:
+                f.write(".autocode/\n")
 
         # 复制 testlib.h
         from .. import TEMPLATES_DIR
@@ -358,7 +371,6 @@ class ProblemGenerateTestsTool(Tool):
         # Validator 是否可用
         validator_available = enable_validator_filter and os.path.exists(val_exe)
 
-        state_path = os.path.join(tests_dir, _GENERATE_STATE_FILENAME)
         start_ts = time.time()
 
         # 获取测试配置
@@ -392,13 +404,13 @@ class ProblemGenerateTestsTool(Tool):
             "target_candidates": candidate_count,
             "generated_tests": 0,
             "test_count": test_count,
-            "state_path": state_path,
+            "state_path": os.path.join(problem_dir, ".autocode", "runtime.json"),
         }
         active_pids: set[int] = set()
         generator_tle_extra_args_fallbacks = 0
 
         if resume:
-            restored = self._load_state(state_path)
+            restored = self._load_state(problem_dir)
             if restored:
                 seed = int(restored.get("next_seed", 1))
                 candidates = self._restore_candidates(restored.get("candidates", []))
@@ -430,7 +442,7 @@ class ProblemGenerateTestsTool(Tool):
             elapsed = time.time() - start_ts
             if hard_timeout_seconds and elapsed >= hard_timeout_seconds:
                 self._save_state(
-                    state_path,
+                    problem_dir,
                     phase="timed_out",
                     next_seed=seed,
                     candidates=candidates,
@@ -487,7 +499,7 @@ class ProblemGenerateTestsTool(Tool):
                 )
             except asyncio.CancelledError:
                 self._save_state(
-                    state_path,
+                    problem_dir,
                     phase="cancelled",
                     next_seed=seed,
                     candidates=candidates,
@@ -515,7 +527,7 @@ class ProblemGenerateTestsTool(Tool):
             progress_snapshot["candidates_generated"] = len(candidates)
             if len(candidates) % checkpoint_every == 0:
                 self._save_state(
-                    state_path,
+                    problem_dir,
                     phase="candidate_generation",
                     next_seed=seed + 1,
                     candidates=candidates,
@@ -561,22 +573,18 @@ class ProblemGenerateTestsTool(Tool):
                 }
             )
 
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "version": 1,
-                    "answer_ext": normalized_answer_ext,
-                    "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
-                    "tests": test_manifest,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-
-        if os.path.exists(state_path):
-            os.remove(state_path)
+        set_section(
+            problem_dir,
+            TEST_MANIFEST,
+            {
+                "version": 1,
+                "answer_ext": normalized_answer_ext,
+                "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
+                "tests": test_manifest,
+            },
+        )
+        # 生成检查点已写入 runtime store，清空以免残留。
+        set_section(problem_dir, GENERATE_CHECKPOINT, {})
         # 统计信息
         type_counts: dict[str, int] = {}
         for c in final_tests:
@@ -611,7 +619,7 @@ class ProblemGenerateTestsTool(Tool):
             )
         else:
             self._save_state(
-                state_path,
+                problem_dir,
                 phase="partial",
                 next_seed=seed,
                 candidates=candidates,
@@ -635,28 +643,16 @@ class ProblemGenerateTestsTool(Tool):
             )
 
     def _mark_tests_unverified(self, problem_dir: str) -> None:
-        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
-        try:
-            if os.path.exists(state_path):
-                with open(state_path, encoding="utf-8") as f:
-                    state = json.load(f)
-            else:
-                state = {}
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            state = {}
-        if not isinstance(state, dict):
-            state = {}
-        state["tests_verified"] = False
-        state["verify_signals"] = {}
-        state["limit_case_ratio"] = None
-        state["full_audit_passed"] = False
-        state["full_audit"] = {}
-        try:
-            os.makedirs(os.path.dirname(state_path), exist_ok=True)
-            with open(state_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        update_section(
+            problem_dir,
+            WORKFLOW,
+            {
+                "tests_verified": False,
+                "verify_signals": {},
+                "limit_case_ratio": None,
+            },
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
 
     def _resolve_tests_dir(
         self,
@@ -704,12 +700,7 @@ class ProblemGenerateTestsTool(Tool):
         """创建测试目录并清理旧的 .in/.answer_ext 文件。"""
         os.makedirs(tests_dir, exist_ok=True)
         for filename in os.listdir(tests_dir):
-            if not (
-                filename.endswith(".in")
-                or filename.endswith(answer_ext)
-                or filename == _TEST_MANIFEST_FILENAME
-                or filename == _GENERATE_STATE_FILENAME
-            ):
+            if not (filename.endswith(".in") or filename.endswith(answer_ext)):
                 continue
             path = os.path.join(tests_dir, filename)
             if os.path.isfile(path):
@@ -841,7 +832,7 @@ class ProblemGenerateTestsTool(Tool):
 
     def _save_state(
         self,
-        state_path: str,
+        problem_dir: str,
         *,
         phase: str,
         next_seed: int,
@@ -851,41 +842,32 @@ class ProblemGenerateTestsTool(Tool):
         active_pids: set[int] | None = None,
         message: str | None = None,
     ) -> None:
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "version": 1,
-                    "phase": phase,
-                    "next_seed": next_seed,
-                    "answer_ext": answer_ext,
-                    "message": message,
-                    "active_pids": sorted(active_pids or []),
-                    "candidates": [
-                        {
-                            "input_data": c.input_data,
-                            "output_data": c.output_data,
-                            "type_param": c.type_param,
-                            "signature": c.signature,
-                        }
-                        for c in candidates
-                    ],
-                    "errors": [{"seed": seed, "error": err} for seed, err in errors[-200:]],
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
+        set_section(
+            problem_dir,
+            GENERATE_CHECKPOINT,
+            {
+                "version": 1,
+                "phase": phase,
+                "next_seed": next_seed,
+                "answer_ext": answer_ext,
+                "message": message,
+                "active_pids": sorted(active_pids or []),
+                "candidates": [
+                    {
+                        "input_data": c.input_data,
+                        "output_data": c.output_data,
+                        "type_param": c.type_param,
+                        "signature": c.signature,
+                    }
+                    for c in candidates
+                ],
+                "errors": [{"seed": seed, "error": err} for seed, err in errors[-200:]],
+            },
+        )
 
-    def _load_state(self, state_path: str) -> dict | None:
-        if not os.path.exists(state_path):
-            return None
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else None
-        except (OSError, json.JSONDecodeError):
-            return None
+    def _load_state(self, problem_dir: str) -> dict | None:
+        state = get_section(problem_dir, GENERATE_CHECKPOINT)
+        return state if isinstance(state, dict) else None
 
     def _restore_candidates(self, raw_candidates: list[dict]) -> list[CandidateTest]:
         out: list[CandidateTest] = []
@@ -1124,8 +1106,7 @@ class ProblemCleanupProcessesTool(Tool):
         # 默认即巡检并回收残留 PID（不再直接返回 success）；回收前用 psutil 校验存活，
         # 已退出的 PID 跳过不报错，POSIX 下按进程组整树回收。
         tests_dir = os.path.join(problem_dir, "tests")
-        state_path = os.path.join(tests_dir, _GENERATE_STATE_FILENAME)
-        state = self._load_cleanup_state(state_path) or {}
+        state = self._load_cleanup_state(problem_dir) or {}
         removed_files: list[str] = []
         pids = state.get("active_pids", []) if isinstance(state, dict) else []
         if not isinstance(pids, list):
@@ -1148,7 +1129,7 @@ class ProblemCleanupProcessesTool(Tool):
             # 仅保留仍失败的 PID 供重试；已杀与已退出的均从状态移除。
             failed_pid_set = {int(item["pid"]) for item in failed}
             remaining_pids = [pid for pid in valid_pids if pid in failed_pid_set]
-            self._write_cleanup_state(state_path, remaining_pids)
+            self._write_cleanup_state(problem_dir, remaining_pids)
             return ToolResult.ok(
                 removed_files=removed_files,
                 killed_pids=killed,
@@ -1160,26 +1141,12 @@ class ProblemCleanupProcessesTool(Tool):
         except Exception as exc:
             return ToolResult.fail(f"cleanup failed: {exc}", removed_files=removed_files)
 
-    def _load_cleanup_state(self, state_path: str) -> dict | None:
-        if not os.path.exists(state_path):
-            return None
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except (OSError, json.JSONDecodeError):
-            return None
-        return None
+    def _load_cleanup_state(self, problem_dir: str) -> dict | None:
+        state = get_section(problem_dir, GENERATE_CHECKPOINT)
+        return state if isinstance(state, dict) else None
 
-    def _write_cleanup_state(self, state_path: str, remaining_pids: list[int]) -> None:
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
-        state = self._load_cleanup_state(state_path) or {}
-        if not isinstance(state, dict):
-            state = {}
-        state["active_pids"] = remaining_pids
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+    def _write_cleanup_state(self, problem_dir: str, remaining_pids: list[int]) -> None:
+        update_section(problem_dir, GENERATE_CHECKPOINT, {"active_pids": remaining_pids})
 
 
 def _pack_polygon_files(problem_dir: str) -> dict[str, list[str]]:
@@ -1335,15 +1302,10 @@ class ProblemPackPolygonTool(Tool):
         if not in_files:
             return ToolResult.fail("no test input files found, run problem_generate_tests first")
 
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
         answer_ext = ".ans"
-        if os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, encoding="utf-8") as mf:
-                    manifest = json.load(mf)
-                answer_ext = normalize_answer_ext(str(manifest.get("answer_ext", ".ans"))) or ".ans"
-            except (OSError, json.JSONDecodeError):
-                answer_ext = ".ans"
+        _test_manifest = get_section(problem_dir, TEST_MANIFEST)
+        if isinstance(_test_manifest, dict):
+            answer_ext = normalize_answer_ext(str(_test_manifest.get("answer_ext", ".ans"))) or ".ans"
 
         missing_answers = [
             in_file for in_file in in_files if not os.path.exists(
@@ -1365,7 +1327,6 @@ class ProblemPackPolygonTool(Tool):
         if not os.path.exists(sol_source) and not os.path.exists(root_sol_source):
             return ToolResult.fail("main solution source missing: solutions/sol.cpp")
 
-        workflow_state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
         # 门禁配置统一从 Pydantic manifest 读取；存在但损坏即阻断，缺失则回退默认门禁（保持向后兼容）。
         try:
             manifest_model = load_manifest(problem_dir)
@@ -1392,47 +1353,36 @@ class ProblemPackPolygonTool(Tool):
         if is_interactive_problem and not os.path.exists(interactor_cpp) and not os.path.exists(root_interactor_cpp):
             return ToolResult.fail("interactive problem requires files/interactor.cpp")
 
-        workflow_state: dict[str, object] = {}
-        if os.path.exists(workflow_state_path):
-            try:
-                with open(workflow_state_path, encoding="utf-8") as sf:
-                    workflow_state = json.load(sf)
-            except (OSError, json.JSONDecodeError):
+        workflow_state = get_section(problem_dir, WORKFLOW)
+        if not isinstance(workflow_state, dict):
+            if require_tests_verified:
                 return ToolResult.fail(
-                    "invalid workflow state file, rerun verification steps",
-                    stage="problem_pack_polygon",
-                    gate="workflow_state_readable",
-                    required=True,
-                    actual=False,
-                )
-            if not isinstance(workflow_state, dict):
-                workflow_state = {}
-            if require_tests_verified and not bool(workflow_state.get("tests_verified", False)):
-                return ToolResult.fail(
-                    "tests are not verified, run problem_verify_tests first",
+                    "workflow state missing, run problem_verify_tests first",
                     stage="problem_pack_polygon",
                     gate="require_tests_verified",
                     required=True,
                     actual=False,
-                    tests_verified=False,
                 )
-        elif require_tests_verified:
+            workflow_state = {}
+        if require_tests_verified and not bool(workflow_state.get("tests_verified", False)):
             return ToolResult.fail(
-                "workflow state missing, run problem_verify_tests first",
+                "tests are not verified, run problem_verify_tests first",
                 stage="problem_pack_polygon",
                 gate="require_tests_verified",
                 required=True,
                 actual=False,
-                workflow_state_path=workflow_state_path,
+                tests_verified=False,
             )
 
         verify_signals = workflow_state.get("verify_signals", {}) if isinstance(workflow_state, dict) else {}
         if not isinstance(verify_signals, dict):
             verify_signals = {}
         if require_full_audit:
-            full_audit = workflow_state.get("full_audit", {}) if isinstance(workflow_state, dict) else {}
+            audit_state = get_section(problem_dir, AUDIT)
+            full_audit = audit_state.get("full_audit", {}) if isinstance(audit_state, dict) else {}
             if not isinstance(full_audit, dict):
                 full_audit = {}
+            full_audit_passed = bool(audit_state.get("full_audit_passed", False)) if isinstance(audit_state, dict) else False
             try:
                 full_audit_blocking_count = int(full_audit.get("blocking_issue_count", 1))
             except (TypeError, ValueError):
@@ -1440,7 +1390,7 @@ class ProblemPackPolygonTool(Tool):
             if (
                 full_audit.get("mode") != "full"
                 or full_audit.get("decision") != "go"
-                or not bool(workflow_state.get("full_audit_passed", False))
+                or not full_audit_passed
                 or full_audit_blocking_count != 0
             ):
                 return ToolResult.fail(
@@ -1497,21 +1447,17 @@ class ProblemPackPolygonTool(Tool):
             )
 
         limit_ratio_from_manifest = None
-        if os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, encoding="utf-8") as mf:
-                    tests_manifest = json.load(mf)
-                tests = tests_manifest.get("tests", [])
-                if isinstance(tests, list) and tests:
-                    total = len(tests)
-                    limit_count = sum(
-                        1
-                        for item in tests
-                        if isinstance(item, dict) and str(item.get("type_param")) in _LIMIT_STRATEGY_TYPES
-                    )
-                    limit_ratio_from_manifest = limit_count / total
-            except (OSError, json.JSONDecodeError):
-                limit_ratio_from_manifest = None
+        tests_manifest = get_section(problem_dir, TEST_MANIFEST)
+        if isinstance(tests_manifest, dict):
+            tests = tests_manifest.get("tests", [])
+            if isinstance(tests, list) and tests:
+                total = len(tests)
+                limit_count = sum(
+                    1
+                    for item in tests
+                    if isinstance(item, dict) and str(item.get("type_param")) in _LIMIT_STRATEGY_TYPES
+                )
+                limit_ratio_from_manifest = limit_count / total
         if limit_ratio_from_manifest is not None and limit_ratio_from_manifest < min_limit_case_ratio:
             return ToolResult.fail(
                 "limit case ratio is below quality_gates.min_limit_case_ratio",

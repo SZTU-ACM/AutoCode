@@ -2,12 +2,12 @@
 Stress Test 工具组测试。
 """
 
-import json
 import os
 import tempfile
 
 import pytest
 
+from autocode_mcp.runtime_store import set_section
 from autocode_mcp.tools.generator import GeneratorBuildTool
 from autocode_mcp.tools.solution import SolutionBuildTool
 from autocode_mcp.tools.stress_test import StressTestRunTool
@@ -365,16 +365,14 @@ int main() {
         await gen_tool.execute(problem_dir=tmpdir, code=simple_gen)
         await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=simple_sol)
         await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=simple_sol)
-        workflow_dir = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(workflow_dir, exist_ok=True)
-        with open(os.path.join(workflow_dir, "state.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "brute_complexity": "O(2^n)",
-                    "recommended_stress_params": {"n_max": 8, "trials": 500},
-                },
-                f,
-            )
+        set_section(
+            tmpdir,
+            "workflow",
+            {
+                "brute_complexity": "O(2^n)",
+                "recommended_stress_params": {"n_max": 8, "trials": 500},
+            },
+        )
 
         result = await tool.execute(problem_dir=tmpdir, trials=1, n_max=100)
         assert result.success
@@ -535,9 +533,9 @@ def test_load_complexity_context_missing_state_returns_empty():
 def test_load_complexity_context_invalid_json_returns_empty():
     tool = StressTestRunTool()
     with tempfile.TemporaryDirectory() as tmpdir:
-        wf = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(wf, exist_ok=True)
-        with open(os.path.join(wf, "state.json"), "w", encoding="utf-8") as f:
+        runtime_file = os.path.join(tmpdir, ".autocode", "runtime.json")
+        os.makedirs(os.path.dirname(runtime_file), exist_ok=True)
+        with open(runtime_file, "w", encoding="utf-8") as f:
             f.write("{not json")
         assert tool._load_complexity_context(tmpdir) == {}
 
@@ -545,8 +543,8 @@ def test_load_complexity_context_invalid_json_returns_empty():
 def test_load_complexity_context_non_object_returns_empty():
     tool = StressTestRunTool()
     with tempfile.TemporaryDirectory() as tmpdir:
-        wf = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(wf, exist_ok=True)
-        with open(os.path.join(wf, "state.json"), "w", encoding="utf-8") as f:
+        runtime_file = os.path.join(tmpdir, ".autocode", "runtime.json")
+        os.makedirs(os.path.dirname(runtime_file), exist_ok=True)
+        with open(runtime_file, "w", encoding="utf-8") as f:
             f.write("[1,2]")
         assert tool._load_complexity_context(tmpdir) == {}

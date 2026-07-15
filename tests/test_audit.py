@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import autocode_mcp.tools.test_verify as tv
+from autocode_mcp.runtime_store import get_section, set_section
 from autocode_mcp.tools.audit import ProblemAuditTool
 from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
 from autocode_mcp.workflow import default_manifest, save_manifest
@@ -15,7 +16,6 @@ def _write_basic_problem(tmp_path: Path) -> Path:
     (problem_dir / "statements").mkdir(parents=True)
     (problem_dir / "solutions").mkdir()
     (problem_dir / "tests").mkdir()
-    (problem_dir / ".autocode-workflow").mkdir()
     (problem_dir / "statements" / "README.md").write_text(
         "# P\n\n## 样例\n\n### 样例输入 #1\n```text\n1\n```\n\n### 样例输出 #1\n```text\n1\n```\n",
         encoding="utf-8",
@@ -31,37 +31,35 @@ def _write_basic_problem(tmp_path: Path) -> Path:
     for i, _type_param in enumerate(["1", "2", "3", "4"], 1):
         (problem_dir / "tests" / f"{i:02d}.in").write_text(f"{i}\n", encoding="utf-8")
         (problem_dir / "tests" / f"{i:02d}.ans").write_text(f"{i}\n", encoding="utf-8")
-    (problem_dir / "tests" / ".autocode_tests_manifest.json").write_text(
-        json.dumps(
-            {
-                "tests": [
-                    {
-                        "in_file": f"{i:02d}.in",
-                        "ans_file": f"{i:02d}.ans",
-                        "type_param": type_param,
-                        "group": "g",
-                        "purpose": f"type {type_param}",
-                    }
-                    for i, type_param in enumerate(["1", "2", "3", "4"], 1)
-                ]
-            }
-        ),
-        encoding="utf-8",
+    set_section(
+        str(problem_dir),
+        "test_manifest",
+        {
+            "tests": [
+                {
+                    "in_file": f"{i:02d}.in",
+                    "ans_file": f"{i:02d}.ans",
+                    "type_param": type_param,
+                    "group": "g",
+                    "purpose": f"type {type_param}",
+                }
+                for i, type_param in enumerate(["1", "2", "3", "4"], 1)
+            ]
+        },
     )
     save_manifest(str(problem_dir), default_manifest("P"))
-    (problem_dir / ".autocode-workflow" / "state.json").write_text(
-        json.dumps(
-            {
-                "tests_verified": True,
-                "verify_signals": {
-                    "limit_semantics": {"executed": True, "passed": True},
-                    "validator_check": {"executed": True, "passed": True},
-                    "wrong_solution_kill": {"executed": True, "passed": True},
-                    "answer_consistency": {"executed": True, "passed": True},
-                },
-            }
-        ),
-        encoding="utf-8",
+    set_section(
+        str(problem_dir),
+        "workflow",
+        {
+            "tests_verified": True,
+            "verify_signals": {
+                "limit_semantics": {"executed": True, "passed": True},
+                "validator_check": {"executed": True, "passed": True},
+                "wrong_solution_kill": {"executed": True, "passed": True},
+                "answer_consistency": {"executed": True, "passed": True},
+            },
+        },
     )
     return problem_dir
 
@@ -86,10 +84,7 @@ def test_problem_verify_static_quality_checks(tmp_path):
     tests_dir.mkdir()
     (tests_dir / "01.in").write_text("1\n", encoding="utf-8")
     (tests_dir / "02.in").write_text("1\n", encoding="utf-8")
-    (tests_dir / ".autocode_tests_manifest.json").write_text(
-        json.dumps({"tests": [{"in_file": "01.in", "type_param": "1"}]}),
-        encoding="utf-8",
-    )
+    set_section(str(tmp_path), "test_manifest", {"tests": [{"in_file": "01.in", "type_param": "1"}]})
     tool = ProblemVerifyTestsTool()
     duplicate = tool._check_duplicate_inputs(str(tests_dir))
     scale = tool._check_scale_distribution(str(tests_dir))
@@ -111,9 +106,9 @@ async def test_problem_audit_full_go_and_writes_report(tmp_path):
     assert result.success
     assert result.data["decision"] == "go"
     assert (problem_dir / "audit_report.json").is_file()
-    state = json.loads((problem_dir / ".autocode-workflow" / "state.json").read_text())
-    assert state["full_audit"]["decision"] == "go"
-    assert state["full_audit_passed"] is True
+    audit = get_section(problem_dir, "audit")
+    assert audit["full_audit"]["decision"] == "go"
+    assert audit["full_audit_passed"] is True
     assert result.data["difficulty_signals"]["rating"] >= 800
 
 
@@ -135,10 +130,7 @@ async def test_problem_audit_respects_statement_consistency_override(tmp_path):
 @pytest.mark.asyncio
 async def test_problem_audit_blocks_missing_purpose_coverage(tmp_path):
     problem_dir = _write_basic_problem(tmp_path)
-    (problem_dir / "tests" / ".autocode_tests_manifest.json").write_text(
-        json.dumps({"tests": [{"in_file": "01.in", "type_param": "1"}]}),
-        encoding="utf-8",
-    )
+    set_section(str(problem_dir), "test_manifest", {"tests": [{"in_file": "01.in", "type_param": "1"}]})
 
     result = await ProblemAuditTool().execute(problem_dir=str(problem_dir), mode="full")
 

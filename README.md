@@ -1,7 +1,5 @@
 # AutoCode
 
-[![PyPI version](https://img.shields.io/pypi/v/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/autocode-mcp.svg)](https://pypi.org/project/autocode-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
@@ -82,6 +80,19 @@ claude plugin install autocode@autocode-marketplace
 - Hooks：`SessionStart`、`PreToolUse`、`PostToolUse`
 - MCP server：`autocode-mcp`
 
+### 让 AI 帮你安装（或更新）
+
+不想手动敲命令？把下面这段直接复制发给你的任意 AI 助手（Claude Code、ChatGPT 等），它会自动执行安装或更新：
+
+```text
+请帮我安装或更新 AutoCode 这个 Claude Code 插件。步骤：
+1. 运行 `claude plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git`（若已添加可忽略）
+2. 运行 `claude plugin install autocode@autocode-marketplace`；若已安装则更新到最新版
+3. 安装完成后，简要告诉我如何开始第一道竞赛编程题
+```
+
+该 prompt 由 AI 读取并执行 CLI，不会触碰你的题目数据；安装来源固定为官方 marketplace 仓库。
+
 ### 在 Claude Code 中使用
 
 安装完成后，可以直接描述你的出题目标：
@@ -155,9 +166,10 @@ validator_build / checker_build
 │   └── tutorial.md
 └── tests/
     ├── 01.in
-    ├── 01.ans / 01.out
-    └── .autocode_tests_manifest.json
+    └── 01.ans / 01.out
 ```
+
+运行期副产物（workflow 状态、测试 manifest、生成 checkpoint、审计结果）统一收口到 `<problem_dir>/.autocode/runtime.json`，已被 git 忽略。
 
 `autocode.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。可选字段包括 `special_judge`、`stress_comparison`（`exact` | `checker`）、`stress_checker_bidirectional`（仅在与 checker 对拍联用时有效）；错解条目可设 `expected`（`fail` | `pass`）以配合 `wrong_solution_kill`。示例：
 
@@ -228,7 +240,7 @@ uv run autocode-verify examples/exact-sample
 实战注意事项：
 
 - 使用 testlib validator 时，结束前必须调用 `inf.readEof()`；如果希望容忍尾部空白，推荐 `inf.seekEof(); inf.readEof();`。
-- `stress_test_run` 会在返回中附带 `complexity_context`（来自 `.autocode-workflow/state.json`，由 `solution_analyze` / `solution_audit_brute` 等步骤写入）以及 `n_max_advisory`；**请由 LLM 根据证据与题意决定** `n_max` 等参数。兼容旧调用方时仍提供同内容的 `n_max_warning` 别名。
+- `stress_test_run` 会在返回中附带 `complexity_context`（来自 `<problem_dir>/.autocode/runtime.json` 的 `workflow` 键，由 `solution_analyze` / `solution_audit_brute` 等步骤写入）以及 `n_max_advisory`；**请由 LLM 根据证据与题意决定** `n_max` 等参数。兼容旧调用方时仍提供同内容的 `n_max_warning` 别名。
 - 编写 brute 时必须直接模拟题目约束本身，避免把“必须同时满足的条件”误简化成“可任选子集”的模型。
 
 ## 工具列表
@@ -273,45 +285,13 @@ uv run autocode-audit <problem_dir> --mode full --report audit_report.json
 
 这些样例主要用于展示 `autocode.json` 契约和 `autocode-verify` 检查，不是完整比赛题包。
 
-## 直接使用 MCP server
+## 本地开发
 
-Claude Code plugin 是推荐入口。如果你只想把 `autocode-mcp` 当作本地 MCP server 使用，可以用下面方式。
-
-### 本地开发
+Claude Code plugin 是推荐入口，插件资产与 `autocode-mcp` 源码同仓。本地启动 server 用于开发调试：
 
 ```bash
 uv sync
 uv run autocode-mcp
-```
-
-### Cursor
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "autocode": {
-        "command": "uvx",
-        "args": ["autocode-mcp"]
-      }
-    }
-  }
-}
-```
-
-### OpenCode
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "autocode": {
-      "type": "local",
-      "command": ["uvx", "autocode-mcp"],
-      "enabled": true
-    }
-  }
-}
 ```
 
 当前仅支持本地 stdio 传输，不支持 HTTP/SSE、远程连接。
@@ -336,6 +316,5 @@ MIT License - 详见 [LICENSE](LICENSE)。
 ## 链接
 
 - [文档](https://github.com/SZTU-ACM/AutoCode#readme)
-- [PyPI](https://pypi.org/project/autocode-mcp/)
 - [GitHub](https://github.com/SZTU-ACM/AutoCode)
 - [Issue Tracker](https://github.com/SZTU-ACM/AutoCode/issues)

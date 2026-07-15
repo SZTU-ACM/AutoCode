@@ -1,0 +1,58 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  Project: AutoCode — a Claude Code plugin for the competitive-programming problem
+  authoring pipeline (problem statement, solution, validator, generator,
+  checker/interactor, stress testing, testdata, Polygon packaging). It ships an
+  internal `autocode-mcp` MCP server (22 tools) as the implementation/development
+  entry point; the primary distribution path is the remote Claude Code plugin, not a
+  standalone local MCP setup.
+
+  Tech stack:
+  - Python 3.10+ (supports 3.10-3.14); package built with hatchling + uv.
+  - Mandatory package manager: `uv` (no pip/poetry/conda workflows).
+  - C++20 (GCC 10+) for all AI-generated problem code (sol/brute/gen/val/checker/interactor).
+  - Lint/type/test: `ruff` (line-length 100), `mypy --strict`, `pytest` (asyncio_mode=auto).
+  - Minimal deps: mcp, pydantic v2, psutil, pyyaml; pywin32 only on Windows.
+
+  Conventions:
+  - Conventional commits (e.g. refactor(perf): ..., docs(specs): ...). Never use
+    abstract codenames like "direction-a"/"direction-b" as commit subjects.
+  - `openspec/` is intentionally git-ignored — spec/change docs are local-only
+    working artifacts, never version-controlled. Never `git add`/`commit` under it.
+  - The 22 MCP tool signatures are an external contract and MUST NOT change
+    (incl. `problem_build_all`). Internal refactors must preserve outward behavior.
+  - `hooks/` holds hook config only; hook logic lives in `scripts/`.
+  - Template resources live in `src/autocode_mcp/templates/`.
+  - Runs only in a trusted local environment (it compiles and executes AI-generated code).
+
+  Domain context:
+  - See `CLAUDE.md` for the forced 12-step authoring workflow and gating rules
+    (brute after sol; validator accuracy >= 0.9; checker ordering vs stress_test_run;
+    interactive-problem protocol rules; full-audit gate before pack_polygon, etc.).
+  - Key risks the system guards against: vague statements, buggy reference solutions,
+    brute not a reliable oracle, weak testdata coverage (bounds/extremes/TLE/wrong-sol
+    kill), and packing without re-verification.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - State Why, What Changes, Capabilities (New/Modified), and Impact.
+    - 'Always include a "Non-goals" section (e.g. do not change the 22 MCP tool signatures).'
+    - Reference the relevant `CLAUDE.md` workflow/gating rules when the change touches the pipeline.
+    - List affected files and dependencies explicitly; call out risks (e.g. OOM, g++ memory contention).
+  design:
+    - Include architecture/ASCII diagrams and the key tradeoffs considered.
+    - Call out risks and how they are mitigated (concurrency limits; gate fails-on-corrupt vs silent fallback).
+    - Keep MCP-side (`src/autocode_mcp/...`) and hook-side (`scripts/...`) naming boundaries explicit.
+  tasks:
+    - Break into chunks of at most ~2 hours each; reference concrete files/functions.
+    - Each task must be verifiable (e.g. via `uv run pytest tests/...` or a CLI smoke check).
+    - Keep tasks scoped so the 22 MCP tool signatures remain unchanged.
+  specs:
+    - Write requirements as "The system SHALL ..." with `#### Scenario` (WHEN/THEN) blocks.
+    - Add a short `## Purpose` section to each capability; keep each capability's boundary clear.
+    - Never encode internal codenames; use capability names.

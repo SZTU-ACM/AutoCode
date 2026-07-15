@@ -58,7 +58,6 @@ dmypy.json
 *.out
 *.o
 .tmp/
-openspec/
 
 # OS
 .DS_Store

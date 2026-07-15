@@ -14,17 +14,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     CallToolResult,
-    GetPromptResult,
-    Prompt,
-    PromptMessage,
-    ReadResourceResult,
-    Resource,
     TextContent,
-    TextResourceContents,
     Tool,
 )
 
-from . import prompts, resources
 from .tools.audit import ProblemAuditTool
 from .tools.base import Tool as BaseTool
 from .tools.base import ToolResult
@@ -173,98 +166,6 @@ def main() -> None:
             )
 
     asyncio.run(run())
-
-
-@app.list_resources()
-async def list_resources() -> list[Resource]:
-    """返回所有可用资源。"""
-    resource_list = []
-    # 模板资源
-    for template_name in resources.list_templates():
-        resource_list.append(
-            Resource(
-                uri=f"template://{template_name}",
-                name=template_name,
-                description=f"Template file: {template_name}",
-                mimeType="text/plain",
-            )
-        )
-    return resource_list
-
-
-@app.read_resource()
-async def read_resource(uri: str) -> ReadResourceResult:
-    """读取资源内容。"""
-    if uri.startswith("template://"):
-        template_name = uri[11:]
-        path = resources.get_template_path(template_name)
-        if path:
-            with open(path, encoding="utf-8") as f:
-                content = f.read()
-            return ReadResourceResult(
-                contents=[
-                    TextResourceContents(
-                        uri=uri,
-                        text=content,
-                        mimeType="text/plain",
-                    )
-                ]
-            )
-        return ReadResourceResult(
-            contents=[
-                TextResourceContents(
-                    uri=uri,
-                    text=f"Template not found: {template_name}",
-                    mimeType="text/plain",
-                )
-            ]
-        )
-    return ReadResourceResult(
-        contents=[
-            TextResourceContents(
-                uri=uri,
-                text=f"Unknown resource: {uri}",
-                mimeType="text/plain",
-            )
-        ]
-    )
-
-
-@app.list_prompts()
-async def list_prompts() -> list[Prompt]:
-    """返回所有可用提示词。"""
-    return [
-        Prompt(
-            name=name,
-            description=f"Prompt template: {name}",
-        )
-        for name in prompts.list_prompts()
-    ]
-
-
-@app.get_prompt()
-async def get_prompt(name: str, arguments: dict[str, str] | None = None) -> GetPromptResult:
-    """获取提示词内容。"""
-    content = prompts.get_prompt(name)
-    if not content:
-        return GetPromptResult(
-            description="Error: Prompt not found",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(type="text", text=f"Prompt not found: {name}"),
-                )
-            ],
-        )
-    return GetPromptResult(
-        description=f"Prompt template: {name}",
-        messages=[
-            PromptMessage(
-                role="user",
-                content=TextContent(type="text", text=content),
-            )
-        ],
-    )
 
 
 if __name__ == "__main__":

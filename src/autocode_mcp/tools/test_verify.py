@@ -22,11 +22,11 @@ from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from ..workflow.models import AutoCodeManifest
+from ..runtime_store import TEST_MANIFEST, WORKFLOW, get_section, set_section, update_section
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import ProblemVerifyTestsInput
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
-_TEST_MANIFEST_FILENAME = ".autocode_tests_manifest.json"
 _VERIFY_CONCURRENCY = 4
 
 
@@ -323,15 +323,7 @@ class ProblemVerifyTestsTool(Tool):
         quality_signals: dict[str, dict],
         results: dict,
     ) -> None:
-        state_path = Path(problem_dir) / ".autocode-workflow" / "state.json"
-        try:
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            state = {}
+        state = get_section(problem_dir, WORKFLOW) or {}
         if not isinstance(state, dict):
             state = {}
 
@@ -358,10 +350,7 @@ class ProblemVerifyTestsTool(Tool):
             }
         )
         state["history"] = history[-50:]
-        try:
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        set_section(problem_dir, WORKFLOW, state)
 
     def _check_file_count(self, tests_dir: str, answer_ext: str) -> dict:
         """检查文件完整性：每个 .in 有对应的 answer_ext。"""
@@ -601,14 +590,13 @@ class ProblemVerifyTestsTool(Tool):
         if manifest is None:
             manifest = self._read_tests_manifest(tests_dir)
         if not manifest:
-            manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
             return {
                 "passed": False,
                 "total": 0,
                 "limit_case_count": 0,
                 "limit_case_minimum_required": 0,
                 "limit_case_ratio": 0.0,
-                "error": f"tests manifest missing or unreadable: {manifest_path}",
+                "error": "tests manifest missing or unreadable",
             }
 
         tests = manifest.get("tests", [])
@@ -679,8 +667,7 @@ class ProblemVerifyTestsTool(Tool):
         if manifest is None:
             manifest = self._read_tests_manifest(tests_dir)
         if not manifest:
-            manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-            return {"passed": False, "error": f"tests manifest missing or unreadable: {manifest_path}"}
+            return {"passed": False, "error": "tests manifest missing or unreadable"}
         tests = manifest.get("tests", [])
         type3 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "3"]
         type4 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "4"]
@@ -977,15 +964,16 @@ class ProblemVerifyTestsTool(Tool):
         }
 
     def _read_tests_manifest(self, tests_dir: str) -> dict | None:
-        manifest_path = os.path.join(tests_dir, _TEST_MANIFEST_FILENAME)
-        if not os.path.exists(manifest_path):
-            return None
-        try:
-            with open(manifest_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else None
-        except (json.JSONDecodeError, OSError):
-            return None
+        # tests manifest now lives in <problem_dir>/.autocode/runtime.json under
+        # the ``test_manifest`` key. ``tests_dir`` is either ``<problem_dir>``
+        # (flat layout, e.g. tests written directly in the problem dir) or
+        # ``<problem_dir>/tests`` (nested layout). Search both candidate roots.
+        for candidate in (tests_dir, os.path.dirname(tests_dir)):
+            manifest = get_section(candidate, TEST_MANIFEST)
+            if isinstance(manifest, dict) and manifest.get("tests") is not None:
+                return manifest
+        manifest = get_section(tests_dir, TEST_MANIFEST)
+        return manifest if isinstance(manifest, dict) else None
 
     def _collect_invalid_fixtures(self, problem_dir: str, tests_dir: str) -> list[dict]:
         fixtures: list[dict] = []

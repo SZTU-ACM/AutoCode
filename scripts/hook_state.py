@@ -11,13 +11,31 @@ import json
 from pathlib import Path
 from typing import Any
 
-STATE_DIR_NAME = ".autocode-workflow"
-STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "autocode.json"
 
+RUNTIME_DIR_NAME = ".autocode"
+RUNTIME_FILE_NAME = "runtime.json"
 
-def state_file(problem_dir: str) -> Path:
-    return Path(problem_dir) / STATE_DIR_NAME / STATE_FILE_NAME
+
+def runtime_file(problem_dir: str) -> Path:
+    return Path(problem_dir) / RUNTIME_DIR_NAME / RUNTIME_FILE_NAME
+
+
+def _load_runtime(problem_dir: str) -> dict[str, Any]:
+    path = runtime_file(problem_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_runtime(problem_dir: str, data: dict[str, Any]) -> None:
+    path = runtime_file(problem_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def manifest_file(problem_dir: str) -> Path:
@@ -99,13 +117,9 @@ def infer_state(problem_dir: str) -> dict[str, Any]:
 
 
 def load_state(problem_dir: str) -> dict[str, Any]:
-    path = state_file(problem_dir)
-    if path.exists():
-        try:
-            loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            loaded = infer_state(problem_dir)
-    else:
+    runtime = _load_runtime(problem_dir)
+    loaded = runtime.get("workflow")
+    if not isinstance(loaded, dict):
         loaded = infer_state(problem_dir)
     manifest = load_manifest(problem_dir)
     loaded["interactive"] = bool(manifest.get("interactive", loaded.get("interactive", False)))
@@ -114,6 +128,6 @@ def load_state(problem_dir: str) -> dict[str, Any]:
 
 
 def save_state(problem_dir: str, state: dict[str, Any]) -> None:
-    path = state_file(problem_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    runtime = _load_runtime(problem_dir)
+    runtime["workflow"] = state
+    _save_runtime(problem_dir, runtime)

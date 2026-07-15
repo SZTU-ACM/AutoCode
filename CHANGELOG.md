@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-16
+
+### Breaking Changes
+
+- MCP server 移除 `prompts` 与 `resources` 能力面（原公开 MCP 契约的一部分）：删除对应模块与 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），仅保留 22 个 Tools。依赖这些端点的外部脚本或裸 MCP 客户端需迁移到 Skills 或 Tools。
+
+### Features
+
+- **CC-first 单一分发**
+  - 移除 PyPI 发布与 `uvx` 运行路径：`.mcp.json` 改为 `command: uv, args: ["run", "autocode-mcp"]`，README 移除 PyPI 徽章与发布叙述，仅保留 Claude Code plugin 与本地开发。
+  - MCP server 收敛为纯 Tools：删除 `prompts` 与 `resources` 模块及对应 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），`server.py` 清理相关 `mcp.types` 导入；22 个工具签名不变（对外契约保留）。
+  - README 移除 Cursor / OpenCode（裸 MCP 客户端）使用段落，文档仅面向 Claude Code plugin 与本地开发。
+
+### Improvements
+
+- **知识源单一真值收口**
+  - 移除 `prompts` 模块后，Claude Code 消费者知识唯一真源为 `skills/*.md`；删除 `tests/test_prompts.py`、`tests/test_resources.py`、`tests/test_prompts_consistency.py`。
+  - 版本单一真源：`pyproject.toml` 的静态 `version` 为唯一权威版本；新增 `scripts/sync_plugin_version.py`，`__version__` 与 `plugin.json` 的 `version` 由其派生，不再三处手工维护。
+- **运行期副产物收口**
+  - 所有非题目运行期产物统一写入题目目录的 `.autocode/runtime.json`（键 `workflow` / `test_manifest` / `generate_checkpoint` / `audit`），消除散落的 `.autocode-workflow/state.json`、`tests/.autocode_tests_manifest.json`、`.autocode_generate_state.json`、根 `audit_report.json`。
+  - 新增 `src/autocode_mcp/runtime_store.py` 统一收口文件名/路径；`problem.py` / `test_verify.py` / `audit.py` / `hook_state.py` 迁移到 `runtime_store`，删除各自重复的常量。
+  - `problem_create` 在新建题目目录时写入 `.gitignore`（含 `.autocode/`），由题目项目自身忽略运行期副产物（AutoCode 仓库根不忽略 `.autocode/`）。
+
+### Documentation
+
+- 同步 `openspec/specs/` 三个 capability 终态：`cc-first-distribution`（新建，CC 插件唯一分发面、MCP 纯 Tools、无裸 MCP 客户端文档）、`runtime-byproduct-consolidation`（新建，运行期副产物单一存储与 git-ignore）、`knowledge-source-single-truth`（删除 prompts 需求，补仓库单一真源与版本单一真源）。
+- `tests/README.md` 移除已删的 `test_prompts.py` / `test_resources.py`，打包测试改用 `uv pip install dist/*.whl`。
+- `CLAUDE.md` 去掉 Cursor 措辞与 `prompts/` 目录树，题目结构图改用 `.autocode/runtime.json`。
+
+### Tests
+
+- 新增 runtime 收口回归测试；删除 prompts/resources 一致性测试；全量 pytest 通过，`ruff` 与 `mypy` 干净。
+
 ## [1.0.6] - 2026-07-14
 
 ### Improvements

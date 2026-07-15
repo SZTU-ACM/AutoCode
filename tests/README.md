@@ -22,7 +22,7 @@
 │  运行时机：CI 常规测试                                       │
 ├─────────────────────────────────────────────────────────────┤
 │                    L1: 单元测试                              │
-│  test_prompts.py, test_resources.py, test_cache.py         │
+│  test_cache.py, test_mixins.py, test_resource_limit.py,    │
 │  测试独立函数和类的行为                                       │
 │  运行时机：CI 常规测试                                       │
 └─────────────────────────────────────────────────────────────┘
@@ -34,8 +34,6 @@
 
 | 文件 | 职责 |
 |------|------|
-| `test_prompts.py` | 测试 prompt 模板生成 |
-| `test_resources.py` | 测试资源访问 |
 | `test_cache.py` | 测试编译缓存 |
 | `test_mixins.py` | 测试工具 mixin 行为 |
 | `test_resource_limit.py` | 测试资源限制工具 |
@@ -75,7 +73,7 @@ test-integration:
 # 3. 打包产物测试（uv build 后）
 test-packaging:
   - uv build
-  - pip install dist/*.whl
+  - uv pip install dist/*.whl
   - pytest tests/test_packaging_smoke.py -v -m "packaging"
 ```
 

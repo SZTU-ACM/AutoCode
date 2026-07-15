@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-此文件为 Claude Code / Cursor Agent 在本仓库工作时提供项目级指导。
+此文件为 Claude Code Agent 在本仓库工作时提供项目级指导。
 
 ## 项目定位
 
@@ -63,7 +63,6 @@ AutoCode/
 │   ├── tools/             # MCP 工具实现
 │   ├── templates/         # 内置模板资源
 │   ├── workflow/          # autocode.json manifest 模型
-│   ├── prompts/           # 工作流提示词
 │   └── utils/             # 编译、运行、资源限制等工具函数
 ├── tests/                 # 测试用例
 ├── .mcp.json              # 本地 MCP 接入配置（开发/兼容用）
@@ -107,7 +106,7 @@ AutoCode 当前暴露 22 个 MCP 工具：
 └── tests/
     ├── 01.in
     ├── 01.ans / 01.out
-    └── .autocode_tests_manifest.json
+    └── .autocode/runtime.json    # 运行期副产物（git-ignored）
 ```
 
 ## 题面格式规范（强制）

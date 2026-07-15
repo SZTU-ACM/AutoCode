@@ -6,7 +6,6 @@ Stress Test 工具 - 对拍测试。
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from pydantic import ValidationError
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.compiler import run_batch, run_binary, run_binary_with_args
 from ..utils.platform import get_exe_extension
+from ..runtime_store import WORKFLOW, get_section
 from ..workflow import load_manifest, manifest_uses_testlib_checker
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import StressTestRunInput
@@ -650,14 +650,7 @@ class StressTestRunTool(Tool):
         )
 
     def _load_complexity_context(self, problem_dir: str) -> dict[str, object]:
-        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
-        if not os.path.exists(state_path):
-            return {}
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                state = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return {}
+        state = get_section(problem_dir, WORKFLOW)
         if not isinstance(state, dict):
             return {}
         context: dict[str, object] = {}

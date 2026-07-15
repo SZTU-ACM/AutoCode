@@ -17,13 +17,11 @@ from pydantic import ValidationError
 from ..workflow import check_gates, load_manifest, manifest_uses_testlib_checker
 from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from ..workflow.models import AutoCodeManifest
+from ..runtime_store import AUDIT, TEST_MANIFEST, WORKFLOW, get_section, set_section
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import analyze_loop_complexity, detect_algorithm_patterns
 from .schemas import ProblemAuditInput
 from .test_verify import ProblemVerifyTestsTool
-
-_WORKFLOW_STATE = ".autocode-workflow/state.json"
-_TEST_MANIFEST = ".autocode_tests_manifest.json"
 
 
 class ProblemAuditTool(Tool):
@@ -64,8 +62,8 @@ class ProblemAuditTool(Tool):
         if manifest is None:
             return ToolResult.fail("autocode.json not found")
 
-        workflow_state = self._read_json(problem_path / _WORKFLOW_STATE) or {}
-        tests_manifest = self._read_json(problem_path / "tests" / _TEST_MANIFEST) or {}
+        workflow_state = get_section(problem_path, WORKFLOW) or {}
+        tests_manifest = get_section(problem_path, TEST_MANIFEST) or {}
 
         blocking: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
@@ -423,12 +421,7 @@ class ProblemAuditTool(Tool):
         return path
 
     def _write_audit_state(self, problem_path: Path, report: dict) -> None:
-        state_path = problem_path / _WORKFLOW_STATE
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state = self._read_json(state_path) or {}
-        if not isinstance(state, dict):
-            state = {}
-        state["full_audit"] = {
+        full_audit = {
             "decision": report["decision"],
             "mode": report["mode"],
             "generated_at": report["generated_at"],
@@ -436,8 +429,8 @@ class ProblemAuditTool(Tool):
             "blocking_issue_count": len(report["blocking_issues"]),
             "quality_signals": report["quality_signals"],
         }
-        state["full_audit_passed"] = report["decision"] == "go" and report["mode"] == "full"
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        full_audit_passed = report["decision"] == "go" and report["mode"] == "full"
+        set_section(str(problem_path), AUDIT, {"full_audit": full_audit, "full_audit_passed": full_audit_passed})
 
     def _solution_source(self, problem_path: Path, name: str) -> Path | None:
         for candidate in (problem_path / "solutions" / f"{name}.cpp", problem_path / f"{name}.cpp"):
@@ -446,7 +439,7 @@ class ProblemAuditTool(Tool):
         return None
 
     def _limit_ratio(self, problem_path: Path) -> float | None:
-        manifest = self._read_json(problem_path / "tests" / _TEST_MANIFEST)
+        manifest = get_section(problem_path, TEST_MANIFEST)
         if not isinstance(manifest, dict):
             return None
         tests = manifest.get("tests", [])
@@ -487,15 +480,6 @@ class ProblemAuditTool(Tool):
         if rating < 2600:
             return "困难"
         return "高难"
-
-    def _read_json(self, path: Path) -> dict | None:
-        if not path.is_file():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            return None
-        return data if isinstance(data, dict) else None
 
     def _signal(self, passed: bool, evidence: dict) -> dict:
         return {"executed": True, "passed": passed, "evidence": evidence}

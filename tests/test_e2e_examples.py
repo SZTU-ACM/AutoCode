@@ -7,13 +7,13 @@
   但建立在真实 example 配置之上，验证 examples 可被端到端驱动且并发路径稳定。
 """
 
-import json
 import os
 import tempfile
 import unittest.mock as mock
 
 import pytest
 
+from autocode_mcp.runtime_store import get_section
 from autocode_mcp.tools.problem import ProblemGenerateTestsTool
 from autocode_mcp.utils.compiler import RunResult
 from autocode_mcp.utils.platform import get_exe_extension
@@ -92,9 +92,7 @@ async def _run_example_generate(concurrency_limit: int) -> list[tuple]:
             )
 
         assert result.success, result.error
-        manifest_path = os.path.join(tests_dir, ".autocode_tests_manifest.json")
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
+        manifest = get_section(problem_dir, "test_manifest") or {}
         summary = []
         for t in manifest["tests"]:
             in_path = os.path.join(tests_dir, t["in_file"])

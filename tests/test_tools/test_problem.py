@@ -21,26 +21,25 @@ from autocode_mcp.tools.problem import (
 )
 from autocode_mcp.tools.solution import SolutionBuildTool
 from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+from autocode_mcp.runtime_store import get_section, set_section
 from autocode_mcp.utils.compiler import RunResult
 from autocode_mcp.utils.platform import get_exe_extension
 from autocode_mcp.workflow.models import AutoCodeManifest, SolutionEntry
 
 
 def write_verified_workflow_state(problem_dir: str) -> None:
-    workflow_dir = os.path.join(problem_dir, ".autocode-workflow")
-    os.makedirs(workflow_dir, exist_ok=True)
-    with open(os.path.join(workflow_dir, "state.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "tests_verified": True,
-                "verify_signals": {
-                    "limit_semantics": {"executed": True, "passed": True},
-                    "wrong_solution_kill": {"executed": True, "passed": True},
-                    "validator_check": {"executed": True, "passed": True},
-                },
+    set_section(
+        problem_dir,
+        "workflow",
+        {
+            "tests_verified": True,
+            "verify_signals": {
+                "limit_semantics": {"executed": True, "passed": True},
+                "wrong_solution_kill": {"executed": True, "passed": True},
+                "validator_check": {"executed": True, "passed": True},
             },
-            f,
-        )
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -764,11 +763,8 @@ async def test_problem_generate_tests_preserves_crlf_outputs(monkeypatch):
             assert f.read() == b"7\r\n"
         with open(os.path.join(problem_dir, "tests", "01.ans"), "rb") as f:
             assert f.read() == b"49\r\n"
-        with open(
-            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
-            encoding="utf-8",
-        ) as f:
-            assert json.load(f)["tests_verified"] is False
+        workflow = get_section(problem_dir, "workflow") or {}
+        assert workflow["tests_verified"] is False
 
 
 def test_problem_generate_tests_mark_unverified_clears_stale_gate_evidence():
@@ -776,32 +772,32 @@ def test_problem_generate_tests_mark_unverified_clears_stale_gate_evidence():
     tool = ProblemGenerateTestsTool()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        state_dir = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(state_dir)
-        state_path = os.path.join(state_dir, "state.json")
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "tests_verified": True,
-                    "verify_signals": {
-                        "limit_semantics": {"executed": True, "passed": True},
-                    },
-                    "limit_case_ratio": 1.0,
-                    "full_audit_passed": True,
-                    "full_audit": {"decision": "go"},
+        set_section(
+            tmpdir,
+            "workflow",
+            {
+                "tests_verified": True,
+                "verify_signals": {
+                    "limit_semantics": {"executed": True, "passed": True},
                 },
-                f,
-            )
+                "limit_case_ratio": 1.0,
+            },
+        )
+        set_section(
+            tmpdir,
+            "audit",
+            {"full_audit_passed": True, "full_audit": {"decision": "go"}},
+        )
 
         tool._mark_tests_unverified(tmpdir)
 
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
-        assert state["tests_verified"] is False
-        assert state["verify_signals"] == {}
-        assert state["limit_case_ratio"] is None
-        assert state["full_audit_passed"] is False
-        assert state["full_audit"] == {}
+        workflow = get_section(tmpdir, "workflow") or {}
+        assert workflow["tests_verified"] is False
+        assert workflow["verify_signals"] == {}
+        assert workflow["limit_case_ratio"] is None
+        audit = get_section(tmpdir, "audit") or {}
+        assert audit["full_audit_passed"] is False
+        assert audit["full_audit"] == {}
 
 
 @pytest.mark.asyncio
@@ -1023,12 +1019,7 @@ def test_problem_verify_tests_limit_ratio_passes_with_manifest():
                 {"in_file": "04.in", "ans_file": "04.ans", "type_param": "4", "signature": "d"},
             ],
         }
-        with open(
-            os.path.join(tmpdir, ".autocode_tests_manifest.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(manifest, f)
+        set_section(tmpdir, "test_manifest", manifest)
 
         result = tool._check_limit_ratio(tmpdir)
         assert result["passed"] is True
@@ -1059,12 +1050,7 @@ def test_problem_verify_tests_limit_ratio_fails_when_insufficient():
                 {"in_file": "05.in", "ans_file": "05.ans", "type_param": "4", "signature": "e"},
             ],
         }
-        with open(
-            os.path.join(tmpdir, ".autocode_tests_manifest.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(manifest, f)
+        set_section(tmpdir, "test_manifest", manifest)
 
         result = tool._check_limit_ratio(tmpdir)
         assert result["passed"] is False
@@ -1086,8 +1072,7 @@ def test_problem_verify_tests_limit_semantics_fails_for_overlapping_signatures()
                 {"in_file": "02.in", "ans_file": "02.ans", "type_param": "4", "signature": "same"},
             ],
         }
-        with open(os.path.join(tmpdir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f)
+        set_section(tmpdir, "test_manifest", manifest)
         result = tool._check_limit_semantics(tmpdir)
         assert result["passed"] is False
 
@@ -1118,8 +1103,7 @@ async def test_problem_verify_tests_supports_custom_answer_ext():
             "answer_ext": ".out",
             "tests": [{"in_file": "01.in", "ans_file": "01.out", "type_param": "3", "signature": "a"}],
         }
-        with open(os.path.join(tmpdir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f)
+        set_section(tmpdir, "test_manifest", manifest)
         result = await tool.execute(
             problem_dir=tmpdir,
             tests_dir=tmpdir,
@@ -1166,8 +1150,7 @@ async def test_problem_cleanup_processes_kills_tracked_pids(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
         os.makedirs(tests_dir, exist_ok=True)
-        with open(os.path.join(tests_dir, ".autocode_generate_state.json"), "w", encoding="utf-8") as f:
-            json.dump({"active_pids": [12345, 23456]}, f)
+        set_section(tmpdir, "generate_checkpoint", {"active_pids": [12345, 23456]})
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
         if os.name == "nt":
@@ -1201,17 +1184,14 @@ async def test_problem_cleanup_processes_keeps_failed_pid_for_retry(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
         os.makedirs(tests_dir, exist_ok=True)
-        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"active_pids": [111, 222]}, f)
+        set_section(tmpdir, "generate_checkpoint", {"active_pids": [111, 222]})
 
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
         if os.name == "nt":
             assert result.data.get("killed_pids") == [111]
-            assert os.path.exists(state_path)
-            with open(state_path, encoding="utf-8") as f:
-                state = json.load(f)
+            assert os.path.exists(os.path.join(tmpdir, ".autocode", "runtime.json"))
+            state = get_section(tmpdir, "generate_checkpoint") or {}
             assert state.get("active_pids") == [222]
         else:
             assert result.data.get("removed_files") == []
@@ -1237,24 +1217,22 @@ async def test_problem_cleanup_processes_preserves_checkpoint_fields(monkeypatch
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
         os.makedirs(tests_dir, exist_ok=True)
-        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "phase": "partial",
-                    "next_seed": 9,
-                    "answer_ext": ".out",
-                    "candidates": [{"signature": "x"}],
-                    "errors": [{"seed": 1, "error": "e"}],
-                    "active_pids": [555],
-                },
-                f,
-            )
+        set_section(
+            tmpdir,
+            "generate_checkpoint",
+            {
+                "phase": "partial",
+                "next_seed": 9,
+                "answer_ext": ".out",
+                "candidates": [{"signature": "x"}],
+                "errors": [{"seed": 1, "error": "e"}],
+                "active_pids": [555],
+            },
+        )
 
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "generate_checkpoint") or {}
         # 成功回收后 active_pids 清空，但 checkpoint 其他字段应完整保留。
         assert state.get("active_pids") == []
         assert state.get("phase") == "partial"
@@ -1279,9 +1257,7 @@ async def test_problem_cleanup_processes_skips_stale_pids(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")
         os.makedirs(tests_dir, exist_ok=True)
-        state_path = os.path.join(tests_dir, ".autocode_generate_state.json")
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"active_pids": [777, 888]}, f)
+        set_section(tmpdir, "generate_checkpoint", {"active_pids": [777, 888]})
 
         result = await tool.execute(problem_dir=tmpdir)
         assert result.success
@@ -1289,8 +1265,7 @@ async def test_problem_cleanup_processes_skips_stale_pids(monkeypatch):
         assert result.data.get("skipped_pids") == [777, 888]
         assert result.data.get("killed_pids") == []
         assert result.data.get("failed_pids") == []
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "generate_checkpoint") or {}
         assert state.get("active_pids") == []
 
 
@@ -1411,10 +1386,8 @@ async def test_problem_verify_tests_can_disable_limit_ratio():
         assert result.success
         assert result.data.get("limit_ratio_enabled") is False
         assert "limit_ratio" not in result.data.get("results", {})
-        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
-        assert state["limit_case_ratio"] is None
+        workflow = get_section(tmpdir, "workflow") or {}
+        assert workflow["limit_case_ratio"] is None
 
 
 @pytest.mark.asyncio
@@ -1423,19 +1396,17 @@ async def test_problem_verify_tests_failure_clears_stale_verified_state():
     tool = ProblemVerifyTestsTool()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        state_dir = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(state_dir)
-        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "tests_verified": True,
-                    "verify_signals": {
-                        "validator_check": {"executed": True, "passed": True},
-                    },
-                    "limit_case_ratio": 1.0,
+        set_section(
+            tmpdir,
+            "workflow",
+            {
+                "tests_verified": True,
+                "verify_signals": {
+                    "validator_check": {"executed": True, "passed": True},
                 },
-                f,
-            )
+                "limit_case_ratio": 1.0,
+            },
+        )
 
         result = await tool.execute(
             problem_dir=tmpdir,
@@ -1445,8 +1416,7 @@ async def test_problem_verify_tests_failure_clears_stale_verified_state():
         )
 
         assert not result.success
-        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "workflow") or {}
         assert state["tests_verified"] is False
         assert state["verify_signals"] == {}
         assert state["limit_case_ratio"] is None
@@ -1465,10 +1435,7 @@ async def test_problem_verify_tests_invalid_manifest_clears_stale_verified_state
                 '{"schema_version":"1.0","problem_name":"m","interactive":false,'
                 '"stress_comparison":"INVALID_ENUM"}'
             )
-        state_dir = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(state_dir)
-        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
-            json.dump({"tests_verified": True, "limit_case_ratio": 1.0}, f)
+        set_section(tmpdir, "workflow", {"tests_verified": True, "limit_case_ratio": 1.0})
 
         result = await tool.execute(
             problem_dir=tmpdir,
@@ -1477,8 +1444,7 @@ async def test_problem_verify_tests_invalid_manifest_clears_stale_verified_state
         )
 
         assert not result.success
-        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "workflow") or {}
         assert state["tests_verified"] is False
         assert state["verify_signals"] == {}
         assert state["limit_case_ratio"] is None
@@ -1493,7 +1459,7 @@ async def test_problem_verify_tests_state_write_is_best_effort():
         for name in ["01.in", "01.ans"]:
             with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
                 f.write("1\n")
-        with open(os.path.join(tmpdir, ".autocode-workflow"), "w", encoding="utf-8") as f:
+        with open(os.path.join(tmpdir, ".autocode"), "w", encoding="utf-8") as f:
             f.write("not a directory")
 
         result = await tool.execute(
@@ -1527,9 +1493,7 @@ async def test_problem_verify_tests_skipped_self_test_does_not_fail():
         assert result.data["skipped_checks"] == 1
         assert result.data["passed_checks"] == 2
         assert result.data["results"]["validator_self_test"]["skipped"] is True
-        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "workflow") or {}
         assert state["tests_verified"] is True
         assert state["verify_signals"]["file_count"]["passed"] is True
         assert state["verify_signals"]["no_empty"]["passed"] is True
@@ -1551,9 +1515,7 @@ async def test_problem_verify_tests_all_skipped_does_not_verify_tests():
         assert not result.success
         assert result.data["skipped_checks"] == 1
         assert result.data["effective_checks"] == 0
-        state_path = os.path.join(tmpdir, ".autocode-workflow", "state.json")
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "workflow") or {}
         assert state["tests_verified"] is False
 
 
@@ -1589,17 +1551,15 @@ async def test_problem_verify_tests_overwrites_stale_verify_signals():
         for name in ["01.in", "01.ans"]:
             with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
                 f.write("1\n")
-        state_dir = os.path.join(tmpdir, ".autocode-workflow")
-        os.makedirs(state_dir)
-        with open(os.path.join(state_dir, "state.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "verify_signals": {
-                        "limit_semantics": {"executed": True, "passed": True},
-                    }
-                },
-                f,
-            )
+        set_section(
+            tmpdir,
+            "workflow",
+            {
+                "verify_signals": {
+                    "limit_semantics": {"executed": True, "passed": True},
+                }
+            },
+        )
 
         result = await tool.execute(
             problem_dir=tmpdir,
@@ -1609,8 +1569,7 @@ async def test_problem_verify_tests_overwrites_stale_verify_signals():
         )
 
         assert result.success
-        with open(os.path.join(state_dir, "state.json"), encoding="utf-8") as f:
-            state = json.load(f)
+        state = get_section(tmpdir, "workflow") or {}
         assert state["verify_signals"]["limit_semantics"]["executed"] is False
         assert state["verify_signals"]["limit_semantics"]["passed"] is False
 
@@ -1661,8 +1620,7 @@ async def test_problem_pack_polygon_sanitizes_answer_ext_from_manifest():
             f.write("1\n")
         with open(os.path.join(tests_dir, "01.ans"), "w", encoding="utf-8") as f:
             f.write("1\n")
-        with open(os.path.join(tests_dir, ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump({"answer_ext": ".bad<ext>"}, f)
+        set_section(problem_dir, "test_manifest", {"answer_ext": ".bad<ext>"})
         with open(os.path.join(problem_dir, "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
         write_verified_workflow_state(problem_dir)
@@ -1702,7 +1660,7 @@ async def test_problem_pack_polygon_fails_when_workflow_state_unverified():
         os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
-        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+
         with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
             f.write("1\n")
         with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
@@ -1711,12 +1669,7 @@ async def test_problem_pack_polygon_fails_when_workflow_state_unverified():
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
-        with open(
-            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump({"tests_verified": False}, f)
+        set_section(problem_dir, "workflow", {"tests_verified": False})
         result = await tool.execute(problem_dir=problem_dir)
         assert not result.success
         assert "run problem_verify_tests first" in result.error
@@ -1751,7 +1704,7 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
         os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
-        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+
         with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
             f.write("1\n")
         with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
@@ -1773,12 +1726,7 @@ async def test_problem_pack_polygon_respects_require_tests_verified_override():
                 },
                 f,
             )
-        with open(
-            os.path.join(problem_dir, ".autocode-workflow", "state.json"),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump({"tests_verified": False}, f)
+        set_section(problem_dir, "workflow", {"tests_verified": False})
         result = await tool.execute(problem_dir=problem_dir)
         assert result.success
 
@@ -1819,30 +1767,26 @@ async def test_problem_pack_polygon_requires_full_audit_when_enabled():
         assert not result.success
         assert "problem_audit" in result.error
 
-        state_path = os.path.join(problem_dir, ".autocode-workflow", "state.json")
-        with open(state_path, encoding="utf-8") as f:
-            state = json.load(f)
-        state["full_audit"] = {
+        audit = get_section(problem_dir, "audit") or {}
+        audit["full_audit"] = {
             "mode": "full",
             "decision": "go",
             "blocking_issue_count": 0,
             "quality_signals": {},
         }
-        state["full_audit_passed"] = True
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        audit["full_audit_passed"] = True
+        set_section(problem_dir, "audit", audit)
 
         result = await tool.execute(problem_dir=problem_dir)
         assert not result.success
         assert "full audit signal" in result.error
 
-        state["full_audit"]["quality_signals"] = {
+        audit["full_audit"]["quality_signals"] = {
             "duplicate_inputs": {"executed": True, "passed": True},
             "scale_distribution": {"executed": True, "passed": True},
             "purpose_coverage": {"executed": True, "passed": True},
         }
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        set_section(problem_dir, "audit", audit)
 
         result = await tool.execute(problem_dir=problem_dir)
         assert result.success
@@ -1856,7 +1800,7 @@ async def test_problem_pack_polygon_fails_when_required_verify_signal_missing():
         os.makedirs(os.path.join(problem_dir, "tests"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "statements"), exist_ok=True)
         os.makedirs(os.path.join(problem_dir, "solutions"), exist_ok=True)
-        os.makedirs(os.path.join(problem_dir, ".autocode-workflow"), exist_ok=True)
+
         with open(os.path.join(problem_dir, "tests", "01.in"), "w", encoding="utf-8") as f:
             f.write("1\n")
         with open(os.path.join(problem_dir, "tests", "01.ans"), "w", encoding="utf-8") as f:
@@ -1865,8 +1809,7 @@ async def test_problem_pack_polygon_fails_when_required_verify_signal_missing():
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
             f.write("// sol\n")
-        with open(os.path.join(problem_dir, ".autocode-workflow", "state.json"), "w", encoding="utf-8") as f:
-            json.dump({"tests_verified": True, "verify_signals": {}}, f)
+        set_section(problem_dir, "workflow", {"tests_verified": True, "verify_signals": {}})
         result = await tool.execute(problem_dir=problem_dir)
         assert not result.success
         assert "verification signal" in result.error
@@ -1888,16 +1831,16 @@ async def test_problem_pack_polygon_enforces_min_limit_case_ratio():
             f.write("2\n")
         with open(os.path.join(problem_dir, "tests", "02.ans"), "w", encoding="utf-8") as f:
             f.write("2\n")
-        with open(os.path.join(problem_dir, "tests", ".autocode_tests_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "tests": [
-                        {"in_file": "01.in", "ans_file": "01.ans", "type_param": "1"},
-                        {"in_file": "02.in", "ans_file": "02.ans", "type_param": "2"},
-                    ]
-                },
-                f,
-            )
+        set_section(
+            problem_dir,
+            "test_manifest",
+            {
+                "tests": [
+                    {"in_file": "01.in", "ans_file": "01.ans", "type_param": "1"},
+                    {"in_file": "02.in", "ans_file": "02.ans", "type_param": "2"},
+                ]
+            },
+        )
         with open(os.path.join(problem_dir, "statements", "README.md"), "w", encoding="utf-8") as f:
             f.write("# T\n")
         with open(os.path.join(problem_dir, "solutions", "sol.cpp"), "w", encoding="utf-8") as f:
@@ -2178,9 +2121,7 @@ async def _run_generate_with_concurrency(concurrency_limit: int) -> list[tuple]:
             )
 
         assert result.success, result.error
-        manifest_path = os.path.join(tests_dir, ".autocode_tests_manifest.json")
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
+        manifest = get_section(problem_dir, "test_manifest") or {}
         summary = []
         for t in manifest["tests"]:
             in_path = os.path.join(tests_dir, t["in_file"])

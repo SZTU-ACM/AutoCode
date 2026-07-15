@@ -42,7 +42,7 @@ def check_gates(
 
     Args:
         manifest: 已加载并校验的 :class:`AutoCodeManifest`
-        workflow_state: ``.autocode-workflow/state.json`` 的解析结果
+        workflow_state: ``.autocode/runtime.json`` 的 ``workflow`` 段解析结果
         verify_signals: ``workflow_state['verify_signals']``（验证信号字典）
 
     Returns:

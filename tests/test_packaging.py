@@ -12,7 +12,7 @@ def test_import():
     """测试模块导入。"""
     from autocode_mcp import __version__
 
-    assert __version__ == "1.0.5"
+    assert __version__ == "1.0.6"
 
 
 def test_tool_result():
@@ -127,18 +127,6 @@ def test_templates_in_package():
     assert os.path.exists(os.path.join(TEMPLATES_DIR, "testlib.h"))
 
 
-def test_resources_module_templates():
-    """测试 resources 模块可以访问模板。"""
-    from autocode_mcp.resources import get_template_path, list_templates
-
-    templates = list_templates()
-    assert "testlib.h" in templates
-
-    path = get_template_path("testlib.h")
-    assert path is not None
-    assert os.path.exists(path)
-
-
 def test_all_template_files_exist():
     """测试所有模板文件都存在。"""
     from autocode_mcp import TEMPLATES_DIR
@@ -156,19 +144,6 @@ def test_all_template_files_exist():
     for template in expected_templates:
         path = os.path.join(TEMPLATES_DIR, template)
         assert os.path.exists(path), f"Template not found: {template}"
-
-
-def test_all_prompts_exist():
-    """测试所有声明的 prompt 都存在。"""
-    from autocode_mcp.prompts import get_prompt, list_prompts
-
-    prompts = list_prompts()
-    assert len(prompts) == 7
-
-    for name in prompts:
-        content = get_prompt(name)
-        assert content, f"Prompt '{name}' is empty"
-        assert len(content) > 100, f"Prompt '{name}' seems too short"
 
 
 def test_autocode_verify_reports_missing_manifest(monkeypatch, capsys, tmp_path):
@@ -358,39 +333,6 @@ async def test_mcp_call_tool_success_result():
         assert isinstance(result, CallToolResult)
         assert result.isError is False
         assert result.structuredContent is not None
-
-
-@pytest.mark.asyncio
-async def test_mcp_get_prompt_result_type():
-    """测试 get_prompt 返回正确的 MCP 类型。"""
-    from mcp.types import GetPromptResult
-
-    from autocode_mcp.server import get_prompt
-
-    result = await get_prompt("validator")
-    assert isinstance(result, GetPromptResult)
-    assert len(result.messages) > 0
-
-    result = await get_prompt("nonexistent_prompt")
-    assert isinstance(result, GetPromptResult)
-    assert "not found" in result.description.lower() or "error" in result.description.lower()
-
-
-@pytest.mark.asyncio
-async def test_mcp_read_resource_result_type():
-    """测试 read_resource 返回正确的 MCP 类型。"""
-    from mcp.types import ReadResourceResult
-
-    from autocode_mcp.server import read_resource
-
-    result = await read_resource("template://testlib.h")
-    assert isinstance(result, ReadResourceResult)
-    assert len(result.contents) > 0
-    assert result.contents[0].text is not None
-
-    result = await read_resource("template://nonexistent.txt")
-    assert isinstance(result, ReadResourceResult)
-    assert "not found" in result.contents[0].text.lower()
 
 
 # ============== 工具边界情况测试 ==============
