@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 from collections.abc import Iterable
+from typing import Any, cast
 
 import psutil
 
@@ -70,7 +71,7 @@ async def terminate_pid_tree(pid: int) -> tuple[bool, str]:
         return False, stderr.decode("utf-8", errors="replace")
     # POSIX：优先按进程组整树回收（要求子进程以 start_new_session=True 启动）。
     try:
-        os.killpg(os.getpgid(pid), POSIX_KILL_SIGNAL)  # type: ignore[attr-defined]
+        cast(Any, os).killpg(cast(Any, os).getpgid(pid), POSIX_KILL_SIGNAL)
         return True, ""
     except ProcessLookupError:
         return True, ""

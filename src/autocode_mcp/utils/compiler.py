@@ -17,7 +17,7 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
@@ -274,7 +274,7 @@ async def _force_terminate_process(
     # 避免 generator 派生的子进程残留。
     if os.name != "nt" and process.pid:
         try:
-            os.killpg(os.getpgid(process.pid), _POSIX_KILL_SIGNAL)  # type: ignore[attr-defined]
+            cast(Any, os).killpg(cast(Any, os).getpgid(process.pid), _POSIX_KILL_SIGNAL)
         except (ProcessLookupError, PermissionError):
             pass
         except OSError as e:
