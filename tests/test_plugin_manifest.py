@@ -5,12 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import tomllib
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (project floor) has no tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
+
+
+def load_pyproject() -> dict:
+    return tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
 
 def project_version() -> str:
-    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    return str(project["project"]["version"])
+    return str(load_pyproject()["project"]["version"])
 
 
 def test_claude_plugin_manifest_links_mcp_config():
@@ -52,7 +58,7 @@ def test_host_manifests_and_package_share_one_version_source():
 
 def test_mcp_dependency_stays_on_supported_major():
     """The server uses the MCP 1.x decorator API; do not resolve MCP 2.x."""
-    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    project = load_pyproject()
     dependency = next(item for item in project["project"]["dependencies"] if item.startswith("mcp"))
     assert dependency == "mcp>=1.0.0,<2.0.0"
 

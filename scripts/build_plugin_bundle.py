@@ -13,7 +13,10 @@ import json
 import shutil
 from pathlib import Path
 
-import tomllib
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (project floor) has no tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / "autocode"
