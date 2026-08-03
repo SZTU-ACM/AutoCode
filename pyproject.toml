@@ -1,6 +1,6 @@
 [project]
 name = "autocode-mcp"
-version = "2.0.0"
+version = "3.0.0"
 description = "MCP Server for competitive programming problem creation, based on AutoCode paper"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",
     "pydantic>=2.0.0",
     "pywin32>=306; sys_platform == 'win32'",
     "psutil>=5.9.0",

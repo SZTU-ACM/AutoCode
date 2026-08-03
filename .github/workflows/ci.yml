@@ -33,6 +33,26 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run mypy src/
 
+  # Plugin contract smoke tests: Claude and Codex manifests must stay in sync
+  # with the reproducible marketplace bundle.
+  plugin-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: Validate plugin manifests and bundle builder
+        run: uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py -q
+      - name: Build and check a clean plugin bundle
+        run: |
+          uv run python scripts/build_plugin_bundle.py --output "$RUNNER_TEMP/autocode-bundle"
+          uv run python scripts/build_plugin_bundle.py --check --output "$RUNNER_TEMP/autocode-bundle"
+
   test-unit:
     runs-on: ubuntu-latest
     strategy:

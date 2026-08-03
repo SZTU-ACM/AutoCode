@@ -3,44 +3,36 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
-**AutoCode 是面向竞赛编程出题人的 Claude Code plugin。**
+**AutoCode 是面向竞赛编程出题人的 AI 出题工作台，支持 Claude Code 和 Codex。**
 
-它不是单纯让 AI “写一道题”，而是把 AI 生成的题面、解法、校验器、生成器、对拍、测试数据和打包流程放进一条可验证、可审计、会阻止跳步的出题流水线。
-
-仓库内部包含 `autocode-mcp` 这个 MCP server 实现，但默认分发和使用形态是 Claude Code plugin：安装后会同时获得工作流 Agent、Skills、Hooks 和 22 个 MCP 原子工具。
+从一个想法开始，AutoCode 会协助你完成题面、解法、测试数据、验证和题包整理，把创作过程变成一条清晰、可靠、可复用的工作流。
 
 ## 为什么需要 AutoCode
 
-AI 可以快速给出题目想法和代码，但竞赛题真正难的是“可信”。常见翻车点通常不在第一眼能看出来的地方：
+AI 可以快速给出题目想法和代码，但竞赛题真正难的是让每个细节都经得起验证：
 
 - 题面描述含糊，输入输出协议不完整，样例和题意对不上。
 - 样例输出算错，或者题面样例没有经过标准解实际验证。
 - 标准解看起来合理，但边界条件有 bug。
 - 时间复杂度判断过于乐观，`O(n^2)` 被误当成能过大数据。
-- 暴力解和标准解同类实现，不能作为可靠 oracle 对拍。
-- Generator 只有随机数据，覆盖不到边界、构造、极限和 TLE 场景。
-- extreme 和 tle 样例只是“把参数放大”，没有语义差异。
-- 错解没有被最终测试杀掉，数据强度不够。
-- 打包前才发现题面、题解、manifest、样例和最终数据不一致。
+- 暴力解需要与标准解形成独立的交叉验证。
+- 测试数据需要覆盖边界、构造、极限和性能场景。
+- 错解需要在最终数据上得到充分检验。
+- 题面、题解、样例和最终数据需要保持一致。
 
 AutoCode 的目标是把这些风险前置暴露，而不是等到出题完成后人工返工。
 
-## AutoCode 如何兜底
+## AutoCode 如何保障质量
 
-AutoCode 把“AI 出题”拆成一组必须通过的质量门禁：
+AutoCode 会把出题过程拆成相互衔接的质量环节：
 
-| 风险 | AutoCode 的处理方式 |
+| 环节 | AutoCode 提供的帮助 |
 |------|---------------------|
-| 题意不可判定、约束缺失 | `autocode-idea-auditor` 和 `idea-feasibility` 在实现前做只读审计 |
-| 题面样例错误 | `problem_validate` 用解法验证题面样例与样例文件 |
-| 标准解复杂度误判 | `solution_analyze` 输出复杂度、内存估计、风险提示和对拍建议 |
-| 标准解或暴力解不可信 | `solution_audit_std` / `solution_audit_brute` 审计解法假设与 brute 能力 |
-| std 有隐藏 bug | `stress_test_run` 用 sol/brute 多 profile 对拍 |
-| 测试数据覆盖弱 | `problem_generate_tests` 生成 tiny/random/extreme/tle 多策略测试，并优先保证极限类比例 |
-| type=3/type=4 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限/TLE 数据差异 |
-| 错解与 manifest 预期不符 | `wrong_solution_kill`：`expected=fail`（默认）须至少一测非 AC 或与标答不一致；`expected=pass` 须全部测例通过（checker 或 exact） |
-| 工作流跳步 | Claude hooks 调用 `scripts/workflow_guard.py`，缺少前置步骤会直接拒绝工具调用 |
-| 打包前状态不清 | `manifest.json` 记录题目契约，`autocode-verify` 可快速检查基础完整性 |
+| 题意设计 | 检查题目是否清晰、可判定，约束和样例是否完整。 |
+| 解法验证 | 复核正确性、复杂度和边界条件，并安排独立解法交叉验证。 |
+| 数据构造 | 生成覆盖随机、边界、极限和性能场景的测试数据。 |
+| 自动检验 | 检查输入合法性、答案一致性，并用测试数据检验错解。 |
+| 题包整理 | 将题面、代码、数据和说明整理成可继续编辑或提交的结构。 |
 
 核心原则：**AI 负责生成候选内容，AutoCode 负责让每一步必须被验证。**
 
@@ -50,20 +42,21 @@ AutoCode 适合：
 
 - 想用 AI 加速出题，但担心题面、样例、数据和复杂度不可靠的出题人。
 - 需要把题目从 idea 推到可打包 Polygon 结构的竞赛组织者。
-- 希望 AI 严格遵守 Validator-Generator-Checker 流程的团队。
-- 想在 Claude Code 中获得“完整出题工作流 Agent + 工具”的用户。
+- 希望 AI 遵循完整验证流程的团队。
+- 想在 Claude Code 或 Codex 中获得完整、可验证出题工作流的用户。
 
 ## 快速开始
 
 ### 前置要求
 
 - Python 3.10+
+- [`uv`](https://docs.astral.sh/uv/)
 - 支持 C++20 的 `g++`，推荐 GCC 10+
-- Claude Code
+- Claude Code 或 Codex CLI（至少安装一个）
 
-`testlib.h` 已内置在 `src/autocode_mcp/templates/`，无需额外下载。
+常用的竞赛编程工具库已经随 AutoCode 一起提供。
 
-### 安装 Claude Code plugin
+### 安装 Claude Code 插件
 
 推荐通过 Claude Code marketplace 安装：
 
@@ -72,28 +65,18 @@ claude plugin marketplace add https://github.com/SummerOneTwo/autocode-marketpla
 claude plugin install autocode@autocode-marketplace
 ```
 
-安装后插件会启用：
+安装完成后即可获得完整的出题工作流，以及题面、解法、测试数据和题包的自动质量检查。
 
-- 默认 Agent：`autocode-workflow`
-- 审计 Agent：`autocode-idea-auditor`、`autocode-solution-auditor`、`autocode-package-auditor`
-- 工作流 Skills：`autocode-workflow`、`idea-feasibility`、`solution-complexity-audit`、`stress-strategy`、`statement-audit`、`testdata-quality`
-- Hooks：`SessionStart`、`PreToolUse`、`PostToolUse`
-- MCP server：`autocode-mcp`
+### 安装 Codex 插件
 
-### 让 AI 帮你安装（或更新）
+在 Codex 中安装 AutoCode：
 
-不想手动敲命令？把下面这段直接复制发给你的任意 AI 助手（Claude Code、ChatGPT 等），它会自动执行安装或更新：
-
-```text
-请帮我安装或更新 AutoCode 这个 Claude Code 插件。步骤：
-1. 运行 `claude plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git`（若已添加可忽略）
-2. 运行 `claude plugin install autocode@autocode-marketplace`；若已安装则更新到最新版
-3. 安装完成后，简要告诉我如何开始第一道竞赛编程题
+```bash
+codex plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git
+codex plugin add autocode@autocode-marketplace
 ```
 
-该 prompt 由 AI 读取并执行 CLI，不会触碰你的题目数据；安装来源固定为官方 marketplace 仓库。
-
-### 在 Claude Code 中使用
+### 开始使用
 
 安装完成后，可以直接描述你的出题目标：
 
@@ -101,68 +84,36 @@ claude plugin install autocode@autocode-marketplace
 用 AutoCode 创建一道竞赛编程题：给定数组，要求支持若干次区间查询。请先审计题意可行性，再按完整工作流生成题包。
 ```
 
-工作流 Agent 会按门禁推进。如果你直接要求后置步骤，例如“现在打包”，但前置测试还没验证通过，hook 会拒绝并提示缺少哪一步。
+AutoCode 会根据你的目标推进完整工作流，并在每个关键阶段进行质量检查。
 
 ## 工作流总览
 
-非交互题主路径：
+AutoCode 会按以下顺序协助完成一题：
 
 ```text
-problem_create
-  -> solution_build(sol)
-  -> solution_build(brute)
-  -> solution_analyze / solution_audit_std / solution_audit_brute
-  -> validator_build(accuracy >= 0.9)
-  -> generator_build
-  -> stress_test_run(completed_rounds == total_rounds)
-  -> checker_build(需要特殊判题时)
-  -> problem_validate
-  -> problem_generate_tests
-  -> problem_verify_tests(passed)
-  -> problem_pack_polygon
+题意与约束审查
+  -> 标准解与独立验证解
+  -> 校验器、数据生成器和判题组件
+  -> 随机对拍与边界测试
+  -> 最终数据质量检查
+  -> 题面、代码、数据整理成题包
 ```
 
-交互题差异：
+普通题、特殊判题题和交互题都可以沿用这套流程。对于交互题，AutoCode 会额外关注交互协议、查询限制、错误行为和程序结束条件，帮助你把协议写得清楚、测得充分。
+
+## 题目结构
+
+每道题都会整理成清晰的目录，方便继续编辑、复核和提交：
 
 ```text
-validator_build / checker_build
-  替换为 interactor_build
-```
-
-交互题不是简单地“没有输入输出”。`statements/README.md` 必须把协议写成可执行契约：谁先输出、隐藏参数范围、每种查询和最终答案的格式、judge 响应含义、查询次数上限、每次输出后的 flush、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞和继续输出时的判定。样例应写成交互 transcript，明确哪些行来自 judge、哪些行来自选手。
-
-`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `tout` 向选手输出并在每次响应后 `tout.flush()`，用 `ouf` 读取选手输出，所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。不要用 `std::cout` 向选手发送交互数据。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的 verdict。
-
-交互题的 `problem_validate` 会检查题面协议要素与 transcript，不会把 transcript 当作普通 stdin/stdout 样例执行。`problem_pack_polygon` 会在 `manifest.json` 标记 `interactive: true` 时声明 `files/interactor.cpp`，并避免无条件引用不存在的 `val.cpp`。
-
-关键门禁：
-
-- `brute` 必须在 `sol` 之后构建。
-- 非交互题必须通过 `validator_build`，且 `accuracy >= 0.9`。
-- 交互题必须先完成可用的 `interactor_build`，并提供协议覆盖完整的 `interaction_scenarios`。
-- `stress_test_run` 必须完整跑完所有轮次。
-- `problem_generate_tests` 前必须通过 `problem_validate`。
-- `problem_pack_polygon` 前必须通过 `problem_verify_tests`，并满足门禁要求的结构化质量信号（如 `limit_semantics`、`wrong_solution_kill`、`validator_check`）。
-- 生成最终测试后会自动清除旧的 `tests_verified` 状态，必须重新验证。
-
-## 题目目录和 manifest
-
-`problem_create` 会初始化标准题目目录：
-
-```text
-<problem_dir>/
-├── .autocode/
-│   ├── manifest.json
-│   └── runtime.json
+<problem>/
 ├── solutions/
 │   ├── sol.cpp
 │   └── brute.cpp
 ├── files/
 │   ├── gen.cpp
 │   ├── val.cpp
-│   ├── checker.cpp
-│   ├── interactor.cpp
-│   └── testlib.h
+│   └── checker.cpp
 ├── statements/
 │   ├── README.md
 │   └── tutorial.md
@@ -171,44 +122,11 @@ validator_build / checker_build
     └── 01.ans / 01.out
 ```
 
-运行期副产物（workflow 状态、测试 manifest、生成 checkpoint、审计结果）统一收口到 `<problem_dir>/.autocode/runtime.json`，且 `.autocode/` 通过自身内部的 `.gitignore`（`*`）自忽略，题目根不产生 `.gitignore`。
+特殊判题题会加入判题程序，交互题会加入交互程序，其余结构保持一致。
 
-`manifest.json` 是题目的可读契约，记录题名、是否交互、时空限制、题面路径、题解路径、解法角色和测试计划。可选字段包括 `special_judge`、`stress_comparison`（`exact` | `checker`）、`stress_checker_bidirectional`（仅在与 checker 对拍联用时有效）；错解条目可设 `expected`（`fail` | `pass`）以配合 `wrong_solution_kill`。示例：
+## 题面建议
 
-```json
-{
-  "schema_version": "1.0",
-  "problem_name": "Example Problem",
-  "interactive": false,
-  "special_judge": false,
-  "stress_comparison": "exact",
-  "stress_checker_bidirectional": false,
-  "time_limit_ms": 2000,
-  "memory_limit_mb": 256,
-  "statement_path": "statements/README.md",
-  "tutorial_path": "statements/tutorial.md",
-  "solutions": [
-    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
-    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"}
-  ],
-  "case_plan": [
-    {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},
-    {"name": "random-1", "type": "2", "seed": 2, "group": "coverage"},
-    {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit"},
-    {"name": "tle-1", "type": "4", "seed": 4, "group": "limit"}
-  ]
-}
-```
-
-可用 CLI 快速检查：
-
-```bash
-uv run autocode-verify examples/exact-sample
-```
-
-## 题面格式规范
-
-默认题面 `statements/README.md` 应遵循固定顺序：
+一份完整的题面通常包含：
 
 1. 题目
 2. 时间/空间限制
@@ -219,84 +137,27 @@ uv run autocode-verify examples/exact-sample
 7. 样例（多组样例按编号递增）
 8. 说明（样例解释统一放在此处；只解释有代表性的样例即可）
 
-## 测试数据质量
+## 质量保障
 
-最终测试数据不是“生成了就算完成”。AutoCode 会要求 `problem_verify_tests` 通过，默认检查：
+AutoCode 会在关键阶段自动复核：
 
-- `file_count`：每个 `.in` 都有对应答案文件，编号连续。
-- `answer_consistency`：用 `sol` 重跑每个 `.in`。若 `manifest.json` 为 `special_judge: true` 且 `stress_comparison: "checker"`（且已编译 `files/checker`），则用 testlib checker 比对标答；否则与答案文件逐字比对。
-- `validator`：用 `val` 检查所有输入合法性。
-- `no_empty`：没有空文件。
-- `limit_ratio`：最终数据中 `type=3/4` 至少占一半。
-- `limit_semantics`：`type=3` 和 `type=4` 不能高度重合。
-- `wrong_solution_kill`：对 manifest 中 `role=wrong` 的解法跑终测。默认 `expected` 为 `fail`，要求至少一测未通过 checker 或与 `.ans` 不一致；若某条目标解在终测上应合法，可在对应 `SolutionEntry` 设 `expected: "pass"`，此时要求全部测例通过 checker 或与 `.ans` 一致。工具返回的 `details[].hint` 与上述语义一致。
-
-`problem_generate_tests` 支持：
-
-- `answer_ext`：答案后缀，如 `.ans` 或 `.out`。
-- `resume=true`：长任务中断后从 checkpoint 续跑。
-- `hard_timeout_seconds`：工具级硬超时。
-- `problem_cleanup_processes`：清理残留 generator PID 和状态。
-- 当 `type=4` 使用 `extra_args`（如 `mode=tle_dense` / `mode=tle_chain`）且 generator 不兼容时，会自动尝试一次去掉 `extra_args` 的回退运行；结果中可通过 `generator_tle_extra_args_fallbacks` 查看回退次数。
-
-实战注意事项：
-
-- 使用 testlib validator 时，结束前必须调用 `inf.readEof()`；如果希望容忍尾部空白，推荐 `inf.seekEof(); inf.readEof();`。
-- `stress_test_run` 会在返回中附带 `complexity_context`（来自 `<problem_dir>/.autocode/runtime.json` 的 `workflow` 键，由 `solution_analyze` / `solution_audit_brute` 等步骤写入）以及 `n_max_advisory`；**请由 LLM 根据证据与题意决定** `n_max` 等参数。兼容旧调用方时仍提供同内容的 `n_max_warning` 别名。
-- 编写 brute 时必须直接模拟题目约束本身，避免把“必须同时满足的条件”误简化成“可任选子集”的模型。
-
-## 工具列表
-
-AutoCode 暴露 22 个 MCP 工具。一般用户不需要手动调用它们，`autocode-workflow` Agent 会按门禁顺序调用。
-
-| 分组 | 工具 |
-|------|------|
-| 文件 | `file_read`, `file_save` |
-| 解法 | `solution_build`, `solution_run`, `solution_analyze`, `solution_audit_std`, `solution_audit_brute` |
-| 校验器 | `validator_build`, `validator_select` |
-| 生成器 | `generator_build`, `generator_run` |
-| 检查器/交互器 | `checker_build`, `interactor_build` |
-| 对拍 | `stress_test_run` |
-| 题目管理 | `problem_create`, `problem_validate`, `problem_generate_tests`, `problem_cleanup_processes`, `problem_verify_tests`, `problem_audit`, `problem_pack_polygon`, `problem_build_all` |
-
-所有工具返回统一结构：
-
-```json
-{
-  "success": true,
-  "data": {},
-  "error": null
-}
-```
-
-`problem_audit` 会聚合题面、manifest、workflow state、终测质量信号和难度评级证据，输出 `decision=go/no_go`、`blocking_issues`、`risk_report`、`quality_signals`、`difficulty_signals` 和 `next_actions`。命令行入口：
-
-```bash
-uv run autocode-audit <problem_dir> --mode full --report audit_report.json
-```
-
-若在 `manifest.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包。
+- 题面、输入输出格式和样例是否互相一致。
+- 标准解的正确性、复杂度和边界条件。
+- 校验器是否覆盖题目约束，生成的数据是否有效。
+- 标准解与独立验证解在多种场景下的结果是否一致。
+- 随机、构造、边界、极限和性能数据是否形成有效覆盖。
+- 代表性错解是否被最终测试识别。
+- 题面、代码、答案和目录结构是否可以直接整理成题包。
 
 ## 示例目录
 
-仓库包含三个用于验证 manifest 和文档结构的样例：
+仓库包含三个不同题型的样例：
 
 - `examples/exact-sample`：标准精确输出题。
 - `examples/checker-sample`：特殊判题题。
 - `examples/interactive-sample`：交互题。
 
-这些样例主要用于展示 `manifest.json` 契约和 `autocode-verify` 检查，不是完整比赛题包。
-
-## 本地开发
-
-Claude Code plugin 是推荐入口，插件资产与 `autocode-mcp` 源码同仓。本地启动 server 用于开发调试：
-
-```bash
-uv sync
-uv run autocode-mcp
-```
-
-当前仅支持本地 stdio 传输，不支持 HTTP/SSE、远程连接。
+这些样例可以作为不同题型的目录和文件组织参考。
 
 ## 贡献
 

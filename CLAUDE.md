@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-AutoCode 是一个 **Claude Code plugin**，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server，但对外主路径是远程 plugin 安装，而不是单独本地 MCP 配置。
+AutoCode 是一个面向 Claude Code 与 Codex 的 plugin，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server；两种宿主共享 MCP 工具、Skills 与 server 级门禁，Claude 额外使用 Agent 和 hooks。
 
 它要解决的核心问题不是“让 AI 直接写完一道题”，而是把 AI 生成的题面、解法、validator、generator、checker/interactor、对拍、测试数据和 Polygon 打包放进可验证、可审计、会阻止跳步的流程。
 
@@ -31,8 +31,13 @@ uv run ruff check .
 # 类型检查
 uv run mypy src/
 
-# 校验 Claude plugin 结构
+# 校验 Claude plugin 结构（若本机安装了 Claude CLI）
 claude plugin validate .
+
+# 校验 Codex manifest 与可复现 bundle
+uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py -q
+uv run python scripts/build_plugin_bundle.py --output /tmp/autocode-bundle
+uv run python scripts/build_plugin_bundle.py --check --output /tmp/autocode-bundle
 
 # 运行 MCP Server（本地开发/测试）
 uv run autocode-mcp
@@ -53,6 +58,7 @@ uv run twine check dist/*
 ```text
 AutoCode/
 ├── .claude-plugin/        # Claude plugin manifest
+├── .codex-plugin/         # Codex plugin manifest
 ├── agents/                # Claude plugin agent definitions
 ├── hooks/                 # Claude hook config
 ├── scripts/               # Hook/runtime helper scripts
@@ -67,6 +73,7 @@ AutoCode/
 ├── tests/                 # 测试用例
 ├── .mcp.json              # 本地 MCP 接入配置（开发/兼容用）
 ├── settings.json          # Claude plugin 默认 agent
+├── scripts/build_plugin_bundle.py # Codex/marketplace bundle builder
 └── pyproject.toml         # Python package / scripts
 ```
 
@@ -131,7 +138,7 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 ## 强制工作流
 
-该顺序由 `hooks/hooks.json` 和 `scripts/workflow_guard.py` 实际强制执行。
+该顺序由 `src/autocode_mcp/workflow/enforcement.py` 和 MCP server 实际强制执行；Claude 的 `hooks/hooks.json` / `scripts/workflow_guard.py` 只提供提前提示与兼容适配，Codex 不依赖 hooks。
 
 1. `problem_create`
 2. `solution_build(solution_type="sol")`
@@ -210,7 +217,7 @@ uv run autocode-audit <problem_dir> --mode full --report audit_report.json
 ## 关键约束
 
 - 包管理强制使用 `uv`；不要引入 pip/poetry/conda 流程。
-- 对外文档优先描述 Claude Code plugin；MCP server 是实现与开发入口。
+- 对外文档同时描述 Claude Code 与 Codex plugin；MCP server 是两者共享的实现与开发入口。
 - 默认主路径是远程 plugin 安装；本地模式只用于开发、测试、验证。
 - `hooks/` 只放 hook 配置，hook 逻辑脚本放在 `scripts/`。
 - 模板资源统一放在 `src/autocode_mcp/templates/`。

@@ -1,12 +1,11 @@
 ---
 name: autocode-workflow
 description: Use when creating competitive programming problems with AutoCode MCP tools. Enforces the plugin workflow for problem statements, std/brute solutions, validators, generators, stress tests, final data verification, and Polygon packaging.
-disable-model-invocation: false
 ---
 
 # AutoCode Problem Creation Workflow
 
-AutoCode is a Claude Code plugin for competitive programming problem setting. It exists because AI-generated problems often fail in subtle ways:
+AutoCode is a host-independent MCP workflow distributed through Claude Code and Codex plugins. It exists because AI-generated problems often fail in subtle ways:
 
 - statement is ambiguous or samples do not match the intended solution;
 - standard solution has hidden bugs;
@@ -63,7 +62,7 @@ problem_create
   -> problem_pack_polygon
 ```
 
-The authoritative implementation is `scripts/workflow_guard.py`.
+The authoritative implementation is `src/autocode_mcp/workflow/enforcement.py`, called by the MCP server for every managed workflow tool. `scripts/workflow_guard.py` is only the Claude Code hook adapter; Codex and other MCP hosts use the same server-side gates without hooks.
 
 Interactive tasks are not just "no validator". They require an explicit protocol contract in the statement and a testlib interactor that can reject protocol violations. Treat missing protocol semantics as a blocker, the same severity as a missing validator for a non-interactive task.
 
@@ -256,7 +255,7 @@ Use `autocode-verify <problem_dir>` for quick structural checks.
 4. Do not validate/package based on file presence alone.
 5. Do not generate final tests before statement validation passes.
 6. Do not package before `problem_verify_tests` passes.
-7. Do not ignore hook denial; fix the missing prerequisite instead.
+7. Do not ignore a structured MCP gate denial (or a Claude hook denial); fix the missing prerequisite instead.
 
 ## Failure Recovery
 

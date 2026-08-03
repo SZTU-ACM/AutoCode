@@ -1,7 +1,6 @@
 ---
 name: idea-feasibility
 description: Use before coding to decide whether a problem idea is judgeable, implementable, and verifiable.
-disable-model-invocation: false
 ---
 
 # Idea Feasibility Skill

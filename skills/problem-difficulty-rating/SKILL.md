@@ -1,7 +1,6 @@
 ---
 name: problem-difficulty-rating
 description: "Turn deterministic problem_audit difficulty signals into a CF-style rating with reasons and confidence."
-disable-model-invocation: false
 ---
 
 # Problem Difficulty Rating Skill

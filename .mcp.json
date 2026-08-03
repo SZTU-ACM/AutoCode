@@ -3,6 +3,7 @@
     "autocode": {
       "command": "uv",
       "args": ["run", "autocode-mcp"],
+      "cwd": ".",
       "description": "AutoCode MCP Server for competitive programming problem creation"
     }
   }

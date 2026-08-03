@@ -18,6 +18,7 @@ from mcp.types import (
     Tool,
 )
 
+from . import __version__
 from .tools.audit import ProblemAuditTool
 from .tools.base import Tool as BaseTool
 from .tools.base import ToolResult
@@ -39,9 +40,16 @@ from .tools.stress_test import StressTestRunTool
 from .tools.test_verify import ProblemVerifyTestsTool
 from .tools.validation import ProblemValidateTool
 from .tools.validator import ValidatorBuildTool, ValidatorSelectTool
+from .workflow.enforcement import (
+    apply_result,
+    blocked_result,
+    has_workflow_context,
+    preflight,
+    prepare_call,
+)
 
 # 创建 MCP Server 实例
-app = Server("autocode-mcp")
+app = Server("autocode-mcp", version=__version__)
 
 # 所有工具实例
 TOOLS: dict[str, BaseTool] = {}
@@ -116,8 +124,30 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
         )
 
     tool = TOOLS[name]
+    problem_dir = arguments.get("problem_dir")
+    enforce_workflow = (
+        isinstance(problem_dir, str)
+        and problem_dir.strip()
+        and (name == "problem_create" or has_workflow_context(problem_dir))
+    )
+    if enforce_workflow:
+        violations = preflight(name, problem_dir, arguments)
+        if violations:
+            blocked = ToolResult.fail(
+                "Workflow gate blocked this tool call",
+                **blocked_result(name, violations),
+            )
+            blocked_dict = blocked.to_dict()
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(blocked_dict, ensure_ascii=False))],
+                structuredContent=blocked_dict,
+                isError=True,
+            )
+        prepare_call(name, problem_dir)
     try:
         result = await tool.execute(**arguments)
+        if enforce_workflow:
+            apply_result(problem_dir, name, arguments, result.success, result.data)
         result_dict = result.to_dict()
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(result_dict, ensure_ascii=False))],
@@ -125,6 +155,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
             isError=not result.success,
         )
     except asyncio.CancelledError:
+        if enforce_workflow:
+            apply_result(problem_dir, name, arguments, False, {"interrupted": True})
         cancel_result = ToolResult.fail(
             "Tool call interrupted by cancellation",
             interrupted=True,
@@ -137,6 +169,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except Exception as e:
+        if enforce_workflow:
+            apply_result(problem_dir, name, arguments, False, {"exception": type(e).__name__})
         import traceback
 
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))

@@ -1,7 +1,6 @@
 ---
 name: agent-skill-governance
 description: Define and enforce project-wide quality standards for agent and skill documents. Use when creating, reviewing, or refactoring files under agents/ and skills/ to keep structure, terminology, and output contracts consistent.
-disable-model-invocation: false
 ---
 
 # Agent and Skill Governance

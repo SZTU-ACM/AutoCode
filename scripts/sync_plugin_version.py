@@ -4,6 +4,7 @@
 ``pyproject.toml`` is the authoritative version. This script propagates it to:
 
 - ``.claude-plugin/plugin.json``  -> ``version``
+- ``.codex-plugin/plugin.json``   -> ``version``
 - ``src/autocode_mcp/__init__.py`` -> ``__version__`` (single line literal)
 
 Run it on release / build so the three never drift. No external deps beyond the
@@ -12,6 +13,7 @@ standard library.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -24,6 +26,7 @@ except ModuleNotFoundError:  # Python 3.10 (project floor) has no tomllib
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
+CODEX_PLUGIN_JSON = REPO_ROOT / ".codex-plugin" / "plugin.json"
 INIT_PY = REPO_ROOT / "src" / "autocode_mcp" / "__init__.py"
 
 
@@ -42,15 +45,25 @@ def read_pyproject_version() -> str:
 
 
 def write_plugin_json(version: str) -> None:
-    import json
-
     if not PLUGIN_JSON.is_file():
         raise SystemExit(f"plugin.json not found at {PLUGIN_JSON}")
     plugin = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
     old = plugin.get("version")
     plugin["version"] = version
     PLUGIN_JSON.write_text(json.dumps(plugin, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"plugin.json: {old} -> {version}")
+    print(f".claude-plugin/plugin.json: {old} -> {version}")
+
+
+def write_codex_plugin_json(version: str) -> None:
+    if not CODEX_PLUGIN_JSON.exists():
+        raise SystemExit(f"Codex plugin manifest not found at {CODEX_PLUGIN_JSON}")
+    plugin = json.loads(CODEX_PLUGIN_JSON.read_text(encoding="utf-8"))
+    old = plugin.get("version")
+    plugin["version"] = version
+    CODEX_PLUGIN_JSON.write_text(
+        json.dumps(plugin, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f".codex-plugin/plugin.json: {old} -> {version}")
 
 
 def write_init_version(version: str) -> None:
@@ -70,6 +83,7 @@ def write_init_version(version: str) -> None:
 def main() -> int:
     version = read_pyproject_version()
     write_plugin_json(version)
+    write_codex_plugin_json(version)
     write_init_version(version)
     print(f"Synced version {version} from pyproject.toml")
     return 0

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-08-02
+
+### Breaking Changes
+
+- 工作流门禁下沉到 MCP server：存在 `.autocode/manifest.json` 或运行期状态的题目目录现在由 server 直接拒绝乱序调用；Claude hooks 只负责提前提示，Codex 不依赖 hooks。
+- 分发契约从 Claude Code plugin 扩展为 Claude Code + Codex plugin。Codex 使用 `.codex-plugin/plugin.json`、共享 Skills、MCP server 和 marketplace bundle；不再假设 Claude 专有 hooks 或 Agent 能力存在。
+
+### Features
+
+- 新增 Codex plugin manifest、Codex marketplace bundle 生成器和 provenance fingerprint。
+- 新增结构化门禁拒绝结果：`gate_blocked`、`blocking_issues`、`next_actions`。
+- 统一 MCP server、Claude hook adapter 和运行期状态转换，覆盖成功、失败、异常和取消路径。
+- 为 Codex/无 hooks 客户端补充 server 级工作流回归测试和 ratio 异常输入防护。
+- CI 新增 plugin contract job，构建并检查干净的 Claude/Codex bundle，防止 manifest 或分发资产漂移。
+- 将 MCP 依赖限制在当前兼容的 1.x 主版本，避免独立 wheel 安装时被 MCP 2.x API 破坏。
+
+### Distribution
+
+- `autocode-marketplace` 增加 `.agents/plugins/marketplace.json` 与 `plugins/autocode/` Codex bundle；发布前需运行 `scripts/build_plugin_bundle.py --check`。
+- marketplace 仓库增加无依赖的 `scripts/validate_marketplace.py` 和 layout CI，用于校验 catalog、双宿主 manifest 与 provenance。
+
 ## [2.0.0] - 2026-07-16
 
 ### Breaking Changes

@@ -1,7 +1,6 @@
 ---
 name: problem-validate
 description: Validate statement samples and sample files for competitive programming problems. Ensures the expected outputs in problem statements match the actual solution output.
-disable-model-invocation: false
 ---
 
 # Problem Validation Skill

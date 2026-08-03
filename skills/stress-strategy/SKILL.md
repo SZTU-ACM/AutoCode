@@ -1,7 +1,6 @@
 ---
 name: stress-strategy
 description: Build multi-profile stress tests from brute complexity and constraints, then execute with traceable evidence.
-disable-model-invocation: false
 ---
 
 # Stress Strategy Skill

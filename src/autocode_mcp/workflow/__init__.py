@@ -1,3 +1,14 @@
+from .enforcement import (
+    DEFAULT_QUALITY_GATES,
+    GateViolation,
+    apply_result,
+    blocked_result,
+    has_workflow_context,
+    load_workflow_state,
+    preflight,
+    prepare_call,
+    save_workflow_state,
+)
 from .guard import GateIssue, check_gates, signal_satisfied
 from .manifest import (
     MANIFEST_NAME,
@@ -20,4 +31,13 @@ __all__ = [
     "check_gates",
     "GateIssue",
     "signal_satisfied",
+    "DEFAULT_QUALITY_GATES",
+    "GateViolation",
+    "preflight",
+    "prepare_call",
+    "apply_result",
+    "blocked_result",
+    "has_workflow_context",
+    "load_workflow_state",
+    "save_workflow_state",
 ]

@@ -13,6 +13,8 @@ import tempfile
 
 import pytest
 
+from autocode_mcp import __version__
+
 
 class MCPClient:
     """简单的 MCP 客户端，用于端到端测试。"""
@@ -117,6 +119,7 @@ async def test_mcp_handshake(mcp_client: MCPClient):
     assert "protocolVersion" in result
     assert "serverInfo" in result
     assert result["serverInfo"]["name"] == "autocode-mcp"
+    assert result["serverInfo"]["version"] == __version__
 
 
 @pytest.mark.asyncio
@@ -274,6 +277,7 @@ async def test_packaged_console_script_handshake(packaged_mcp_client: MCPClient)
     assert "protocolVersion" in result
     assert "serverInfo" in result
     assert result["serverInfo"]["name"] == "autocode-mcp"
+    assert result["serverInfo"]["version"] == __version__
 
 
 @pytest.mark.packaging

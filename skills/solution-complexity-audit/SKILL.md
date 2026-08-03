@@ -1,7 +1,6 @@
 ---
 name: solution-complexity-audit
 description: Audit std/brute assumptions with MCP evidence, including worst/average complexity risk and stress readiness.
-disable-model-invocation: false
 ---
 
 # Solution Complexity Audit

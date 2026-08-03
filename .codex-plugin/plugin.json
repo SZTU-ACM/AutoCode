@@ -1,0 +1,39 @@
+{
+  "name": "autocode",
+  "version": "3.0.0",
+  "description": "Verified competitive-programming problem authoring workflows for Claude Code and Codex.",
+  "author": {
+    "name": "SummerOneTwo",
+    "url": "https://github.com/SummerOneTwo"
+  },
+  "homepage": "https://github.com/SZTU-ACM/AutoCode",
+  "repository": "https://github.com/SZTU-ACM/AutoCode",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "competitive-programming",
+    "mcp",
+    "autocode"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AutoCode",
+    "shortDescription": "Create and verify competitive-programming problems",
+    "longDescription": "AutoCode guides problem setters from an idea through solutions, validators, generators, stress tests, final data verification, and Polygon packaging with enforceable quality gates.",
+    "developerName": "SZTU-ACM",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Create a verified competitive-programming problem with AutoCode.",
+      "Audit this problem idea before writing solutions.",
+      "Run the full AutoCode workflow and package the problem."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

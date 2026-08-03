@@ -1,7 +1,6 @@
 ---
 name: statement-audit
 description: Audit statement, tutorial, and samples for consistency and publication readiness before packaging.
-disable-model-invocation: false
 ---
 
 # Statement Audit Skill
