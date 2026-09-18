@@ -451,9 +451,9 @@ class ProblemVerifyTestsTool(Tool):
         timed_out = []
         errors = []
         test_timeout = (
-            max(1.0, manifest.time_limit_ms / 1000.0)
+            max(0.1, float(manifest.time_limit_ms) / 1000.0 * 1.5)
             if (manifest and getattr(manifest, "time_limit_ms", None))
-            else float(timeout)
+            else min(5.0, float(timeout))
         )
 
         if verify_with_checker:
@@ -1088,9 +1088,9 @@ class ProblemVerifyTestsTool(Tool):
         details = []
         all_killed = True
         test_timeout = (
-            max(1.0, manifest.time_limit_ms / 1000.0)
+            max(0.1, float(manifest.time_limit_ms) / 1000.0 * 1.5)
             if (manifest and getattr(manifest, "time_limit_ms", None))
-            else float(timeout)
+            else min(5.0, float(timeout))
         )
 
         for wrong_name in wrong_solution_names:
@@ -1135,10 +1135,14 @@ class ProblemVerifyTestsTool(Tool):
                 if v != "SKIP"
             ]
 
-            if not per_test:
+            if exp == "fail":
                 killed = False
-            elif exp == "fail":
-                killed = any(v != "AC" for v in per_test)
+                for v in per_test:
+                    if v != "AC":
+                        killed = True
+                        break
+            elif not per_test:
+                killed = False
             else:
                 killed = all(v == "AC" for v in per_test)
 

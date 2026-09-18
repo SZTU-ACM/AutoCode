@@ -199,3 +199,87 @@ async def test_file_save_creates_directories():
 
         assert result.success
         assert os.path.exists(result.data["path"])
+
+
+@pytest.mark.asyncio
+async def test_file_read_relative_without_problem_dir_rejected():
+    """测试未指定 problem_dir 的相对路径读取请求直接拒绝。"""
+    tool = FileReadTool()
+    result = await tool.execute(path="relative.txt")
+    assert not result.success
+    assert "problem_dir is required" in result.error
+
+
+@pytest.mark.asyncio
+async def test_file_read_line_paging():
+    """测试按行分页流式读取。"""
+    tool = FileReadTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, "lines.txt")
+        with open(file_path, "w", encoding="utf-8") as f:
+            for i in range(1, 11):
+                f.write(f"line {i}\n")
+
+        result = await tool.execute(
+            path="lines.txt",
+            problem_dir=tmpdir,
+            start_line=3,
+            line_count=4,
+        )
+
+        assert result.success
+        assert result.data["total_lines"] == 10
+        assert result.data["is_truncated"] is True
+        assert result.data["content"] == "line 3\nline 4\nline 5\nline 6\n"
+
+
+@pytest.mark.asyncio
+async def test_file_read_byte_slicing_with_utf8_boundary():
+    """测试按字节切片读取及 UTF-8 边界保护。"""
+    tool = FileReadTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, "utf8.txt")
+        # "测试"每个字符占用 3 个字节
+        content = "测试文件切片读取内容"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        total_len = len(content.encode("utf-8"))
+        result = await tool.execute(
+            path="utf8.txt",
+            problem_dir=tmpdir,
+            offset_bytes=0,
+            limit_bytes=6,
+        )
+
+        assert result.success
+        assert result.data["total_bytes"] == total_len
+        assert result.data["is_truncated"] is True
+        assert result.data["content"] == "测试"
+        assert result.data["next_offset"] == 6
+
+
+@pytest.mark.asyncio
+async def test_file_read_symlink_escape_denied():
+    """测试符号链接指向题目目录外部时触发访问拒绝。"""
+    tool = FileReadTool()
+
+    with tempfile.TemporaryDirectory() as outside_dir, tempfile.TemporaryDirectory() as problem_dir:
+        secret_file = os.path.join(outside_dir, "secret.txt")
+        with open(secret_file, "w", encoding="utf-8") as f:
+            f.write("sensitive_token")
+
+        symlink_path = os.path.join(problem_dir, "leak_link.txt")
+        try:
+            os.symlink(secret_file, symlink_path)
+        except OSError:
+            pytest.skip("Symlink creation not supported")
+
+        result = await tool.execute(
+            path="leak_link.txt",
+            problem_dir=problem_dir,
+        )
+        assert not result.success
+        assert "Access denied" in result.error

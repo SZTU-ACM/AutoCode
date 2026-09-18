@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
-from .process import POSIX_KILL_SIGNAL as _POSIX_KILL_SIGNAL
+from .process import POSIX_KILL_SIGNAL as _POSIX_KILL_SIGNAL, terminate_pid_tree
 
 if TYPE_CHECKING:
     from .win_job import WinJobObject
@@ -166,7 +166,7 @@ async def compile_cpp(
             include_flags.extend(["-I", inc_dir])
     # 添加 templates 目录
     if os.path.exists(templates_dir):
-        include_flags.extend(["-I", templates_dir])
+        include_flags.extend(["-isystem", templates_dir])
 
     cmd = [
         compiler,
@@ -184,18 +184,29 @@ async def compile_cpp(
     if sys.platform == "win32":
         cmd.append("-static")
 
+    popen_kwargs: dict[str, Any] = {}
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
+
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **popen_kwargs,
         )
 
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+        except (TimeoutError, asyncio.CancelledError) as e:
+            if process.pid:
+                await terminate_pid_tree(process.pid)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except Exception:
+                pass
+            if isinstance(e, asyncio.CancelledError):
+                raise
             return CompileResult(
                 success=False,
                 error=f"Compilation timeout after {timeout}s. Consider increasing timeout or simplifying source code.",
@@ -274,15 +285,8 @@ async def _force_terminate_process(
         except OSError as e:
             _logger.debug("Job object terminate failed: %s", e)
 
-    # POSIX 上子进程以 start_new_session 启动，优先按进程组整树回收，
-    # 避免 generator 派生的子进程残留。
-    if os.name != "nt" and process.pid:
-        try:
-            cast(Any, os).killpg(cast(Any, os).getpgid(process.pid), _POSIX_KILL_SIGNAL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        except OSError as e:
-            _logger.debug("killpg failed (pid=%s): %s", process.pid, e)
+    if process.pid:
+        await terminate_pid_tree(process.pid)
 
     # 再尝试正常终止
     try:
@@ -402,10 +406,26 @@ async def _run_process(
         except TimeoutError:
             # 超时时强制终止进程
             await _force_terminate_process(process, job)
+            out_str = ""
+            err_str = ""
+            if stdout_path and os.path.exists(stdout_path):
+                try:
+                    with open(stdout_path, "rb") as _out:
+                        out_str = _out.read(10 * 1024 * 1024).decode("utf-8", errors="replace")
+                except OSError:
+                    pass
+            if stderr_path and os.path.exists(stderr_path):
+                try:
+                    with open(stderr_path, "rb") as _err:
+                        err_str = _err.read(10 * 1024 * 1024).decode("utf-8", errors="replace")
+                except OSError:
+                    pass
             return RunResult(
                 success=False,
                 timed_out=True,
                 error=f"Execution timeout after {timeout}s. The program may contain an infinite loop or the input data may be too large.",
+                stdout=out_str,
+                stderr=err_str,
                 time_ms=int((time.time() - start_time) * 1000),
             )
 
@@ -419,8 +439,8 @@ async def _run_process(
         out_f.close()
         err_f.close()
         with open(stdout_path, "rb") as _out, open(stderr_path, "rb") as _err:
-            stdout_data = _out.read()
-            stderr_data = _err.read()
+            stdout_data = _out.read(10 * 1024 * 1024)
+            stderr_data = _err.read(10 * 1024 * 1024)
         ret = process.returncode if process.returncode is not None else -1
         out_str = stdout_data.decode("utf-8", errors="replace")
         err_str = stderr_data.decode("utf-8", errors="replace")

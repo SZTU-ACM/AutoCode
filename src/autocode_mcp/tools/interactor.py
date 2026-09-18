@@ -322,6 +322,10 @@ class InteractorBuildTool(Tool):
                 # 检查是否超时
                 timed_out = sleep_task in done
 
+                # 取消所有未完成的任务
+                for task in pending:
+                    task.cancel()
+
                 if timed_out:
                     interactor.kill()
                     solution.kill()

@@ -133,6 +133,16 @@ class ProblemAuditTool(Tool):
             blocking.append(
                 {"gate": "statement_consistency", "reason": str(statement_consistency["message"])}
             )
+            next_actions.append(
+                {
+                    "tool_name": "problem_validate",
+                    "tool": "problem_validate",
+                    "action": "check_statement_consistency",
+                    "recommended_arguments": {"problem_dir": problem_path},
+                    "arguments": {"problem_dir": problem_path},
+                    "priority": "high",
+                }
+            )
         elif not statement_consistency["passed"]:
             warnings.append(
                 {

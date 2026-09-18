@@ -11,6 +11,7 @@ import os
 
 from .. import TEMPLATES_DIR
 from ..utils.compiler import BuildSpec, compile_all
+from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin
 from .schemas import ProblemBuildAllInput
@@ -80,8 +81,9 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                 discovered=[],
             )
 
+        exe_ext = get_exe_extension()
         for spec in specs:
-            old_bin = os.path.join(problem_dir, os.path.splitext(spec.source)[0])
+            old_bin = os.path.join(problem_dir, f"{os.path.splitext(spec.source)[0]}{exe_ext}")
             if os.path.isfile(old_bin):
                 try:
                     os.remove(old_bin)

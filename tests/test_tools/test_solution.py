@@ -495,3 +495,38 @@ int main() {
         )
 
         assert not run_result.success
+
+
+@pytest.mark.asyncio
+async def test_solution_run_mle_propagation():
+    """测试解法内存超限时正确透传 MLE 状态。"""
+    build_tool = SolutionBuildTool()
+    run_tool = SolutionRunTool()
+
+    mle_code = """
+#include <iostream>
+#include <new>
+int main() {
+    throw std::bad_alloc();
+    return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        build_result = await build_tool.execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            code=mle_code,
+        )
+        assert build_result.success
+
+        run_result = await run_tool.execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            input_data="",
+            timeout=5,
+        )
+
+        assert not run_result.success
+        assert "MLE" in run_result.error
+        assert run_result.data.get("memory_limit_exceeded") is True

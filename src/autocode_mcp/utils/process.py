@@ -76,6 +76,20 @@ async def terminate_pid_tree(pid: int) -> tuple[bool, str]:
     current_pgid = os.getpgid(0)
     current_pid = os.getpid()
     parent_pid = os.getppid()
+
+    # 递归枚举全部后代进程并逐级终止，覆盖脱离进程组的后代
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                if child.pid > 1 and child.pid != current_pid and child.pid != parent_pid:
+                    os.kill(child.pid, POSIX_KILL_SIGNAL)
+            except (ProcessLookupError, PermissionError, psutil.NoSuchProcess):
+                pass
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
     try:
         pgid = cast(Any, os).getpgid(pid)
         if pgid == pid and pgid > 1 and pgid != current_pgid:

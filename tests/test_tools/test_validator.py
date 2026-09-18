@@ -128,3 +128,45 @@ async def test_validator_select_empty():
     result = await tool.execute(candidates=[])
 
     assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_validator_select_float_score():
+    """测试浮点数分数排序，避免被整数截断。"""
+    tool = ValidatorSelectTool()
+
+    candidates = [
+        {"id": "v1", "score": 38.0, "binary_path": "/path/v1"},
+        {"id": "v2", "score": 38.8, "binary_path": "/path/v2"},
+        {"id": "v3", "score": 38.2, "binary_path": "/path/v3"},
+    ]
+
+    result = await tool.execute(candidates=candidates)
+
+    assert result.success
+    assert result.data["best_candidate"]["id"] == "v2"
+    assert result.data["best_candidate"]["score"] == 38.8
+
+
+@pytest.mark.asyncio
+async def test_validator_select_tiebreaker_with_source_path():
+    """测试分数相同时使用代码文件长度、ID 与二进制路径作为确定性决胜排序。"""
+    tool = ValidatorSelectTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_short = os.path.join(tmpdir, "short.cpp")
+        src_long = os.path.join(tmpdir, "long.cpp")
+        with open(src_short, "w", encoding="utf-8") as f:
+            f.write("short")
+        with open(src_long, "w", encoding="utf-8") as f:
+            f.write("longer content")
+
+        candidates = [
+            {"id": "b", "score": 100.0, "source_path": src_long, "binary_path": "/bin/b"},
+            {"id": "a", "score": 100.0, "source_path": src_short, "binary_path": "/bin/a"},
+        ]
+
+        result = await tool.execute(candidates=candidates)
+
+        assert result.success
+        assert result.data["best_candidate"]["id"] == "a"

@@ -184,11 +184,21 @@ class ValidatorSelectTool(Tool):
         if not candidates:
             return ToolResult.fail("No candidates provided")
 
-        def _sort_key(c: dict) -> tuple[int, int, str]:
-            score = c.get("score", 0) if isinstance(c.get("score"), (int, float)) else 0
-            code_len = len(str(c.get("code") or ""))
+        def _sort_key(c: dict) -> tuple[float, int, str, str]:
+            score = float(c.get("score", 0)) if isinstance(c.get("score"), (int, float)) else 0.0
+            code = c.get("code")
+            if code is not None and str(code):
+                code_len = len(str(code))
+            elif c.get("source_path") and os.path.isfile(str(c.get("source_path"))):
+                try:
+                    code_len = os.path.getsize(str(c.get("source_path")))
+                except OSError:
+                    code_len = 0
+            else:
+                code_len = 0
             cand_id = str(c.get("id") or "")
-            return (-int(score), code_len, cand_id)
+            bin_path = str(c.get("binary_path") or "")
+            return (-score, code_len, cand_id, bin_path)
 
         sorted_candidates = sorted(
             candidates,
