@@ -4,9 +4,9 @@
 
 ## 项目定位
 
-AutoCode 是一个面向 Claude Code 与 Codex 的 plugin，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server；两种宿主共享 MCP 工具、Skills 与 server 级门禁，Claude 额外使用 Agent 和 hooks。
+AutoCode 是一个面向 Claude Code、Codex 与 DeepSeek Harness (DSH) 的插件系统，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server；各宿主共享 MCP 工具、Skills 与 server 级门禁，Claude 额外使用 Agent 和 hooks。
 
-它要解决的核心问题不是“让 AI 直接写完一道题”，而是把 AI 生成的题面、解法、validator、generator、checker/interactor、对拍、测试数据和 Polygon 打包放进可验证、可审计、会阻止跳步的流程。
+AutoCode 的核心目标是将人工智能生成的题面、解法、validator、generator、checker/interactor、对拍、测试数据和 Polygon 打包纳入可验证、可审计且具备严格阶段校验的出题流程。
 
 重点风险：
 
@@ -59,6 +59,7 @@ uv run twine check dist/*
 AutoCode/
 ├── .claude-plugin/        # Claude plugin manifest
 ├── .codex-plugin/         # Codex plugin manifest
+├── .dsh-plugin/           # DeepSeek Harness (DSH) plugin bundle & configuration
 ├── agents/                # Claude plugin agent definitions
 ├── hooks/                 # Claude hook config
 ├── scripts/               # Hook/runtime helper scripts
@@ -149,7 +150,7 @@ AutoCode 当前暴露 22 个 MCP 工具：
 7. `checker_build` 与 `stress_test_run`：`scripts/workflow_guard.py` 规定，非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`（非交互）。若在 `manifest.json` 设置 `special_judge: true` 且 `stress_comparison: "checker"`，可在 stress **之前**先完成 `checker_build`，且 `stress_test_run` 会用 checker 判定 sol/brute（详见内置 checker 提示词中的 argv 约定）。
 8. `problem_validate(validation_passed)`（交互题验证协议与 transcript，不按普通 stdin/stdout 样例执行）
 9. `problem_generate_tests(generated_test_count > 0)`
-10. `problem_verify_tests(passed)`（`special_judge` 时以 checker 校验终测与错解，而非仅字符串比对）
+10. `problem_verify_tests(passed)`（`special_judge` 时使用 checker 校验终测与错解，替代简单的字符串比对）
 11. `problem_audit(mode="full")`（推荐在打包前运行，收集最终 go/no_go、质量信号与难度证据）
 12. `problem_pack_polygon`（存在 `files/checker.cpp` 时生成的 `problem.xml` 会带上 checker；交互题会带上 `files/interactor.cpp`）
 
@@ -190,13 +191,13 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 ## Manifest
 
-每个题目应维护 `manifest.json`（位于 `.autocode/`）作为人类和 CI 都可读的题目契约。模型位于 `src/autocode_mcp/workflow/`，模板位于 `src/autocode_mcp/templates/manifest.json`。
+每个题目应维护 `manifest.json`（位于 `.autocode/`）作为人类和 CI 都可读的题目配置约定。模型位于 `src/autocode_mcp/workflow/`，模板位于 `src/autocode_mcp/templates/manifest.json`。
 
 常用字段补充：
 
 - `special_judge` / `stress_comparison`（`exact` | `checker`）/ 可选 `stress_checker_bidirectional`：控制对拍、终测、错解杀伤与样例校验是否走 testlib checker（须 `checker_build` 且存在 `files/checker`）。仅 `special_judge` 而 `stress_comparison=exact` 时终测等仍以字符串比对标答文件为主。
 - `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
-- `load_manifest` 若遇 `manifest.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误而非裸 traceback。
+- `load_manifest` 若遇 `manifest.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误信息，杜绝未捕获的裸 traceback。
 - `audit_gates` 控制 full audit、validator/checker/interactor 自测、题面一致性与难度置信度等发布前门禁。
 - `difficulty` 记录规则/LLM 难度评级的结果字段；`problem_audit(include_difficulty=true)` 会先产出确定性 signals。
 
@@ -217,7 +218,7 @@ uv run autocode-audit <problem_dir> --mode full --report audit_report.json
 ## 关键约束
 
 - 包管理强制使用 `uv`；不要引入 pip/poetry/conda 流程。
-- 对外文档同时描述 Claude Code 与 Codex plugin；MCP server 是两者共享的实现与开发入口。
+- 对外文档同时描述 Claude Code、Codex 与 DeepSeek Harness (DSH) 插件；MCP server 是各宿主共享的实现与开发入口。
 - 默认主路径是远程 plugin 安装；本地模式只用于开发、测试、验证。
 - `hooks/` 只放 hook 配置，hook 逻辑脚本放在 `scripts/`。
 - 模板资源统一放在 `src/autocode_mcp/templates/`。

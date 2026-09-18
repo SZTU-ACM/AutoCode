@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - 工作流门禁下沉到 MCP server：存在 `.autocode/manifest.json` 或运行期状态的题目目录现在由 server 直接拒绝乱序调用；Claude hooks 只负责提前提示，Codex 不依赖 hooks。
-- 分发契约从 Claude Code plugin 扩展为 Claude Code + Codex plugin。Codex 使用 `.codex-plugin/plugin.json`、共享 Skills、MCP server 和 marketplace bundle；不再假设 Claude 专有 hooks 或 Agent 能力存在。
+- 分发规范从 Claude Code plugin 扩展为 Claude Code + Codex plugin。Codex 使用 `.codex-plugin/plugin.json`、共享 Skills、MCP server 和 marketplace bundle；不再假设 Claude 专有 hooks 或 Agent 能力存在。
 
 ### Features
 
@@ -54,14 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- MCP server 移除 `prompts` 与 `resources` 能力面（原公开 MCP 契约的一部分）：删除对应模块与 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），仅保留 22 个 Tools。依赖这些端点的外部脚本或裸 MCP 客户端需迁移到 Skills 或 Tools。
-- **题目 manifest 迁移到 `.autocode/manifest.json`**：题目级 manifest 从题目根的 `autocode.json` 改为 `.autocode/manifest.json`。已存在的题目根 `autocode.json` 不再被读取，需迁移到 `.autocode/manifest.json`（字段不变）。`problem_create` 现在初始化 `.autocode/manifest.json` 而非 `autocode.json`。
+- MCP server 移除 `prompts` 与 `resources` 能力面（原公开 MCP 接口定义规范的一部分）：删除对应模块与 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），仅保留 22 个 Tools。依赖这些端点的外部脚本或裸 MCP 客户端需迁移到 Skills 或 Tools。
+- **题目 manifest 迁移到 `.autocode/manifest.json`**：题目级 manifest 从题目根的 `autocode.json` 改为 `.autocode/manifest.json`。已存在的题目根 `autocode.json` 不再被读取，需迁移到 `.autocode/manifest.json`（字段不变）。`problem_create` 现在初始化 `.autocode/manifest.json`（替代历史 `autocode.json` 路径）。
 
 ### Features
 
 - **CC-first 单一分发**
   - 移除 PyPI 发布与 `uvx` 运行路径：`.mcp.json` 改为 `command: uv, args: ["run", "autocode-mcp"]`，README 移除 PyPI 徽章与发布叙述，仅保留 Claude Code plugin 与本地开发。
-  - MCP server 收敛为纯 Tools：删除 `prompts` 与 `resources` 模块及对应 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），`server.py` 清理相关 `mcp.types` 导入；22 个工具签名不变（对外契约保留）。
+  - MCP server 收敛为纯 Tools：删除 `prompts` 与 `resources` 模块及对应 handler（`list_prompts` / `get_prompt` / `list_resources` / `read_resource`），`server.py` 清理相关 `mcp.types` 导入；22 个工具签名不变（对外接口定义保留）。
   - README 移除 Cursor / OpenCode（裸 MCP 客户端）使用段落，文档仅面向 Claude Code plugin 与本地开发。
 
 ### Improvements
