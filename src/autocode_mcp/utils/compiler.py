@@ -18,12 +18,12 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
-from .process import POSIX_KILL_SIGNAL as _POSIX_KILL_SIGNAL, terminate_pid_tree
+from .process import terminate_pid_tree
 
 if TYPE_CHECKING:
     from .win_job import WinJobObject

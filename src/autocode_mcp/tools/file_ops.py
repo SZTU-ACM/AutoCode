@@ -92,7 +92,7 @@ class FileReadTool(Tool):
                 s_idx = max(0, (start_line or 1) - 1)
                 selected_lines: list[str] = []
                 curr_idx = 0
-                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                with open(full_path, encoding="utf-8", errors="replace") as f:
                     for line in f:
                         if curr_idx >= s_idx and (line_count is None or len(selected_lines) < line_count):
                             selected_lines.append(line)
@@ -149,7 +149,7 @@ class FileReadTool(Tool):
                     is_truncated=(off > 0) or ((off + end) < total_bytes),
                 )
 
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(full_path, encoding="utf-8", errors="replace") as f:
                 content = f.read()
 
             return ToolResult.ok(

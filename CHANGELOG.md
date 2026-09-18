@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **DeepSeek Harness (DSH) 插件生态支持**：
+  - 新增 `.dsh-plugin/package.json`、`.dsh-plugin/cordis.patch.yml`、`.dsh-plugin/index.js`，支持在 DSH 会话中挂载 AutoCode 作为 MCP 服务。
+  - 通过 `dsh-agent-instructions` 扩展机制将工作区指导规范与质量门禁自动注入大语言模型系统提示词上下文。
+- **动态评测套件扩充**：
+  - 新增大文件流式行分页、字节切片寻道与 UTF-8 边界自适应对齐单元测试。
+  - 新增符号链接越界访问与路径遍历拦截测试。
+  - 新增内存超限（MLE）状态识别与字段透传测试。
+  - 新增浮点数得分保留与多级确定性决胜排序测试。
+
+### Changed
+
+- **确定性算法竞赛出题工具链重构与安全加固**：
+  - `file_ops`：`FileReadTool` 实现流式行分页读取与字节定位寻道，引入 UTF-8 多字节字符边界校准机制（最多向前延伸 3 字节消除截断乱码）；统一写入显式指定 `newline='\n'`；针对相对路径强制要求提供 `problem_dir` 参数，统一调用 `os.path.realpath` 彻底防御路径穿越与符号链接逃逸。
+  - `compiler` / `process`：编译子进程配置 `start_new_session=True` 隔离独立会话；进程深度回收统一调用 `terminate_pid_tree` 结合 `psutil.Process.children(recursive=True)` 递归枚举终止后代进程树，彻底杜绝孤儿进程与文件描述符泄漏；引入 `-isystem` 隔离第三方模板标头目录；临时文件读取配置 10MB 安全上限；在 Linux 环境下准确识别内核终止信号与 `std::bad_alloc` 异常，透传 `memory_limit_exceeded` 状态。
+  - `validator`：`ValidatorBuildTool` 增加无测试用例场景防护，核验 `inf.readEof()` 标记；`ValidatorSelectTool` 保留浮点得分精度（`-float(score)` 消除整型截断），实施得分降序、代码长度升序、ID 字典序与二进制路径字典序的四级确定性稳定排序。
+  - `test_verify`：实施单测试点动态比例超时模型 `max(0.1, float(manifest.time_limit_ms) / 1000.0 * 1.5)`，缺省时限设置 5.0 秒上限；针对错解预期失败用例（`exp == "fail"`）引入首个非 AC 测试点命中即提前短路机制。
+  - `audit`：`next_actions` 统一输出包含 `tool_name`、`action`、`arguments`、`priority` 字段的规范字典，补齐题面一致性门禁动作联动建议。
+  - `interactor`：首个任务判定完成后显式取消挂起的未完成协程，释放调度资源。
+  - `build_all`：引入 `get_exe_extension()` 平台可执行文件后缀彻底清理过期二进制。
+
 ## [3.0.0] - 2026-08-02
 
 ### Breaking Changes

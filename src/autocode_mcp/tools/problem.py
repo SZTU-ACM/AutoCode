@@ -30,6 +30,7 @@ from ..utils.compiler import RunResult, run_batch, run_binary, run_binary_with_a
 from ..utils.platform import get_exe_extension
 from ..utils.process import filter_alive_pids, is_pid_alive, terminate_pid_tree
 from ..workflow import (
+    AutoCodeManifest,
     check_gates,
     default_manifest,
     load_manifest,

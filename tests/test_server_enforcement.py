@@ -321,7 +321,7 @@ def test_limit_ratio_gate_rejects_invalid_runtime_values(ratio):
 
 
 def test_apply_result_problem_build_all(tmp_path):
-    from autocode_mcp.workflow.enforcement import apply_result, load_workflow_state
+    from autocode_mcp.workflow.enforcement import apply_result
 
     problem_dir = managed_problem(tmp_path)
     update_state(problem_dir, created=True)
