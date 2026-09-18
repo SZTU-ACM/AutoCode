@@ -50,7 +50,15 @@ class FileReadTool(Tool):
     def input_schema(self) -> dict:
         return input_schema_from_model(FileReadInput)
 
-    async def execute(self, path: str, problem_dir: str | None = None) -> ToolResult:
+    async def execute(
+        self,
+        path: str,
+        problem_dir: str | None = None,
+        offset_bytes: int | None = None,
+        limit_bytes: int | None = None,
+        start_line: int | None = None,
+        line_count: int | None = None,
+    ) -> ToolResult:
         """执行文件读取。"""
         # 解析路径
         if not os.path.isabs(path) and problem_dir:
@@ -75,13 +83,54 @@ class FileReadTool(Tool):
             return ToolResult.fail(f"Not a file: {path}")
 
         try:
-            with open(full_path, encoding="utf-8") as f:
-                content = f.read()
+            with open(full_path, "rb") as f:
+                raw_bytes = f.read()
 
+            total_bytes = len(raw_bytes)
+
+            if start_line is not None or line_count is not None:
+                text = raw_bytes.decode("utf-8", errors="replace")
+                lines = text.splitlines(keepends=True)
+                total_lines = len(lines)
+                s_idx = max(0, (start_line or 1) - 1)
+                e_idx = s_idx + line_count if line_count is not None else total_lines
+                selected = lines[s_idx:e_idx]
+                content = "".join(selected)
+                is_truncated = (s_idx > 0) or (e_idx < total_lines)
+                return ToolResult.ok(
+                    path=full_path,
+                    content=content,
+                    size=len(content),
+                    total_bytes=total_bytes,
+                    total_lines=total_lines,
+                    is_truncated=is_truncated,
+                )
+
+            if offset_bytes is not None or limit_bytes is not None:
+                off = max(0, offset_bytes or 0)
+                lim = limit_bytes if limit_bytes is not None else 64 * 1024
+                end = min(total_bytes, off + lim)
+                while end < total_bytes and (raw_bytes[end] & 0xC0) == 0x80:
+                    end += 1
+                slice_bytes = raw_bytes[off:end]
+                content = slice_bytes.decode("utf-8", errors="replace")
+                next_offset = end if end < total_bytes else None
+                return ToolResult.ok(
+                    path=full_path,
+                    content=content,
+                    size=len(content),
+                    total_bytes=total_bytes,
+                    next_offset=next_offset,
+                    is_truncated=(off > 0) or (end < total_bytes),
+                )
+
+            content = raw_bytes.decode("utf-8")
             return ToolResult.ok(
                 path=full_path,
                 content=content,
                 size=len(content),
+                total_bytes=total_bytes,
+                is_truncated=False,
             )
         except Exception as e:
             return ToolResult.fail(f"Failed to read file: {str(e)}")
@@ -141,7 +190,7 @@ class FileSaveTool(Tool):
             os.makedirs(dir_path, exist_ok=True)
 
         try:
-            with open(full_path, "w", encoding="utf-8") as f:
+            with open(full_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
 
             return ToolResult.ok(

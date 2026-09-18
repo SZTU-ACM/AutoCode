@@ -194,6 +194,7 @@ _DOWNSTREAM_INVALIDATING_TOOLS = frozenset(
     {
         "problem_create",
         "solution_build",
+        "problem_build_all",
         "solution_analyze",
         "solution_audit_std",
         "solution_audit_brute",
@@ -322,6 +323,9 @@ def _violation(gate: str, reason: str, next_action: str) -> Gate:
 
 
 PRE_GATES: dict[str, list[tuple[str, Gate]]] = {
+    "problem_build_all": [
+        ("created", (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。")),
+    ],
     "solution_build": [
         ("created", (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。")),
         ("sol_before_brute", (lambda s, i: i.get("solution_type") != "brute" or bool(s.get("sol_built")), "必须先构建标准解 sol，再构建 brute。")),
@@ -632,6 +636,15 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                 "interaction_scenarios": {},
             }
         )
+    elif tool_name == "problem_build_all" and success:
+        compiled = data.get("compiled", {})
+        if isinstance(compiled, dict):
+            if "solutions/sol.cpp" in compiled:
+                state.update({"sol_built": True, "solution_analyzed": False, "std_audited": False, "brute_audited": False})
+            if "solutions/brute.cpp" in compiled:
+                state.update({"brute_built": True, "brute_audited": False})
+            if "files/gen.cpp" in compiled:
+                state["generator_built"] = True
     elif tool_name == "solution_build":
         solution_type = tool_input.get("solution_type")
         if solution_type == "sol":

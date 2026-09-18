@@ -57,6 +57,9 @@ async def test_problem_create():
         assert result.success
         assert os.path.exists(problem_dir)
         assert os.path.exists(os.path.join(problem_dir, "files"))
+        assert os.path.exists(os.path.join(problem_dir, "files", "val.cpp"))
+        assert os.path.exists(os.path.join(problem_dir, "files", "gen.cpp"))
+        assert os.path.exists(os.path.join(problem_dir, "files", "testlib.h"))
         assert os.path.exists(os.path.join(problem_dir, "solutions"))
         assert os.path.exists(os.path.join(problem_dir, "statements"))
         assert os.path.exists(os.path.join(problem_dir, "tests"))
@@ -105,6 +108,8 @@ async def test_problem_create_interactive_bootstrap():
 
         assert result.success
         assert os.path.exists(os.path.join(problem_dir, "files", "interactor.cpp"))
+        assert not os.path.exists(os.path.join(problem_dir, "files", "val.cpp"))
+        assert os.path.exists(os.path.join(problem_dir, "files", "gen.cpp"))
 
         readme_path = os.path.join(problem_dir, "statements", "README.md")
         with open(readme_path, encoding="utf-8") as f:
@@ -1121,31 +1126,21 @@ async def test_problem_cleanup_processes_does_not_global_kill_without_tracked_pi
     with tempfile.TemporaryDirectory() as tmpdir:
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
-        if os.name == "nt":
-            assert "warning" in result.data
-        else:
-            assert result.data.get("message") == "Cleanup finished"
+        assert "warning" in result.data
+        assert result.data.get("message") == "Cleanup finished"
 
 
 @pytest.mark.asyncio
 async def test_problem_cleanup_processes_kills_tracked_pids(monkeypatch):
     """cleanup 应按状态文件里的 PID 精准清理。"""
     tool = ProblemCleanupProcessesTool()
-    called_cmds: list[list[str]] = []
+    called_pids: list[int] = []
 
-    class _FakeProc:
-        def __init__(self):
-            self.returncode = 0
+    async def fake_terminate(pid):
+        called_pids.append(pid)
+        return True, ""
 
-        async def communicate(self):
-            return b"ok", b""
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        called_cmds.append([str(a) for a in args])
-        return _FakeProc()
-
-    monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-    # 存活校验桩：让记录的 PID 视为存活，从而进入回收路径。
+    monkeypatch.setattr("autocode_mcp.tools.problem.terminate_pid_tree", fake_terminate)
     monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1154,11 +1149,8 @@ async def test_problem_cleanup_processes_kills_tracked_pids(monkeypatch):
         set_section(tmpdir, "generate_checkpoint", {"active_pids": [12345, 23456]})
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
-        if os.name == "nt":
-            assert result.data.get("killed_pids") == [12345, 23456]
-            assert len(called_cmds) == 2
-        else:
-            assert result.data.get("removed_files") == []
+        assert result.data.get("killed_pids") == [12345, 23456]
+        assert called_pids == [12345, 23456]
 
 
 @pytest.mark.asyncio
@@ -1167,19 +1159,13 @@ async def test_problem_cleanup_processes_keeps_failed_pid_for_retry(monkeypatch)
     tool = ProblemCleanupProcessesTool()
     calls = {"count": 0}
 
-    class _FakeProc:
-        def __init__(self, rc):
-            self.returncode = rc
-
-        async def communicate(self):
-            return b"", b"failed" if self.returncode != 0 else b""
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
+    async def fake_terminate(pid):
         calls["count"] += 1
-        # 第一个 PID 成功，第二个失败
-        return _FakeProc(0 if calls["count"] == 1 else 1)
+        if calls["count"] == 1:
+            return True, ""
+        return False, "mock terminate error"
 
-    monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("autocode_mcp.tools.problem.terminate_pid_tree", fake_terminate)
     monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1189,13 +1175,12 @@ async def test_problem_cleanup_processes_keeps_failed_pid_for_retry(monkeypatch)
 
         result = await tool.execute(problem_dir=tmpdir, kill_all_generators=True)
         assert result.success
-        if os.name == "nt":
-            assert result.data.get("killed_pids") == [111]
-            assert os.path.exists(os.path.join(tmpdir, ".autocode", "runtime.json"))
-            state = get_section(tmpdir, "generate_checkpoint") or {}
-            assert state.get("active_pids") == [222]
-        else:
-            assert result.data.get("removed_files") == []
+        assert result.data.get("killed_pids") == [111]
+        assert len(result.data.get("failed_pids", [])) == 1
+        assert result.data["failed_pids"][0]["pid"] == 222
+        assert os.path.exists(os.path.join(tmpdir, ".autocode", "runtime.json"))
+        state = get_section(tmpdir, "generate_checkpoint") or {}
+        assert state.get("active_pids") == [222]
 
 
 @pytest.mark.asyncio
@@ -1212,8 +1197,12 @@ async def test_problem_cleanup_processes_preserves_checkpoint_fields(monkeypatch
     async def fake_create_subprocess_exec(*args, **kwargs):
         return _FakeProc()
 
+    async def fake_terminate(pid):
+        return True, ""
+
     monkeypatch.setattr("autocode_mcp.tools.problem.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr("autocode_mcp.tools.problem.is_pid_alive", lambda pid: True)
+    monkeypatch.setattr("autocode_mcp.tools.problem.terminate_pid_tree", fake_terminate)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tests_dir = os.path.join(tmpdir, "tests")

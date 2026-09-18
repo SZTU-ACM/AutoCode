@@ -85,7 +85,14 @@ def test_audit_schema_from_model():
 
 def test_file_read_schema_from_model():
     schema = input_schema_from_model(FileReadInput)
-    assert set(schema["properties"]) == {"path", "problem_dir"}
+    assert set(schema["properties"]) == {
+        "path",
+        "problem_dir",
+        "offset_bytes",
+        "limit_bytes",
+        "start_line",
+        "line_count",
+    }
     assert schema["required"] == ["path"]
 
 

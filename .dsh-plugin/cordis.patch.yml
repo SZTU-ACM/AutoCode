@@ -1,0 +1,13 @@
+- insert:
+    - id: mcp-autocode
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: autocode
+        transport: stdio
+        command: uv
+        args:
+          - run
+          - autocode-mcp
+        cwd: .
+    - id: autocode-dsh-extension
+      name: ./index.js

@@ -149,6 +149,16 @@ class ProblemCreateTool(Tool):
             dest_interactor = os.path.join(problem_dir, "files", "interactor.cpp")
             if os.path.exists(template_interactor) and not os.path.exists(dest_interactor):
                 shutil.copy2(template_interactor, dest_interactor)
+        else:
+            template_validator = os.path.join(TEMPLATES_DIR, "validator_template.cpp")
+            dest_validator = os.path.join(problem_dir, "files", "val.cpp")
+            if os.path.exists(template_validator) and not os.path.exists(dest_validator):
+                shutil.copy2(template_validator, dest_validator)
+
+        template_generator = os.path.join(TEMPLATES_DIR, "generator_template.cpp")
+        dest_generator = os.path.join(problem_dir, "files", "gen.cpp")
+        if os.path.exists(template_generator) and not os.path.exists(dest_generator):
+            shutil.copy2(template_generator, dest_generator)
 
         # 创建基础 README.md
         readme_path = os.path.join(problem_dir, "statements", "README.md")
@@ -808,36 +818,27 @@ class ProblemGenerateTestsTool(Tool):
         timeout: int,
         active_pids: set[int],
     ) -> RunResult:
-        last_result: RunResult | None = None
-        for attempt in range(3):
-            started_pid: int | None = None
-            cancelled = False
+        started_pid: int | None = None
+        cancelled = False
 
-            def _on_start(pid: int) -> None:
-                nonlocal started_pid
-                started_pid = pid
-                active_pids.add(pid)
+        def _on_start(pid: int) -> None:
+            nonlocal started_pid
+            started_pid = pid
+            active_pids.add(pid)
 
-            try:
-                last_result = await run_binary_with_args(
-                    binary_path,
-                    args,
-                    timeout=timeout,
-                    process_start_hook=_on_start,
-                )
-            except asyncio.CancelledError:
-                cancelled = True
-                raise
-            finally:
-                # 取消路径保留 PID 到状态文件，供 cleanup 精准回收。
-                if started_pid is not None and not cancelled:
-                    active_pids.discard(started_pid)
-            if last_result.success:
-                return last_result
-            await asyncio.sleep(0.1 * (2**attempt))
-        if last_result is not None:
-            return last_result
-        return RunResult(success=False, error="Generator execution returned no result")
+        try:
+            return await run_binary_with_args(
+                binary_path,
+                args,
+                timeout=timeout,
+                process_start_hook=_on_start,
+            )
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if started_pid is not None and not cancelled:
+                active_pids.discard(started_pid)
 
     def _save_state(
         self,
@@ -1208,6 +1209,7 @@ def _build_problem_xml(
     is_interactive_problem: bool,
     has_checker: bool,
     has_interactor: bool,
+    manifest_model: AutoCodeManifest | None = None,
 ) -> str:
     """基于 xml.etree.ElementTree 生成 problem.xml 内容。"""
     problem_name = os.path.basename(os.path.normpath(problem_dir))
@@ -1259,10 +1261,22 @@ def _build_problem_xml(
 
     assets = ET.SubElement(problem, "assets")
     solutions = ET.SubElement(assets, "solutions")
-    main = ET.SubElement(solutions, "solution", {"tag": "main"})
-    ET.SubElement(main, "source", {"path": "solutions/sol.cpp"})
-    rejected = ET.SubElement(solutions, "solution", {"tag": "rejected"})
-    ET.SubElement(rejected, "source", {"path": "solutions/brute.cpp"})
+    role_to_tag = {
+        "main": "main",
+        "brute": "rejected",
+        "wrong": "rejected",
+        "reference": "accepted",
+    }
+    if manifest_model and manifest_model.solutions:
+        for sol_entry in manifest_model.solutions:
+            tag = role_to_tag.get(sol_entry.role, "rejected")
+            sol_node = ET.SubElement(solutions, "solution", {"tag": tag})
+            ET.SubElement(sol_node, "source", {"path": sol_entry.path})
+    else:
+        main = ET.SubElement(solutions, "solution", {"tag": "main"})
+        ET.SubElement(main, "source", {"path": "solutions/sol.cpp"})
+        rejected = ET.SubElement(solutions, "solution", {"tag": "rejected"})
+        ET.SubElement(rejected, "source", {"path": "solutions/brute.cpp"})
 
     ET.indent(problem)
     return '<?xml version="1.0" encoding="utf-8" standalone="no"?>\n' + ET.tostring(
@@ -1502,6 +1516,7 @@ class ProblemPackPolygonTool(Tool):
                 is_interactive_problem=is_interactive_problem,
                 has_checker=has_checker,
                 has_interactor=has_interactor,
+                manifest_model=manifest_model,
             )
             with open(problem_xml, "w", encoding="utf-8") as f:
                 f.write(xml_content)

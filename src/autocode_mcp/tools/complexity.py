@@ -134,6 +134,16 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         patterns.append("sorting")
         complexity = ComplexityLevel.N_LOG_N
 
+    # 归并与分治
+    if re.search(r"\bmerge(_sort|_count)?\b|\bdivide_and_conquer\b", code, re.IGNORECASE):
+        patterns.append("divide_and_conquer")
+        complexity = ComplexityLevel.N_LOG_N
+
+    # 树状结构
+    if re.search(r"\b(fenwick|bit|segtree|segment_tree)\b", code, re.IGNORECASE):
+        patterns.append("tree_data_structure")
+        complexity = ComplexityLevel.N_LOG_N
+
     # 图算法 - BFS/DFS
     if re.search(r"\bbfs\b|\bdfs\b|queue<|stack<", code):
         patterns.append("graph_traversal")
@@ -186,7 +196,7 @@ def build_risk_notes(
         ComplexityLevel.LOG_N,
         ComplexityLevel.CONSTANT,
     }:
-        notes.append("n_max 较大但复杂度偏高，存在明显超时风险。")
+        notes.append("n_max 较大，复杂度分析过高，存在超时风险，建议参考。")
     return notes
 
 

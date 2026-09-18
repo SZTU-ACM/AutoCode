@@ -65,12 +65,11 @@ class SolutionAuditStdTool(Tool):
         }:
             findings.append(
                 {
-                    "severity": "error",
+                    "severity": "warning",
                     "type": "high_tle_risk",
-                    "message": "n_max 较大但标准解复杂度偏高，存在明显 TLE 风险。",
+                    "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
                 }
             )
-            passed = False
         return ToolResult.ok(
             passed=passed,
             estimated_complexity=estimated,

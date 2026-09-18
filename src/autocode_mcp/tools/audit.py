@@ -239,10 +239,28 @@ class ProblemAuditTool(Tool):
         for issue in check_gates(manifest, workflow_state, quality_signals):
             blocking.append({"gate": issue.gate, "reason": issue.reason})
             if issue.gate == "tests_verified":
-                next_actions.append({"tool": "problem_verify_tests", "arguments": {}})
+                next_actions.append(
+                    {
+                        "tool_name": "problem_verify_tests",
+                        "tool": "problem_verify_tests",
+                        "action": "run_tests_verification",
+                        "recommended_arguments": {},
+                        "arguments": {},
+                        "priority": "high",
+                    }
+                )
             else:
                 verify_type = "validator" if issue.gate == "validator_check" else issue.gate
-                next_actions.append({"tool": "problem_verify_tests", "arguments": {"verify_types": [verify_type]}})
+                next_actions.append(
+                    {
+                        "tool_name": "problem_verify_tests",
+                        "tool": "problem_verify_tests",
+                        "action": f"verify_{verify_type}",
+                        "recommended_arguments": {"verify_types": [verify_type]},
+                        "arguments": {"verify_types": [verify_type]},
+                        "priority": "high",
+                    }
+                )
 
     async def _require_special_artifact_gates(
         self,
@@ -269,7 +287,14 @@ class ProblemAuditTool(Tool):
                         {"gate": "validator_self_test", "reason": "validator negative fixtures missing or failed"}
                     )
                     next_actions.append(
-                        {"tool": "problem_verify_tests", "arguments": {"verify_types": ["validator_self_test"]}}
+                        {
+                            "tool_name": "problem_verify_tests",
+                            "tool": "problem_verify_tests",
+                            "action": "verify_validator_self_test",
+                            "recommended_arguments": {"verify_types": ["validator_self_test"]},
+                            "arguments": {"verify_types": ["validator_self_test"]},
+                            "priority": "high",
+                        }
                     )
 
         if manifest_uses_testlib_checker(manifest) and manifest.audit_gates.require_checker_self_test:
@@ -283,7 +308,14 @@ class ProblemAuditTool(Tool):
             if not self._signal_satisfied(signal):
                 blocking.append({"gate": "checker_self_test", "reason": "checker scenarios missing or failed"})
                 next_actions.append(
-                    {"tool": "problem_verify_tests", "arguments": {"verify_types": ["checker_self_test"]}}
+                    {
+                        "tool_name": "problem_verify_tests",
+                        "tool": "problem_verify_tests",
+                        "action": "verify_checker_self_test",
+                        "recommended_arguments": {"verify_types": ["checker_self_test"]},
+                        "arguments": {"verify_types": ["checker_self_test"]},
+                        "priority": "high",
+                    }
                 )
 
         if manifest.interactive and manifest.audit_gates.require_interactor_self_test:
@@ -297,7 +329,14 @@ class ProblemAuditTool(Tool):
             if not self._signal_satisfied(signal):
                 blocking.append({"gate": "interactor_self_test", "reason": "interactor scenarios missing or failed"})
                 next_actions.append(
-                    {"tool": "problem_verify_tests", "arguments": {"verify_types": ["interactor_self_test"]}}
+                    {
+                        "tool_name": "problem_verify_tests",
+                        "tool": "problem_verify_tests",
+                        "action": "verify_interactor_self_test",
+                        "recommended_arguments": {"verify_types": ["interactor_self_test"]},
+                        "arguments": {"verify_types": ["interactor_self_test"]},
+                        "priority": "high",
+                    }
                 )
 
     def _statement_consistency(

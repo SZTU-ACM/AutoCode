@@ -180,7 +180,7 @@ class StressTestRunTool(Tool):
                     sol_output=sol_output,
                     brute_output=brute_output,
                 )
-        elif sol_output.strip() != brute_output.strip():
+        elif sol_output.replace("\r\n", "\n").strip() != brute_output.replace("\r\n", "\n").strip():
             return _StressRoundResult(
                 status="mismatch",
                 global_round=global_round,

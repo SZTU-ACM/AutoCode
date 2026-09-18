@@ -146,6 +146,7 @@ class ProblemVerifyTestsTool(Tool):
                 resolved_answer_ext,
                 timeout,
                 verify_with_checker=verify_with_checker,
+                manifest=manifest_model,
             )
             results["answer_consistency"] = result
             if not result["passed"]:
@@ -426,6 +427,7 @@ class ProblemVerifyTestsTool(Tool):
         timeout: int,
         *,
         verify_with_checker: bool = False,
+        manifest: AutoCodeManifest | None = None,
     ) -> dict:
         """用 sol 重新运行 .in；verify_with_checker 时用 checker(input, sol_out, jury_ans)，否则比字符串。"""
         exe_ext = get_exe_extension()
@@ -448,6 +450,11 @@ class ProblemVerifyTestsTool(Tool):
         mismatches = []
         timed_out = []
         errors = []
+        test_timeout = (
+            max(1.0, manifest.time_limit_ms / 1000.0)
+            if (manifest and getattr(manifest, "time_limit_ms", None))
+            else float(timeout)
+        )
 
         if verify_with_checker:
             checker_bin = checker_exe_path(problem_dir, exe_ext)
@@ -476,7 +483,7 @@ class ProblemVerifyTestsTool(Tool):
             with open(ans_path, encoding="utf-8") as f:
                 expected = f.read()
 
-            result = await run_binary(sol_exe, input_data, timeout=timeout)
+            result = await run_binary(sol_exe, input_data, timeout=test_timeout)
 
             if result.timed_out:
                 return ("timed_out", in_file)
@@ -1080,6 +1087,11 @@ class ProblemVerifyTestsTool(Tool):
         in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
         details = []
         all_killed = True
+        test_timeout = (
+            max(1.0, manifest.time_limit_ms / 1000.0)
+            if (manifest and getattr(manifest, "time_limit_ms", None))
+            else float(timeout)
+        )
 
         for wrong_name in wrong_solution_names:
             binary_path = Path(problem_dir) / "solutions" / f"{wrong_name}{exe_ext}"
@@ -1096,7 +1108,7 @@ class ProblemVerifyTestsTool(Tool):
                 if not ans_file.exists():
                     return "SKIP"
                 input_data = in_file.read_text(encoding="utf-8")
-                run = await run_binary(str(_binary_path), input_data, timeout=timeout)
+                run = await run_binary(str(_binary_path), input_data, timeout=test_timeout)
                 if run.timed_out or not run.success:
                     return "FAIL"
                 if verify_with_checker:

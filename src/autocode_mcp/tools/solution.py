@@ -83,6 +83,13 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         standard_source_path = os.path.join(solutions_dir, f"{solution_type}.cpp")
         standard_binary_path = os.path.join(solutions_dir, f"{solution_type}{exe_ext}")
 
+        for p in (binary_path, standard_binary_path):
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
         # 保存自定义命名文件，并保留 sol.cpp/brute.cpp 供打包和默认流程使用。
         try:
             with open(canonical_path, "w", encoding="utf-8") as f:
@@ -177,6 +184,15 @@ class SolutionRunTool(Tool, RunToolMixin):
         result = await self.run(
             binary_path, input_data, problem_dir, solution_type, timeout=timeout
         )
+
+        if result.memory_limit_exceeded:
+            return ToolResult.fail(
+                f"Memory limit exceeded (MLE) after {result.time_ms}ms",
+                stdout=result.stdout,
+                stderr=result.stderr,
+                time_ms=result.time_ms,
+                memory_limit_exceeded=True,
+            )
 
         if result.timed_out:
             return ToolResult.fail(

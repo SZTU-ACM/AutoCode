@@ -56,30 +56,40 @@ async def terminate_pid_tree(pid: int) -> tuple[bool, str]:
     if not isinstance(pid, int) or pid <= 0:
         return False, "invalid pid"
     if os.name == "nt":
-        proc = await asyncio.create_subprocess_exec(
-            "taskkill",
-            "/PID",
-            str(pid),
-            "/T",
-            "/F",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            return True, ""
-        return False, stderr.decode("utf-8", errors="replace")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode in (0, 128):
+                return True, ""
+            return False, stderr.decode("utf-8", errors="replace")
+        except OSError as exc:
+            return False, str(exc)
     # POSIX：优先按进程组整树回收（要求子进程以 start_new_session=True 启动）。
+    current_pgid = os.getpgid(0)
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
     try:
-        cast(Any, os).killpg(cast(Any, os).getpgid(pid), POSIX_KILL_SIGNAL)
-        return True, ""
+        pgid = cast(Any, os).getpgid(pid)
+        if pgid == pid and pgid > 1 and pgid != current_pgid:
+            cast(Any, os).killpg(pgid, POSIX_KILL_SIGNAL)
+            return True, ""
     except ProcessLookupError:
         return True, ""
     except OSError as exc:
         _logger.debug("killpg failed for pid=%s: %s; fallback to single kill", pid, exc)
     try:
-        os.kill(pid, POSIX_KILL_SIGNAL)
-        return True, ""
+        if pid > 1 and pid != current_pid and pid != parent_pid and pid != current_pgid:
+            os.kill(pid, POSIX_KILL_SIGNAL)
+            return True, ""
+        return False, "refusing to kill protected pid"
     except ProcessLookupError:
         return True, ""
     except OSError as exc:

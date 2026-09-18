@@ -30,6 +30,12 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
 
         保存并编译 gen.cpp。
 
+        规范要求（testlib.h）：
+        - 源码文件需包含 #include "testlib.h"
+        - 入口函数首行必须调用 registerGen(argc, argv, 1);
+        - 命令行传参结构：gen <seed> <type> <n_min> <n_max> <t_min> <t_max> [extra_args...]
+        - 类型参数语义：1=tiny, 2=random, 3=extreme, 4=tle
+
         前置条件：
         1. 已运行 problem_create 创建题目目录
 

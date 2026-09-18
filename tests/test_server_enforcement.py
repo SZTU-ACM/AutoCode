@@ -318,3 +318,22 @@ async def test_server_resets_state_after_exception(tmp_path, monkeypatch):
 def test_limit_ratio_gate_rejects_invalid_runtime_values(ratio):
     state = {"quality_gates": {"min_limit_case_ratio": 0.5}, "limit_case_ratio": ratio}
     assert _min_limit_ratio_gate_ok(state, {}) is False
+
+
+def test_apply_result_problem_build_all(tmp_path):
+    from autocode_mcp.workflow.enforcement import apply_result, load_workflow_state
+
+    problem_dir = managed_problem(tmp_path)
+    update_state(problem_dir, created=True)
+    data = {
+        "compiled": {
+            "solutions/sol.cpp": "/bin/sol",
+            "solutions/brute.cpp": "/bin/brute",
+            "files/gen.cpp": "/bin/gen",
+        }
+    }
+    state = apply_result(problem_dir, "problem_build_all", {"problem_dir": problem_dir}, True, data)
+    assert state["sol_built"] is True
+    assert state["brute_built"] is True
+    assert state["generator_built"] is True
+

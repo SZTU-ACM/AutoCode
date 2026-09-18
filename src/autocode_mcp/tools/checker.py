@@ -72,6 +72,12 @@ class CheckerBuildTool(Tool, BuildToolMixin):
 
         binary_path = os.path.join(files_dir, f"checker{get_exe_extension()}")
 
+        if os.path.isfile(binary_path):
+            try:
+                os.remove(binary_path)
+            except OSError:
+                pass
+
         compile_source = resolved.original_source_path or canonical_path
         include_dirs = [resolved.include_dir] if resolved.include_dir else None
         compile_result = await self.build(compile_source, binary_path, compiler=compiler, include_dirs=include_dirs)
@@ -117,11 +123,11 @@ class CheckerBuildTool(Tool, BuildToolMixin):
                 output_file = os.path.join(temp_dir, f"output_{i}.txt")
                 answer_file = os.path.join(temp_dir, f"answer_{i}.txt")
 
-                with open(input_file, "w", encoding="utf-8") as f:
+                with open(input_file, "w", encoding="utf-8", newline="\n") as f:
                     f.write(input_data)
-                with open(output_file, "w", encoding="utf-8") as f:
+                with open(output_file, "w", encoding="utf-8", newline="\n") as f:
                     f.write(contestant_output)
-                with open(answer_file, "w", encoding="utf-8") as f:
+                with open(answer_file, "w", encoding="utf-8", newline="\n") as f:
                     f.write(reference_output)
 
                 # 运行 checker

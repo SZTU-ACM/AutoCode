@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --------------------------------------------------------------------------- #
 # Pilot tools (7.2 / 7.3)
@@ -28,6 +28,10 @@ class ProblemAuditInput(BaseModel):
 class FileReadInput(BaseModel):
     path: str
     problem_dir: str | None = None
+    offset_bytes: int | None = Field(default=None, ge=0)
+    limit_bytes: int | None = Field(default=None, ge=1)
+    start_line: int | None = Field(default=None, ge=1)
+    line_count: int | None = Field(default=None, ge=1)
 
 
 class FileSaveInput(BaseModel):
@@ -152,6 +156,8 @@ class ValidatorCandidate(BaseModel):
     id: str
     score: int
     binary_path: str
+    code: str | None = None
+    source_path: str | None = None
 
 
 class ValidatorSelectInput(BaseModel):

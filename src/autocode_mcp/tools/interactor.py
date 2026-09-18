@@ -71,12 +71,18 @@ class InteractorBuildTool(Tool):
 
         canonical_path = os.path.join(files_dir, "interactor.cpp")
         try:
-            with open(canonical_path, "w", encoding="utf-8") as f:
+            with open(canonical_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(resolved.code)
         except Exception as e:
             return ToolResult.fail(f"Failed to save code: {str(e)}")
 
         binary_path = os.path.join(files_dir, f"interactor{get_exe_extension()}")
+
+        if os.path.isfile(binary_path):
+            try:
+                os.remove(binary_path)
+            except OSError:
+                pass
 
         compile_source = resolved.original_source_path or canonical_path
         include_dirs = [resolved.include_dir] if resolved.include_dir else None
@@ -321,7 +327,7 @@ class InteractorBuildTool(Tool):
                     solution.kill()
                     await interactor.wait()
                     await solution.wait()
-                    return {"verdict": "TLE", "reason": "Timeout"}
+                    return {"verdict": "TLE", "reason": f"Execution timeout after {timeout}s"}
 
                 # 获取通信结果
                 if comm_task and not comm_task.cancelled():

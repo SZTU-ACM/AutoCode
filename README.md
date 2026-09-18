@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
-**AutoCode 是面向竞赛编程出题人的 AI 出题工作台，支持 Claude Code 和 Codex。**
+**AutoCode 是面向竞赛编程出题人的 AI 出题工作台，支持 Claude Code、Codex 和 DeepSeek Harness (DSH)。**
 
 从一个想法开始，AutoCode 会协助你完成题面、解法、测试数据、验证和题包整理，把创作过程变成一条清晰、可靠、可复用的工作流。
 
@@ -43,7 +43,7 @@ AutoCode 适合：
 - 想用 AI 加速出题，但担心题面、样例、数据和复杂度不可靠的出题人。
 - 需要把题目从 idea 推到可打包 Polygon 结构的竞赛组织者。
 - 希望 AI 遵循完整验证流程的团队。
-- 想在 Claude Code 或 Codex 中获得完整、可验证出题工作流的用户。
+- 想在 Claude Code、Codex 或 DeepSeek Harness (DSH) 中获得完整、可验证出题工作流的用户。
 
 ## 快速开始
 
@@ -52,7 +52,7 @@ AutoCode 适合：
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/)
 - 支持 C++20 的 `g++`，推荐 GCC 10+
-- Claude Code 或 Codex CLI（至少安装一个）
+- Claude Code、Codex CLI 或 DeepSeek Harness (DSH)（至少安装一个）
 
 常用的竞赛编程工具库已经随 AutoCode 一起提供。
 
@@ -74,6 +74,20 @@ claude plugin install autocode@autocode-marketplace
 ```bash
 codex plugin marketplace add https://github.com/SummerOneTwo/autocode-marketplace.git
 codex plugin add autocode@autocode-marketplace
+```
+
+### 安装 DeepSeek Harness (DSH) 插件
+
+在 DeepSeek Harness 中加载 AutoCode：
+
+```bash
+dsh plugin add ./.dsh-plugin
+```
+
+或者在启动时指定补丁配置：
+
+```bash
+dsh --patch ./.dsh-plugin/cordis.patch.yml
 ```
 
 ### 开始使用

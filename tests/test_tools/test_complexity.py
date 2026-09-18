@@ -427,3 +427,30 @@ int main() {
     assert result.success
     assert result.data["time_complexity"] == ComplexityLevel.CONSTANT
     assert result.data["warnings"] == []
+
+
+def test_divide_and_conquer_pattern():
+    """分治与归并模式应被识别。"""
+    code = """
+long long merge_count(vector<int>& a, int l, int r) {
+    if (r - l <= 1) return 0;
+    int m = (l + r) / 2;
+    return merge_count(a, l, m) + merge_count(a, m, r);
+}
+"""
+    complexity, patterns = detect_algorithm_patterns(code)
+    assert "divide_and_conquer" in patterns
+    assert complexity == ComplexityLevel.N_LOG_N
+
+
+def test_tree_data_structure_pattern():
+    """树状数组与线段树模式应被识别。"""
+    code = """
+struct Fenwick {
+    vector<int> tree;
+    void add(int i, int delta) {}
+};
+"""
+    complexity, patterns = detect_algorithm_patterns(code)
+    assert "tree_data_structure" in patterns
+    assert complexity == ComplexityLevel.N_LOG_N

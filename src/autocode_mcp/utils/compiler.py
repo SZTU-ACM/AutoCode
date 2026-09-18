@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
@@ -79,6 +80,7 @@ class RunResult:
     error: str | None = None
     timed_out: bool = False
     time_ms: int = 0
+    memory_limit_exceeded: bool = False
 
 
 def get_work_dir(problem_dir: str, tool_name: str) -> str:
@@ -170,6 +172,8 @@ async def compile_cpp(
         compiler,
         f"-std={std}",
         f"-{opt_level}",
+        "-Wall",
+        "-Wextra",
         *include_flags,
         source_path,
         "-o",
@@ -417,12 +421,21 @@ async def _run_process(
         with open(stdout_path, "rb") as _out, open(stderr_path, "rb") as _err:
             stdout_data = _out.read()
             stderr_data = _err.read()
+        ret = process.returncode if process.returncode is not None else -1
+        out_str = stdout_data.decode("utf-8", errors="replace")
+        err_str = stderr_data.decode("utf-8", errors="replace")
+        mle = False
+        if ret in (-9, 137) or (hasattr(signal, "SIGKILL") and ret == -signal.SIGKILL):
+            mle = True
+        elif "bad_alloc" in err_str or "Out of memory" in err_str:
+            mle = True
         return RunResult(
-            success=process.returncode == 0,
-            return_code=process.returncode if process.returncode is not None else -1,
-            stdout=stdout_data.decode("utf-8", errors="replace"),
-            stderr=stderr_data.decode("utf-8", errors="replace"),
+            success=ret == 0,
+            return_code=ret,
+            stdout=out_str,
+            stderr=err_str,
             time_ms=elapsed_ms,
+            memory_limit_exceeded=mle,
         )
 
     except FileNotFoundError:

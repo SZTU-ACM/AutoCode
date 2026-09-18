@@ -80,6 +80,14 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                 discovered=[],
             )
 
+        for spec in specs:
+            old_bin = os.path.join(problem_dir, os.path.splitext(spec.source)[0])
+            if os.path.isfile(old_bin):
+                try:
+                    os.remove(old_bin)
+                except OSError:
+                    pass
+
         results = await compile_all(problem_dir, specs, max_concurrent=max(1, max_concurrent))
 
         compiled: dict[str, str | None] = {}

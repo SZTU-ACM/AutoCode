@@ -1,0 +1,31 @@
+{
+  "name": "@autocode/dsh-plugin",
+  "version": "3.0.0",
+  "description": "AutoCode plugin for DeepSeek Harness (dsh) providing competitive programming authoring tools and workflow rules.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": "^0.1.0"
+  },
+  "peerDependencies": {
+    "cordis": "^4.0.0"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "mcp",
+    "autocode",
+    "competitive-programming"
+  ],
+  "license": "MIT"
+}
