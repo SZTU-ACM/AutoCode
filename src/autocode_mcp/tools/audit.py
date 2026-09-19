@@ -1,16 +1,9 @@
-"""High-level problem audit tool.
-
-This tool aggregates deterministic evidence from the AutoCode problem package.
-It does not call an LLM; the LLM-facing difficulty explanation can consume the
-returned signals.
-"""
-
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -19,7 +12,12 @@ from ..workflow import check_gates, load_manifest, manifest_uses_testlib_checker
 from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from ..workflow.models import AutoCodeManifest
 from .base import Tool, ToolResult, input_schema_from_model
-from .complexity import analyze_loop_complexity, detect_algorithm_patterns
+from .complexity import (
+    analyze_loop_complexity,
+    detect_algorithm_patterns,
+    extract_claimed_complexity,
+    run_empirical_verification,
+)
 from .schemas import ProblemAuditInput
 from .test_verify import ProblemVerifyTestsTool
 
@@ -120,6 +118,37 @@ class ProblemAuditTool(Tool):
                 blocking=blocking,
                 next_actions=next_actions,
             )
+            empirical_signal = await self._empirical_complexity_signal(problem_path, manifest)
+            quality_signals["empirical_complexity"] = empirical_signal
+            if empirical_signal.get("executed") and not empirical_signal.get("passed"):
+                evidence = empirical_signal.get("evidence")
+                failure_reason = (
+                    str(evidence.get("failure_reason", "empirical complexity verification failed"))
+                    if isinstance(evidence, dict)
+                    else "empirical complexity verification failed"
+                )
+                blocking.append(
+                    {
+                        "gate": "empirical_complexity",
+                        "reason": failure_reason,
+                    }
+                )
+                next_actions.append(
+                    {
+                        "tool_name": "solution_analyze",
+                        "tool": "solution_analyze",
+                        "action": "verify_empirical_complexity",
+                        "recommended_arguments": {
+                            "problem_dir": str(problem_path),
+                            "solution_type": "sol",
+                        },
+                        "arguments": {
+                            "problem_dir": str(problem_path),
+                            "solution_type": "sol",
+                        },
+                        "priority": "high",
+                    }
+                )
 
         statement_consistency = self._statement_consistency(problem_path, manifest, tests_manifest)
         if statement_consistency["needs_human_review"]:
@@ -349,6 +378,42 @@ class ProblemAuditTool(Tool):
                     }
                 )
 
+    async def _empirical_complexity_signal(
+        self, problem_path: Path, manifest: AutoCodeManifest
+    ) -> dict[str, Any]:
+        sol_source = self._solution_source(problem_path, "sol")
+        claimed_complexity = None
+        if sol_source and sol_source.is_file():
+            code = sol_source.read_text(encoding="utf-8", errors="replace")
+            claimed_complexity = extract_claimed_complexity(code)
+
+        constraints = None
+        if manifest.constraints:
+            constraint_numbers = self._constraint_numbers(manifest.constraints)
+            n_max = max(constraint_numbers) if constraint_numbers else 10000
+            constraints = {"n_max": n_max, "time_limit_ms": float(manifest.time_limit_ms)}
+
+        res = await run_empirical_verification(
+            str(problem_path),
+            "sol",
+            claimed_complexity,
+            constraints,
+        )
+
+        if res.get("status") == "pending_generator":
+            return {
+                "executed": False,
+                "passed": True,
+                "evidence": res,
+            }
+
+        passed = bool(res.get("passed"))
+        return {
+            "executed": True,
+            "passed": passed,
+            "evidence": res,
+        }
+
     def _statement_consistency(
         self, problem_path: Path, manifest: AutoCodeManifest, tests_manifest: dict
     ) -> dict[str, object]:
@@ -390,6 +455,12 @@ class ProblemAuditTool(Tool):
         if pattern_complexity:
             complexity = self._max_complexity(complexity, pattern_complexity)
 
+        empirical_signal = quality_signals.get("empirical_complexity", {})
+        if self._signal_satisfied(empirical_signal):
+            fitted_comp = empirical_signal.get("evidence", {}).get("fitted_complexity")
+            if fitted_comp:
+                complexity = str(fitted_comp)
+
         constraint_numbers = self._constraint_numbers(manifest.constraints)
         n_max = max(constraint_numbers) if constraint_numbers else None
         wrong_count = sum(1 for s in manifest.solutions if s.role == "wrong")
@@ -424,6 +495,8 @@ class ProblemAuditTool(Tool):
         if self._signal_satisfied(quality_signals.get("answer_consistency", {})):
             confidence += 0.1
         if self._signal_satisfied(quality_signals.get("limit_semantics", {})):
+            confidence += 0.1
+        if self._signal_satisfied(empirical_signal):
             confidence += 0.1
         confidence = min(1.0, confidence)
 

@@ -1,13 +1,14 @@
-"""
-Solution 审计工具：审核标准解与暴力解的可行性与复杂度假设。
-"""
-
 from __future__ import annotations
 
 import os
 
+from ..utils.ratio_analyzer import normalize_complexity_expression
 from .base import Tool, ToolResult, input_schema_from_model
-from .complexity import ComplexityLevel, analyze_loop_complexity
+from .complexity import (
+    ComplexityLevel,
+    analyze_loop_complexity,
+    run_empirical_verification,
+)
 from .mixins import resolve_source
 from .schemas import SolutionAuditBruteInput, SolutionAuditStdInput
 
@@ -46,9 +47,14 @@ class SolutionAuditStdTool(Tool):
             return err
         assert resolved is not None
         code = resolved.code
+
+        if claimed_complexity:
+            claimed_complexity = normalize_complexity_expression(claimed_complexity)
+
         estimated = analyze_loop_complexity(code)
         findings: list[dict] = []
         passed = True
+
         if claimed_complexity and claimed_complexity != estimated:
             findings.append(
                 {
@@ -57,6 +63,7 @@ class SolutionAuditStdTool(Tool):
                     "message": f"claimed={claimed_complexity}, estimated={estimated}",
                 }
             )
+
         if constraints and constraints.get("n_max", 0) >= 10**6 and estimated in {
             ComplexityLevel.QUADRATIC,
             ComplexityLevel.CUBIC,
@@ -70,12 +77,42 @@ class SolutionAuditStdTool(Tool):
                     "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
                 }
             )
+
+        empirical_verification: dict = {"status": "skipped"}
+        if problem_dir:
+            empirical_verification = await run_empirical_verification(
+                problem_dir,
+                "sol",
+                claimed_complexity,
+                constraints,
+            )
+            if empirical_verification.get("status") == "pending_generator":
+                pass
+            elif empirical_verification.get("status") == "generator_error":
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "type": "generator_error",
+                        "message": str(empirical_verification.get("message", "生成器运行异常")),
+                    }
+                )
+            elif not empirical_verification.get("passed", True):
+                passed = False
+                findings.append(
+                    {
+                        "severity": "error",
+                        "type": "empirical_ratio_mismatch",
+                        "message": str(empirical_verification.get("failure_reason", "经验复杂度拟合未通过")),
+                    }
+                )
+
         return ToolResult.ok(
             passed=passed,
             estimated_complexity=estimated,
             claimed_complexity=claimed_complexity,
             findings=findings,
             evidence={"has_sort": "sort(" in code, "has_nested_loops": code.count("for (") >= 2},
+            empirical_verification=empirical_verification,
         )
 
 
@@ -113,6 +150,10 @@ class SolutionAuditBruteTool(Tool):
             return err
         assert resolved is not None
         code = resolved.code
+
+        if std_complexity:
+            std_complexity = normalize_complexity_expression(std_complexity)
+
         brute_complexity = analyze_loop_complexity(code)
         findings: list[dict] = []
         if std_complexity and brute_complexity == std_complexity:
@@ -129,6 +170,16 @@ class SolutionAuditBruteTool(Tool):
         elif brute_complexity == ComplexityLevel.QUADRATIC:
             recommended_n_max = 80
         recommended_trials = 1200 if recommended_n_max >= 100 else 600
+
+        empirical_verification: dict = {"status": "skipped"}
+        if problem_dir:
+            empirical_verification = await run_empirical_verification(
+                problem_dir,
+                "brute",
+                brute_complexity,
+                constraints,
+            )
+
         return ToolResult.ok(
             passed=True,
             brute_complexity=brute_complexity,
@@ -140,4 +191,5 @@ class SolutionAuditBruteTool(Tool):
                 "types": ["1", "2", "3"],
                 "timeout": 30,
             },
+            empirical_verification=empirical_verification,
         )

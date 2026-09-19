@@ -1,34 +1,31 @@
-"""
-Complexity 分析工具 - 分析解法复杂度。
-
-基于代码静态分析估算时间/空间复杂度，并推荐测试参数。
-"""
-
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
 
+from ..utils.execution_monitor import DynamicExecutionMonitor
+from ..utils.platform import get_exe_extension
+from ..utils.ratio_analyzer import EmpiricalRatioAnalyzer, normalize_complexity_expression
+from ..utils.scale_sampler import MultiScaleSampler
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import resolve_source
 from .schemas import SolutionAnalyzeInput
 
 
 class ComplexityLevel:
-    """复杂度等级。"""
-
     CONSTANT = "O(1)"
     LOG_N = "O(log n)"
     LINEAR = "O(n)"
     N_LOG_N = "O(n log n)"
+    N_SQRT_N = "O(n sqrt n)"
     QUADRATIC = "O(n^2)"
     CUBIC = "O(n^3)"
     EXPONENTIAL = "O(2^n)"
     FACTORIAL = "O(n!)"
 
 
-# 复杂度到推荐 n_max 的映射
 COMPLEXITY_TO_N_MAX = {
     ComplexityLevel.CONSTANT: 10**9,
     ComplexityLevel.LOG_N: 10**9,
@@ -40,7 +37,6 @@ COMPLEXITY_TO_N_MAX = {
     ComplexityLevel.FACTORIAL: 12,
 }
 
-# 复杂度到推荐时间限制的映射（毫秒）
 COMPLEXITY_TO_TIME_LIMIT = {
     ComplexityLevel.CONSTANT: 1000,
     ComplexityLevel.LOG_N: 1000,
@@ -54,19 +50,10 @@ COMPLEXITY_TO_TIME_LIMIT = {
 
 
 def analyze_loop_complexity(code: str) -> str:
-    """分析循环复杂度。
-
-    Args:
-        code: C++ 源代码
-
-    Returns:
-        估算的复杂度字符串
-    """
-    # 循环模式
     loop_patterns = [
         r"\bfor\s*\(",
         r"\bwhile\s*\(",
-        r"\bfor\s+\w+.*:",  # range-based for
+        r"\bfor\s+\w+.*:",
     ]
 
     max_nesting = 0
@@ -75,99 +62,67 @@ def analyze_loop_complexity(code: str) -> str:
 
     lines = code.split("\n")
     for line in lines:
-        # 移除单行注释
         if "//" in line:
             line = line[: line.index("//")]
 
-        # 检测当前行是否有循环
         has_loop = any(re.search(p, line) for p in loop_patterns)
-
-        # 如果有循环，记录当前深度
-        # brace_depth 表示当前所在的大括号层级
-        # 循环嵌套数 = 当前大括号层级
         if has_loop:
             saw_loop = True
             max_nesting = max(max_nesting, brace_depth)
 
-        # 处理大括号
         for char in line:
             if char == "{":
                 brace_depth += 1
             elif char == "}":
                 brace_depth = max(0, brace_depth - 1)
 
-    # 根据嵌套层数估算复杂度
     if not saw_loop:
         return ComplexityLevel.CONSTANT
-    if max_nesting == 0:
-        return ComplexityLevel.LINEAR
-    elif max_nesting == 1:
+    if max_nesting <= 1:
         return ComplexityLevel.LINEAR
     elif max_nesting == 2:
         return ComplexityLevel.QUADRATIC
     elif max_nesting == 3:
         return ComplexityLevel.CUBIC
-    else:
-        return ComplexityLevel.EXPONENTIAL
+    return ComplexityLevel.EXPONENTIAL
 
 
 def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
-    """检测常见算法模式。
+    patterns: list[str] = []
+    complexity: str | None = None
 
-    Args:
-        code: C++ 源代码
-
-    Returns:
-        (复杂度或 None, 检测到的模式列表)
-        如果没有检测到模式，返回 (None, [])
-    """
-    patterns = []
-    complexity = None  # 默认不返回复杂度
-
-    # 二分查找
     if re.search(r"\bbinary_search\b|\blower_bound\b|\bupper_bound\b", code):
         patterns.append("binary_search")
         complexity = ComplexityLevel.N_LOG_N
 
-    # 排序
     if re.search(r"\bsort\b|\bstable_sort\b|\bpartial_sort\b", code):
         patterns.append("sorting")
         complexity = ComplexityLevel.N_LOG_N
 
-    # 归并与分治
     if re.search(r"\bmerge(_sort|_count)?\b|\bdivide_and_conquer\b", code, re.IGNORECASE):
         patterns.append("divide_and_conquer")
         complexity = ComplexityLevel.N_LOG_N
 
-    # 树状结构
     if re.search(r"\b(fenwick|bit|segtree|segment_tree)\b", code, re.IGNORECASE):
         patterns.append("tree_data_structure")
         complexity = ComplexityLevel.N_LOG_N
 
-    # 图算法 - BFS/DFS
     if re.search(r"\bbfs\b|\bdfs\b|queue<|stack<", code):
         patterns.append("graph_traversal")
         complexity = ComplexityLevel.LINEAR
 
-    # 动态规划
     if re.search(r"dp\[|memo\[|memoization", code):
         patterns.append("dynamic_programming")
-        # DP 复杂度取决于状态数和转移
         complexity = ComplexityLevel.QUADRATIC
 
-    # 哈希表
     if re.search(r"unordered_map|unordered_set|hash_map", code):
         patterns.append("hash_table")
-        # 如果主要操作是哈希，可能更优
 
-    # 递归
     if re.search(r"\breturn\s+\w+\s*\([^)]*\)", code) and re.search(
         r"\b\w+\s*\([^)]*\)\s*{", code
     ):
-        # 简单的递归检测
         patterns.append("recursion")
 
-    # 位运算
     if re.search(r"1\s*<<\s*\w+|bitmask|bitset", code):
         patterns.append("bitmask")
         complexity = ComplexityLevel.EXPONENTIAL
@@ -187,9 +142,9 @@ def build_risk_notes(
 ) -> list[str]:
     notes = list(warnings)
     if estimated in {ComplexityLevel.QUADRATIC, ComplexityLevel.CUBIC}:
-        notes.append("高复杂度实现对 n 上限敏感，建议强化 type=4(TLE) 对拍。")
+        notes.append("高复杂度实现对 n 上限敏感，建议强化极限对拍。")
     if estimated in {ComplexityLevel.EXPONENTIAL, ComplexityLevel.FACTORIAL}:
-        notes.append("指数级/阶乘级复杂度通常不适合作为标准解，请核对题面约束。")
+        notes.append("指数级复杂度通常不适合作为标准解，请核对题面约束。")
     if constraints and constraints.get("n_max", 0) >= 10**6 and estimated not in {
         ComplexityLevel.LINEAR,
         ComplexityLevel.N_LOG_N,
@@ -201,19 +156,10 @@ def build_risk_notes(
 
 
 def estimate_memory_usage(code: str) -> tuple[str, int]:
-    """估算内存使用。
-
-    Args:
-        code: C++ 源代码
-
-    Returns:
-        (空间复杂度描述, 估算的内存 MB)
-    """
-    # 检测大数组
     array_patterns = [
-        r"(\w+)\s*\[(\d+)\]",  # int arr[1000]
-        r"vector<\w+>\s+(\w+)\s*\((\d+)\)",  # vector<int> v(1000)
-        r"array<\w+,\s*(\d+)>",  # array<int, 1000>
+        r"(\w+)\s*\[(\d+)\]",
+        r"vector<\w+>\s+(\w+)\s*\((\d+)\)",
+        r"array<\w+,\s*(\d+)>",
     ]
 
     total_elements = 0
@@ -221,7 +167,6 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
         matches = re.findall(pattern, code)
         for match in matches:
             try:
-                # 获取数字部分
                 if isinstance(match, tuple):
                     size = int(match[-1])
                 else:
@@ -230,7 +175,6 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
             except (ValueError, IndexError):
                 pass
 
-    # 估算内存（假设每个元素 4 字节）
     memory_bytes = total_elements * 4
     memory_mb = max(1, memory_bytes // (1024 * 1024))
 
@@ -240,33 +184,87 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
         return "O(n)", memory_mb
     elif total_elements < 1000000:
         return "O(n)", memory_mb
-    else:
-        return "O(n) - large", memory_mb
+    return "O(n) - large", memory_mb
+
+
+async def run_empirical_verification(
+    problem_dir: str,
+    solution_type: str,
+    claimed_complexity: str | None,
+    constraints: dict[str, Any] | None,
+) -> dict[str, Any]:
+    exe_ext = get_exe_extension()
+    gen_path = os.path.join(problem_dir, "files", f"gen{exe_ext}")
+    sol_path = os.path.join(problem_dir, "solutions", f"{solution_type}{exe_ext}")
+
+    if not os.path.isfile(gen_path) or not os.path.isfile(sol_path):
+        return {
+            "status": "pending_generator",
+            "message": "files/gen or binary not built yet, empirical verification will execute after generator_build",
+        }
+
+    actual_n_max = 10000
+    time_limit_ms = 2000.0
+    if constraints:
+        actual_n_max = int(constraints.get("n_max") or 10000)
+        time_limit_ms = float(constraints.get("time_limit_ms") or 2000.0)
+
+    effective_complexity = claimed_complexity or "O(n)"
+    scale_points = MultiScaleSampler.compute_scale_points(actual_n_max, effective_complexity)
+
+    empirical_dir = os.path.join(problem_dir, ".autocode", "empirical_tests")
+    os.makedirs(empirical_dir, exist_ok=True)
+
+    baseline_overhead = await DynamicExecutionMonitor.measure_baseline_overhead(cwd=problem_dir)
+
+    samples: list[dict[str, Any]] = []
+    for idx, pt in enumerate(scale_points):
+        in_file = os.path.join(empirical_dir, f"scale_{pt}.in")
+        gen_cmd = MultiScaleSampler.format_generator_command(gen_path, pt, 42 + idx)
+        try:
+            await asyncio.to_thread(
+                MultiScaleSampler.generate_scale_input_file,
+                gen_cmd,
+                in_file,
+                5.0,
+            )
+        except Exception as e:
+            return {
+                "status": "generator_error",
+                "message": f"Failed generating scale point {pt}: {e}",
+            }
+
+        res = await DynamicExecutionMonitor.run_monitored_process(
+            [sol_path],
+            in_file,
+            time_limit_ms=time_limit_ms,
+            cwd=problem_dir,
+            baseline_overhead_ms=baseline_overhead,
+        )
+        samples.append({
+            "n": pt,
+            "cpu_time_ms": res.get("cpu_time_ms"),
+            "memory_mb": res.get("memory_mb"),
+            "status": res.get("status"),
+        })
+        if res.get("status") in ("timeout", "mle"):
+            break
+
+    return EmpiricalRatioAnalyzer.verify_complexity(
+        effective_complexity,
+        samples,
+        time_limit_ms=time_limit_ms,
+    )
 
 
 class SolutionAnalyzeTool(Tool):
-    """分析解法复杂度。"""
-
     @property
     def name(self) -> str:
         return "solution_analyze"
 
     @property
     def description(self) -> str:
-        return """分析 C++ 解法代码的时间/空间复杂度。
-
-        基于静态分析估算：
-        - 时间复杂度（循环嵌套、算法模式）
-        - 空间复杂度（数组、容器大小）
-        - 推荐的测试参数
-
-        前置条件：
-        1. 已有解法代码（可以是未编译的源码）
-
-        建议下一步：
-        - 根据推荐的 n_max 调整测试数据生成参数
-        - 根据推荐的 time_limit 设置题目时间限制
-        """
+        return "分析 C++ 解法代码的时间与空间复杂度，结合经验数据拟合输出实证分析证据。"
 
     @property
     def input_schema(self) -> dict:
@@ -279,8 +277,8 @@ class SolutionAnalyzeTool(Tool):
         solution_type: str = "sol",
         source_path: str | None = None,
         constraints: dict | None = None,
+        claimed_complexity: str | None = None,
     ) -> ToolResult:
-        """执行复杂度分析。"""
         if solution_type not in {"sol", "brute"}:
             return ToolResult.fail("solution_type must be 'sol' or 'brute'")
         if code is None and source_path is None and not problem_dir:
@@ -297,14 +295,9 @@ class SolutionAnalyzeTool(Tool):
         assert resolved is not None
         code = resolved.code
 
-        # 1. 分析循环复杂度
         loop_complexity = analyze_loop_complexity(code)
-
-        # 2. 检测算法模式
         pattern_complexity, patterns = detect_algorithm_patterns(code)
 
-        # 3. 选择复杂度估计
-        # 如果检测到算法模式，取两者中较大的（更保守的估计）
         if pattern_complexity is not None:
             complexity_order = [
                 ComplexityLevel.CONSTANT,
@@ -316,27 +309,23 @@ class SolutionAnalyzeTool(Tool):
                 ComplexityLevel.EXPONENTIAL,
                 ComplexityLevel.FACTORIAL,
             ]
-
             loop_idx = complexity_order.index(loop_complexity)
             pattern_idx = complexity_order.index(pattern_complexity)
-
-            # 取较大的复杂度（更保守）
-            final_complexity = (
-                pattern_complexity if pattern_idx > loop_idx else loop_complexity
-            )
+            final_complexity = pattern_complexity if pattern_idx > loop_idx else loop_complexity
         else:
             final_complexity = loop_complexity
 
-        # 4. 估算内存
+        if claimed_complexity:
+            norm_claimed = normalize_complexity_expression(claimed_complexity)
+            final_complexity = norm_claimed
+
         space_complexity, memory_mb = estimate_memory_usage(code)
 
-        # 5. 生成推荐参数
         recommended_n_max = COMPLEXITY_TO_N_MAX.get(final_complexity, 10000)
         recommended_time_ms = COMPLEXITY_TO_TIME_LIMIT.get(final_complexity, 1000)
-        claimed_complexity = extract_claimed_complexity(code)
+        detected_claimed = extract_claimed_complexity(code)
 
-        # 如果有题目约束，验证是否合理
-        warnings = []
+        warnings: list[str] = []
         if constraints:
             if constraints.get("n_max"):
                 if constraints["n_max"] > recommended_n_max:
@@ -359,8 +348,17 @@ class SolutionAnalyzeTool(Tool):
             constraints=constraints,
         )
 
+        empirical_verification: dict[str, Any] = {"status": "skipped"}
+        if problem_dir:
+            empirical_verification = await run_empirical_verification(
+                problem_dir,
+                solution_type,
+                claimed_complexity or detected_claimed or final_complexity,
+                constraints,
+            )
+
         return ToolResult.ok(
-            claimed_complexity=claimed_complexity,
+            claimed_complexity=claimed_complexity or detected_claimed,
             estimated_complexity=final_complexity,
             worst_case_complexity=final_complexity,
             average_case_complexity=final_complexity,
@@ -375,37 +373,22 @@ class SolutionAnalyzeTool(Tool):
             risk_notes=risk_notes,
             suggested_test_configs=suggested_test_configs,
             recommended_stress_params=stress_profiles,
+            empirical_verification=empirical_verification,
             message=f"Analyzed complexity: {final_complexity}",
         )
 
     def _generate_test_configs(
         self, n_max: int, constraints: dict | None
     ) -> list[dict]:
-        """生成推荐的测试配置。
-
-        Args:
-            n_max: 推荐的 n 最大值
-            constraints: 题目约束
-
-        Returns:
-            测试配置列表
-        """
-        # 使用约束中的 n_max 或推荐值
         actual_n_max = constraints.get("n_max", n_max) if constraints else n_max
-
-        configs = [
-            # 边界情况
+        return [
             {"type": "1", "n_min": 1, "n_max": 1, "t_min": 1, "t_max": 1},
             {"type": "1", "n_min": 1, "n_max": 10, "t_min": 1, "t_max": 1},
-            # 随机数据
             {"type": "2", "n_min": 10, "n_max": actual_n_max // 10, "t_min": 1, "t_max": 1},
             {"type": "2", "n_min": actual_n_max // 10, "n_max": actual_n_max // 2, "t_min": 1, "t_max": 1},
-            # 极限数据
             {"type": "3", "n_min": actual_n_max // 2, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
             {"type": "3", "n_min": actual_n_max, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
         ]
-
-        return configs
 
     def _recommended_stress_profiles(
         self,
