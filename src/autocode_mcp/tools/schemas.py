@@ -180,6 +180,7 @@ class SolutionAnalyzeInput(BaseModel):
     solution_type: Literal["sol", "brute"] = "sol"
     source_path: str | None = None
     constraints: AnalyzeConstraints | None = None
+    claimed_complexity: str | None = None
 
 
 # --------------------------------------------------------------------------- #

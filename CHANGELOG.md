@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-09-19
+
 ### Added
 
+- **多规模阶梯数据采样与经验复杂度拟合**：
+  - 新增 `MultiScaleSampler`（多规模阶梯数据采样器），支持自适应 5 点阶梯采样，适配多项式、小规模多项式与指数级规模，杜绝采样点倒挂；支持 testlib 命令行规范参数与多测极端数据分布生成。
+  - 新增 `DynamicExecutionMonitor`（动态执行监控器），采集纯 CPU 耗时（`utime + stime`）与物理内存，测量并扣除原生系统启动底噪；支持交互题双向匿名管道并发调度与独立 CPU 耗时核算；完善进程树深度回收与异常清理。
+  - 新增 `EmpiricalRatioAnalyzer`（经验倍率拟合分析器），采用对数线性回归拟合幂指数 $\alpha$ 与判定系数 $R^2$；引入动态理论期望倍率与自适应容差校验；支持处理器缓存容量跨越保护（Cache Jump Protection）；支持阶乘复杂度 $O(n!)$ 校验。
+  - 重构 `complexity`、`solution_audit` 与 `audit` 工具层：解法审计与全量审计接入多规模经验拟合结果与质量信号门禁，未通过时追加高优先级阻断与修复指引。
 - **DeepSeek Harness (DSH) 插件生态支持**：
   - 新增 `.dsh-plugin/package.json`、`.dsh-plugin/cordis.patch.yml`、`.dsh-plugin/index.js`，支持在 DSH 会话中挂载 AutoCode 作为 MCP 服务。
   - 通过 `dsh-agent-instructions` 扩展机制将工作区指导规范与质量门禁自动注入大语言模型系统提示词上下文。
