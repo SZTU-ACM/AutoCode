@@ -78,7 +78,13 @@ codex plugin add autocode@autocode-marketplace
 
 ### 安装 DeepSeek Harness (DSH) 插件
 
-在 DeepSeek Harness 中加载 AutoCode：
+推荐通过市场仓库远程安装 AutoCode：
+
+```bash
+dsh plugin add git+https://github.com/SummerOneTwo/autocode-marketplace.git#path:plugins/autocode-dsh
+```
+
+或者在本地代码仓库中加载插件：
 
 ```bash
 dsh plugin add ./.dsh-plugin
