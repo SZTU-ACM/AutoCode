@@ -87,3 +87,23 @@ async def test_run_monitored_process_mle(tmp_path: os.PathLike[str]) -> None:
     )
 
     assert res["status"] == "mle"
+
+
+@pytest.mark.asyncio
+async def test_run_monitored_process_output_limit(tmp_path: os.PathLike[str]) -> None:
+    in_file = os.path.join(str(tmp_path), "input.in")
+    with open(in_file, "w", encoding="utf-8") as f:
+        f.write("1\n")
+
+    code = "import sys\nfor _ in range(200000):\n    sys.stdout.write('A' * 64 + '\\n')"
+    cmd = [sys.executable, "-c", code]
+
+    res = await DynamicExecutionMonitor.run_monitored_process(
+        cmd,
+        in_file,
+        time_limit_ms=5000.0,
+        memory_limit_mb=512.0,
+    )
+
+    assert res["status"] == "ok"
+    assert len(res["stdout"]) <= 10 * 1024 * 1024

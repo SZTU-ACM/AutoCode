@@ -51,6 +51,16 @@ def test_format_generator_command_template() -> None:
     assert cmd == ["gen.exe", "-n", "5000", "--seed", "42", "-m", "10000"]
 
 
+def test_format_generator_command_extra_vars_custom_type_and_n_max() -> None:
+    cmd = MultiScaleSampler.format_generator_command(
+        "gen.exe",
+        5000,
+        42,
+        extra_vars={"type": "2", "n_max": 8000},
+    )
+    assert cmd == ["gen.exe", "42", "2", "5000", "8000", "1", "1"]
+
+
 def test_generate_scale_input_file(tmp_path: os.PathLike[str]) -> None:
     out_file = os.path.join(str(tmp_path), "test_scale.in")
     cmd = [sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:]))", "10", "20", "30"]

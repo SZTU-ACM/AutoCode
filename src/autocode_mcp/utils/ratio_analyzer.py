@@ -68,14 +68,42 @@ class EmpiricalRatioAnalyzer:
         if normalized_expr in ("O(n^3)",):
             return n * n * n
         if normalized_expr in ("O(2^n)",):
-            return math.pow(2.0, min(n, 60.0))
+            return math.pow(2.0, min(n, 1020.0))
         if normalized_expr in ("O(n!)",):
-            return float(math.factorial(min(int(n), 20)))
+            int_n = max(1, min(int(n), 170))
+            return float(math.factorial(int_n))
         return n
 
     @classmethod
     def calculate_expected_ratio(cls, claimed_complexity: str, n_from: int, n_to: int) -> float:
         norm_expr = normalize_complexity_expression(claimed_complexity)
+        if norm_expr == "O(n!)":
+            if n_from <= 0:
+                n_from = 1
+            if n_to <= 0:
+                n_to = 1
+            if n_to == n_from:
+                return 1.0
+            if n_to > n_from:
+                ratio = 1.0
+                for k in range(n_from + 1, n_to + 1):
+                    ratio *= k
+                    if ratio > 1e12:
+                        return 1e12
+                return ratio
+            else:
+                ratio = 1.0
+                for k in range(n_to + 1, n_from + 1):
+                    ratio *= k
+                    if ratio > 1e12:
+                        return 0.0
+                return 1.0 / ratio if ratio > 0 else 0.0
+
+        if norm_expr == "O(2^n)":
+            diff = float(n_to - n_from)
+            clamped_diff = min(max(diff, -100.0), 100.0)
+            return math.pow(2.0, clamped_diff)
+
         val_from = cls.evaluate_complexity_function(norm_expr, float(n_from))
         val_to = cls.evaluate_complexity_function(norm_expr, float(n_to))
         if val_from <= 0:

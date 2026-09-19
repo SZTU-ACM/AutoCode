@@ -229,3 +229,27 @@ async def test_generator_missing_fallback_e2e():
         assert result.success
         empirical = result.data.get("empirical_verification", {})
         assert empirical.get("status") == "pending_generator"
+
+
+@pytest.mark.asyncio
+async def test_solution_without_claimed_complexity_skips_verification():
+    tool = SolutionAnalyzeTool()
+    exe_ext = get_exe_extension()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        gen_bin = os.path.join(tmpdir, "files", f"gen{exe_ext}")
+        sol_bin = os.path.join(tmpdir, "solutions", f"sol{exe_ext}")
+        _compile_cpp(GEN_CPP, gen_bin)
+        _compile_cpp(QUADRATIC_SOL_CPP, sol_bin)
+
+        result = await tool.execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            claimed_complexity=None,
+            constraints={"n_max": 10000, "time_limit_ms": 2000.0},
+        )
+
+        assert result.success
+        empirical = result.data.get("empirical_verification", {})
+        assert empirical.get("status") == "skipped"
+        assert empirical.get("passed") is True

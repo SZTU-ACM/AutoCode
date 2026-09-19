@@ -98,13 +98,34 @@ class DynamicExecutionMonitor:
 
         sampler_task = asyncio.create_task(_sample_resources())
 
+        async def _read_stream_limited(reader: asyncio.StreamReader | None, limit: int) -> bytes:
+            if not reader:
+                return b""
+            chunks: list[bytes] = []
+            collected = 0
+            while not reader.at_eof():
+                try:
+                    chunk = await reader.read(65536)
+                except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
+                    break
+                if not chunk:
+                    break
+                if collected < limit:
+                    remaining = limit - collected
+                    chunks.append(chunk[:remaining])
+                    collected += min(len(chunk), remaining)
+            return b"".join(chunks)
+
+        read_stdout_task = asyncio.create_task(_read_stream_limited(subproc.stdout, max_output_bytes))
+        read_stderr_task = asyncio.create_task(_read_stream_limited(subproc.stderr, max_output_bytes))
+
         try:
-            stdout_data, stderr_data = await asyncio.wait_for(
-                subproc.communicate(),
+            await asyncio.wait_for(
+                asyncio.gather(subproc.wait(), read_stdout_task, read_stderr_task),
                 timeout=timeout_sec,
             )
-            stdout_bytes = stdout_data[:max_output_bytes]
-            stderr_bytes = stderr_data[:max_output_bytes]
+            stdout_bytes = read_stdout_task.result()
+            stderr_bytes = read_stderr_task.result()
         except asyncio.TimeoutError:
             status = "timeout"
             await terminate_pid_tree(pid)
@@ -112,6 +133,10 @@ class DynamicExecutionMonitor:
                 await asyncio.wait_for(subproc.wait(), timeout=1.0)
             except Exception:
                 pass
+            if not read_stdout_task.done():
+                read_stdout_task.cancel()
+            if not read_stderr_task.done():
+                read_stderr_task.cancel()
         finally:
             sampler_task.cancel()
             try:

@@ -203,13 +203,20 @@ async def run_empirical_verification(
             "message": "files/gen or binary not built yet, empirical verification will execute after generator_build",
         }
 
+    if not claimed_complexity:
+        return {
+            "status": "skipped",
+            "passed": True,
+            "message": "claimed_complexity not provided; skipping empirical verification to avoid false assumptions",
+        }
+
     actual_n_max = 10000
     time_limit_ms = 2000.0
     if constraints:
         actual_n_max = int(constraints.get("n_max") or 10000)
         time_limit_ms = float(constraints.get("time_limit_ms") or 2000.0)
 
-    effective_complexity = claimed_complexity or "O(n)"
+    effective_complexity = claimed_complexity
     scale_points = MultiScaleSampler.compute_scale_points(actual_n_max, effective_complexity)
 
     empirical_dir = os.path.join(problem_dir, ".autocode", "empirical_tests")
@@ -353,7 +360,7 @@ class SolutionAnalyzeTool(Tool):
             empirical_verification = await run_empirical_verification(
                 problem_dir,
                 solution_type,
-                claimed_complexity or detected_claimed or final_complexity,
+                claimed_complexity or detected_claimed,
                 constraints,
             )
 

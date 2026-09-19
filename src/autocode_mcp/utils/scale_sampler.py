@@ -45,6 +45,7 @@ class MultiScaleSampler:
         vars_map: dict[str, Any] = {
             "n": n,
             "seed": seed,
+            "type": "random",
             "n_min": n,
             "n_max": n,
             "t_min": 1,
@@ -62,9 +63,9 @@ class MultiScaleSampler:
         return [
             generator_exe,
             str(seed),
-            "random",
+            str(vars_map.get("type", "random")),
             str(vars_map.get("n_min", n)),
-            str(n),
+            str(vars_map.get("n_max", n)),
             str(vars_map.get("t_min", 1)),
             str(vars_map.get("t_max", 1)),
         ]

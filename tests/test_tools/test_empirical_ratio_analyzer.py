@@ -27,6 +27,12 @@ def test_calculate_expected_ratio() -> None:
     r_cubic = EmpiricalRatioAnalyzer.calculate_expected_ratio("O(n^3)", 100, 1000)
     assert pytest.approx(r_cubic, 0.01) == 1000.0
 
+    r_fact = EmpiricalRatioAnalyzer.calculate_expected_ratio("O(n!)", 20, 22)
+    assert pytest.approx(r_fact, 0.01) == 21.0 * 22.0
+
+    r_exp = EmpiricalRatioAnalyzer.calculate_expected_ratio("O(2^n)", 60, 65)
+    assert pytest.approx(r_exp, 0.01) == 32.0
+
 
 def test_fit_log_linear_linear_samples() -> None:
     samples = [
