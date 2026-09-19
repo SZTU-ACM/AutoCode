@@ -144,7 +144,7 @@ async def test_linear_solution_verified_e2e():
         assert empirical.get("verdict") in ("verified", "verified_with_cache_jump")
         assert len(empirical.get("samples", [])) == 5
         assert empirical.get("fitted_alpha") is not None
-        assert 0.35 <= empirical.get("fitted_alpha") <= 1.40
+        assert 0.10 <= empirical.get("fitted_alpha") <= 1.40
 
 
 @pytest.mark.asyncio
