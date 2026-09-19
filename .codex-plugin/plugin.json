@@ -1,6 +1,6 @@
 {
   "name": "autocode",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Verified competitive-programming problem authoring workflows for Claude Code and Codex.",
   "author": {
     "name": "SummerOneTwo",

@@ -207,7 +207,7 @@ class EmpiricalRatioAnalyzer:
         if len(valid_samples) >= 4:
             tail_samples = valid_samples[-3:]
             tail_alpha, tail_r2 = cls.fit_log_linear(tail_samples)
-            if tail_alpha > expected_range[1] + 0.10:
+            if tail_alpha > expected_range[1]:
                 is_alpha_match = False
                 alpha = tail_alpha
                 fitted_cat = cls.infer_complexity_category(tail_alpha)

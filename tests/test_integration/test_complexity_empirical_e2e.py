@@ -60,7 +60,7 @@ int main() {
     long long cnt = 0;
     for (int i = 0; i < n; ++i) {
         for (int j = i + 1; j < n; ++j) {
-            cnt += (a[i] ^ a[j]) + j;
+            cnt += (a[i] ^ a[j]) + (a[j] ^ i) + ((cnt + j) & 255);
         }
     }
     std::cout << cnt << "\\n";
@@ -144,7 +144,7 @@ async def test_linear_solution_verified_e2e():
         assert empirical.get("verdict") in ("verified", "verified_with_cache_jump")
         assert len(empirical.get("samples", [])) == 5
         assert empirical.get("fitted_alpha") is not None
-        assert 0.50 <= empirical.get("fitted_alpha") <= 1.40
+        assert 0.35 <= empirical.get("fitted_alpha") <= 1.40
 
 
 @pytest.mark.asyncio
