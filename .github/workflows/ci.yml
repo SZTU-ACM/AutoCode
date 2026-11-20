@@ -33,8 +33,8 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run mypy src/
 
-  # Plugin contract smoke tests: Claude and Codex manifests must stay in sync
-  # with the reproducible marketplace bundle.
+  # Plugin contract smoke tests: Claude, Codex, DSH, and AGY manifests must
+  # stay in sync with reproducible host bundles.
   plugin-contract:
     runs-on: ubuntu-latest
     steps:
@@ -46,12 +46,19 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
+      - name: Check single-source plugin version sync
+        run: uv run python scripts/sync_plugin_version.py --check
       - name: Validate plugin manifests and bundle builder
         run: uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py -q
-      - name: Build and check a clean plugin bundle
+      - name: Build and check clean host plugin bundles
         run: |
           uv run python scripts/build_plugin_bundle.py --output "$RUNNER_TEMP/autocode-bundle"
           uv run python scripts/build_plugin_bundle.py --check --output "$RUNNER_TEMP/autocode-bundle"
+          uv run python scripts/build_plugin_bundle.py --target agy --output "$RUNNER_TEMP/autocode-agy"
+          uv run python scripts/build_plugin_bundle.py --target agy --output "$RUNNER_TEMP/autocode-agy"
+          uv run python scripts/build_plugin_bundle.py --target agy --check --output "$RUNNER_TEMP/autocode-agy"
+          uv run python scripts/build_plugin_bundle.py --target dsh --output "$RUNNER_TEMP/autocode-dsh"
+          uv run python scripts/build_plugin_bundle.py --target dsh --check --output "$RUNNER_TEMP/autocode-dsh"
 
   test-unit:
     runs-on: ubuntu-latest

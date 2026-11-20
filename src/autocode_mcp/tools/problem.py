@@ -12,7 +12,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -26,14 +26,32 @@ from ..runtime_store import (
     update_section,
 )
 from ..utils.answer_ext import normalize_answer_ext
+from ..utils.communication_runner import (
+    CommunicationRunner,
+    is_safe_stem,
+    resolve_communicator_binary,
+    resolve_communicator_source_existing,
+    resolve_communicator_source_rel,
+    resolve_grader_source_existing,
+    resolve_participant_binaries,
+    safe_resolve_under_root,
+)
 from ..utils.compiler import RunResult, run_batch, run_binary, run_binary_with_args
+from ..utils.exporters import export_hydro, export_qoj, map_tests_to_subtasks
+from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
 from ..utils.process import filter_alive_pids, is_pid_alive, terminate_pid_tree
 from ..workflow import (
     AutoCodeManifest,
+    OracleMode,
+    ProblemType,
+    ProtocolMode,
     check_gates,
     default_manifest,
     load_manifest,
+    manifest_is_communication,
+    manifest_is_interactive,
+    manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
     save_manifest,
 )
@@ -98,8 +116,30 @@ class ProblemCreateTool(Tool):
         problem_dir: str,
         problem_name: str,
         interactive: bool = False,
+        problem_type: ProblemType | None = None,
+        protocol_mode: ProtocolMode | None = None,
+        oracle_mode: OracleMode = "brute",
     ) -> ToolResult:
         """执行题目目录创建。"""
+        if problem_type is not None and interactive and problem_type != "interactive":
+            return ToolResult.fail(
+                f"conflicting arguments: problem_type={problem_type!r} cannot be combined with interactive=True"
+            )
+        resolved_type: ProblemType = (
+            problem_type if problem_type is not None else ("interactive" if interactive else "standard")
+        )
+        is_interactive = resolved_type == "interactive"
+        is_communication = resolved_type == "communication"
+        try:
+            manifest = default_manifest(
+                problem_name=problem_name,
+                interactive=is_interactive,
+                problem_type=resolved_type,
+                protocol_mode=protocol_mode,
+                oracle_mode=oracle_mode,
+            )
+        except (ValidationError, ValueError) as exc:
+            return ToolResult.fail(f"invalid problem configuration: {exc}")
         # 创建目录结构
         directories = [
             problem_dir,
@@ -145,11 +185,29 @@ class ProblemCreateTool(Tool):
                 "and place it in src/autocode_mcp/templates/."
             )
 
-        if interactive:
+        if is_interactive:
             template_interactor = os.path.join(TEMPLATES_DIR, "interactor_template.cpp")
             dest_interactor = os.path.join(problem_dir, "files", "interactor.cpp")
             if os.path.exists(template_interactor) and not os.path.exists(dest_interactor):
                 shutil.copy2(template_interactor, dest_interactor)
+        elif is_communication:
+            comm_mode = manifest.protocol.mode if manifest.protocol else "run_twice"
+            if comm_mode == "grader_linked":
+                for tmpl_name, dest_name in (
+                    ("grader_template.cpp", "grader.cpp"),
+                    ("problem_h_template.h", "problem.h"),
+                ):
+                    src_tmpl = os.path.join(TEMPLATES_DIR, tmpl_name)
+                    dest_file = os.path.join(problem_dir, "files", dest_name)
+                    if os.path.exists(src_tmpl) and not os.path.exists(dest_file):
+                        shutil.copy2(src_tmpl, dest_file)
+            else:
+                tmpl_comm = os.path.join(TEMPLATES_DIR, "communicator_run_twice_template.cpp")
+                fallback_tmpl = os.path.join(TEMPLATES_DIR, "interactor_template.cpp")
+                src_tmpl = tmpl_comm if os.path.exists(tmpl_comm) else fallback_tmpl
+                dest_comm = os.path.join(problem_dir, "files", "communicator.cpp")
+                if os.path.exists(src_tmpl) and not os.path.exists(dest_comm):
+                    shutil.copy2(src_tmpl, dest_comm)
         else:
             template_validator = os.path.join(TEMPLATES_DIR, "validator_template.cpp")
             dest_validator = os.path.join(problem_dir, "files", "val.cpp")
@@ -165,7 +223,41 @@ class ProblemCreateTool(Tool):
         readme_path = os.path.join(problem_dir, "statements", "README.md")
         if not os.path.exists(readme_path):
             with open(readme_path, "w", encoding="utf-8") as f:
-                if interactive:
+                if is_communication:
+                    comm_mode = manifest.protocol.mode if manifest.protocol else "run_twice"
+                    comm_isolation_note = (
+                        f"- 通信模式：`{comm_mode}`（与 `files/grader.cpp` 与 `files/problem.h` 链接编译，禁止使用全局变量跨阶段偷传状态）。\n"
+                        if comm_mode == "grader_linked"
+                        else f"- 通信模式：`{comm_mode}`（各阶段运行在相互隔离的独立进程中，禁止通过全局变量或外部文件传递状态）。\n"
+                    )
+                    f.write(
+                        f"# {problem_name}\n\n"
+                        "## 时间限制与空间限制\n\n"
+                        "- 时间限制：\n"
+                        "- 空间限制：\n\n"
+                        "## 题目背景（可选）\n\n"
+                        "如不需要背景，可删除本节。\n\n"
+                        "## 题目描述\n\n"
+                        "本题为通信题，请完整描述编码/发送端与解码/接收端各自获知的信息与还原目标。\n\n"
+                        "## 输入格式\n\n"
+                        "请明确第一阶段与第二阶段的输入格式、隐藏参数范围与总规模约束。\n\n"
+                        "## 输出格式\n\n"
+                        "请完整定义编码消息格式、字符集/比特数上限及最终还原答案格式。\n\n"
+                        "## 通信协议\n\n"
+                        f"{comm_isolation_note}"
+                        "- 明确第一阶段（Encoder / Alice）与第二阶段（Decoder / Bob）的入口标识或函数签名。\n"
+                        "- 明确通信预算上限（最大比特数 / 字节数 / 轮次）及超限判定规则。\n"
+                        "- 明确信道变换/噪声/对抗模型（若为无噪信道亦须明示）。\n"
+                        "- 明确非法格式、提前 EOF、超预算与通信失败时的判分规则。\n\n"
+                        "## 样例\n\n"
+                        "通信题样例应写出完整的两阶段 transcript（标明 Pass 1 / Channel / Pass 2）。\n\n"
+                        "```text\n"
+                        "（请填写两阶段样例通信过程）\n"
+                        "```\n\n"
+                        "## 说明\n\n"
+                        "所有样例解释统一写在本节；只需解释有代表性的样例即可。\n"
+                    )
+                elif is_interactive:
                     f.write(
                         f"# {problem_name}\n\n"
                         "## 时间限制与空间限制\n\n"
@@ -230,13 +322,15 @@ class ProblemCreateTool(Tool):
                     "## 复杂度分析\n\n请补充时间与空间复杂度。\n"
                 )
 
-        manifest = default_manifest(problem_name=problem_name, interactive=interactive)
         manifest_file = save_manifest(problem_dir, manifest)
 
         return ToolResult.ok(
             problem_dir=problem_dir,
             problem_name=problem_name,
-            interactive=interactive,
+            problem_type=manifest.problem_type,
+            oracle_mode=manifest.oracle_mode,
+            protocol_mode=manifest.protocol.mode if manifest.protocol else None,
+            interactive=manifest.interactive,
             manifest_path=str(manifest_file),
             created_directories=created_dirs,
             message=f"Created problem directory: {problem_dir}",
@@ -383,10 +477,50 @@ class ProblemGenerateTestsTool(Tool):
         if not os.path.exists(val_exe):
             val_exe = os.path.join(problem_dir, f"val{exe_ext}")
 
+        try:
+            manifest_model = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+        is_interactive = manifest_is_interactive(manifest_model)
+        is_communication = manifest_is_communication(manifest_model)
+
         if not os.path.exists(gen_exe):
             return ToolResult.fail("Generator not found. Run generator_build first.")
         if not os.path.exists(sol_exe):
-            return ToolResult.fail(f"{effective_sol_name} not found. Run solution_build first.")
+            if (
+                is_communication
+                and manifest_model is not None
+                and manifest_model.protocol is not None
+                and manifest_model.protocol.participant_solutions
+                and effective_sol_name == "sol"
+            ):
+                parts = resolve_participant_binaries(problem_dir, manifest_model, None, exe_ext)
+                if parts and all(os.path.isfile(p) for p in parts):
+                    sol_exe = os.path.join(problem_dir, "solutions", f"sol{exe_ext}")
+                else:
+                    return ToolResult.fail(
+                        "Participant solution binaries not found: "
+                        + ", ".join(manifest_model.protocol.participant_solutions)
+                    )
+            else:
+                return ToolResult.fail(f"{effective_sol_name} not found. Run solution_build first.")
+
+        interactor_exe: str | None = None
+        if is_interactive:
+            interactor_exe = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
+            if not os.path.exists(interactor_exe):
+                interactor_exe = os.path.join(problem_dir, f"interactor{exe_ext}")
+            if not os.path.exists(interactor_exe):
+                return ToolResult.fail("Interactor not found. Run interactor_build first.")
+        elif is_communication and manifest_model is not None:
+            comm_mode = manifest_model.protocol.mode if manifest_model.protocol else "run_twice"
+            if comm_mode != "grader_linked":
+                comm_bin = resolve_communicator_binary(problem_dir, manifest_model, exe_ext)
+                if not comm_bin:
+                    return ToolResult.fail(
+                        f"Communicator not found for communication ({comm_mode}). Run interactor_build first."
+                    )
+                interactor_exe = comm_bin
 
         # Validator 是否可用
         validator_available = enable_validator_filter and os.path.exists(val_exe)
@@ -507,6 +641,11 @@ class ProblemGenerateTestsTool(Tool):
                         timeout,
                         current_validator_available,
                         active_pids,
+                        is_interactive=is_interactive,
+                        is_communication=is_communication,
+                        interactor_exe=interactor_exe,
+                        manifest_model=manifest_model,
+                        problem_dir=problem_dir,
                     )
 
                 return _worker
@@ -571,6 +710,17 @@ class ProblemGenerateTestsTool(Tool):
             return clear_before_write_error
 
         # 写入文件
+        type_to_group: dict[str, str] = {
+            "1": "sanity",
+            "2": "coverage",
+            "3": "limit",
+            "4": "limit",
+        }
+        if manifest_model is not None and manifest_model.case_plan:
+            for plan_item in manifest_model.case_plan:
+                if plan_item.group and plan_item.group.strip():
+                    type_to_group[str(plan_item.type)] = plan_item.group.strip()
+
         generated_tests = []
         test_manifest: list[dict[str, str | int]] = []
         for i, candidate in enumerate(final_tests, 1):
@@ -589,6 +739,7 @@ class ProblemGenerateTestsTool(Tool):
                     "in_file": f"{i:02d}.in",
                     "ans_file": f"{i:02d}{normalized_answer_ext}",
                     "type_param": candidate.type_param,
+                    "group": type_to_group.get(str(candidate.type_param), "default"),
                     "signature": candidate.signature,
                 }
             )
@@ -747,6 +898,12 @@ class ProblemGenerateTestsTool(Tool):
         timeout: int,
         validator_available: bool,
         active_pids: set[int],
+        *,
+        is_interactive: bool = False,
+        is_communication: bool = False,
+        interactor_exe: str | None = None,
+        manifest_model: AutoCodeManifest | None = None,
+        problem_dir: str | None = None,
     ) -> _CandidateOutcome:
         """处理单个候选的 gen→(validator)→sol 流水（并发单元）。
 
@@ -794,18 +951,74 @@ class ProblemGenerateTestsTool(Tool):
             if val_result.return_code != 0:
                 return _CandidateOutcome(fallback_used=fallback_used)
 
-        sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
-        if not sol_result.success:
-            return _CandidateOutcome(
-                error=(seed, f"sol failed: {sol_result.stderr}"),
-                fallback_used=fallback_used,
+        if is_communication and manifest_model is not None and problem_dir is not None:
+            tl_ms = (
+                min(float(timeout) * 1000.0, max(float(manifest_model.time_limit_ms) * 1.5, 1000.0))
+                if manifest_model.time_limit_ms
+                else float(timeout) * 1000.0
             )
+            mem_mb = float(manifest_model.memory_limit_mb) if manifest_model.memory_limit_mb else 256.0
+            jres = await CommunicationRunner.run_from_manifest(
+                problem_dir=problem_dir,
+                manifest=manifest_model,
+                solution_exe=sol_exe,
+                input_data=input_data,
+                time_limit_ms=tl_ms,
+                memory_limit_mb=mem_mb,
+            )
+            if not jres.accepted:
+                return _CandidateOutcome(
+                    error=(
+                        seed,
+                        f"communication sol failed ({jres.verdict}): "
+                        f"{jres.detail or jres.judge_stderr[:300]}",
+                    ),
+                    fallback_used=fallback_used,
+                )
+            output_data = jres.judge_stdout if jres.judge_stdout.strip() else "OK\n"
+        elif is_interactive and interactor_exe:
+            tl_ms = (
+                min(float(timeout) * 1000.0, max(float(manifest_model.time_limit_ms) * 1.5, 1000.0))
+                if (manifest_model and manifest_model.time_limit_ms)
+                else float(timeout) * 1000.0
+            )
+            mem_mb = (
+                float(manifest_model.memory_limit_mb)
+                if (manifest_model and manifest_model.memory_limit_mb)
+                else 256.0
+            )
+            jres = await InteractiveRunner.run(
+                interactor_exe=interactor_exe,
+                solution_exe=sol_exe,
+                input_data=input_data,
+                time_limit_ms=tl_ms,
+                memory_limit_mb=mem_mb,
+                cwd=problem_dir,
+            )
+            if not jres.accepted:
+                return _CandidateOutcome(
+                    error=(
+                        seed,
+                        f"interactive sol failed ({jres.verdict}): "
+                        f"{jres.detail or jres.judge_stderr[:300]}",
+                    ),
+                    fallback_used=fallback_used,
+                )
+            output_data = jres.judge_stdout if jres.judge_stdout.strip() else "OK\n"
+        else:
+            sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
+            if not sol_result.success:
+                return _CandidateOutcome(
+                    error=(seed, f"sol failed: {sol_result.stderr}"),
+                    fallback_used=fallback_used,
+                )
+            output_data = sol_result.stdout
 
         sig = hashlib.md5(input_data.encode()).hexdigest()
         return _CandidateOutcome(
             candidate=CandidateTest(
                 input_data=input_data,
-                output_data=sol_result.stdout,
+                output_data=output_data,
                 type_param=type_param,
                 signature=sig,
             ),
@@ -1173,7 +1386,15 @@ def _pack_polygon_files(problem_dir: str) -> dict[str, list[str]]:
             results["directories_created"].append(dir_name)
 
     files_dir = os.path.join(problem_dir, "files")
-    for src in ["testlib.h", "gen.cpp", "val.cpp", "interactor.cpp"]:
+    for src in [
+        "testlib.h",
+        "gen.cpp",
+        "val.cpp",
+        "interactor.cpp",
+        "communicator.cpp",
+        "grader.cpp",
+        "problem.h",
+    ]:
         src_path = os.path.join(problem_dir, src)
         if os.path.exists(src_path):
             shutil.copy2(src_path, os.path.join(files_dir, src))
@@ -1211,10 +1432,13 @@ def _build_problem_xml(
     has_checker: bool,
     has_interactor: bool,
     manifest_model: AutoCodeManifest | None = None,
+    in_files: list[str] | None = None,
+    tests_manifest: dict[str, Any] | None = None,
 ) -> str:
     """基于 xml.etree.ElementTree 生成 problem.xml 内容。"""
     problem_name = os.path.basename(os.path.normpath(problem_dir))
-    include_validator = (not is_interactive_problem) or os.path.isfile(
+    is_communication_problem = manifest_is_communication(manifest_model)
+    include_validator = (not is_interactive_problem and not is_communication_problem) or os.path.isfile(
         os.path.join(problem_dir, "files", "val.cpp")
     )
 
@@ -1244,12 +1468,92 @@ def _build_problem_xml(
     ET.SubElement(testset, "answer-path-pattern").text = f"tests/%02d{answer_ext}"
     if has_checker:
         ET.SubElement(testset, "checker", {"type": "testlib", "path": "files/checker.cpp"})
-    if has_interactor:
+    comm_mode = (
+        (manifest_model.protocol.mode if manifest_model.protocol else "run_twice")
+        if (is_communication_problem and manifest_model is not None)
+        else None
+    )
+    comm_rel: str | None = None
+    grader_rel: str | None = None
+    header_rel: str | None = None
+    if is_communication_problem and manifest_model is not None:
+        if comm_mode == "grader_linked":
+            grader_rel = resolve_grader_source_existing(problem_dir, manifest_model) or (
+                manifest_model.protocol.grader_file
+                if (manifest_model.protocol and manifest_model.protocol.grader_file)
+                else "files/grader.cpp"
+            )
+            cand_hdr = (
+                manifest_model.protocol.header_file
+                if (manifest_model.protocol and manifest_model.protocol.header_file)
+                else "files/problem.h"
+            )
+            hdr_resolved = safe_resolve_under_root(problem_dir, cand_hdr) if cand_hdr else None
+            header_rel = (
+                os.path.relpath(hdr_resolved, os.path.realpath(problem_dir)).replace("\\", "/")
+                if (hdr_resolved is not None and os.path.isfile(hdr_resolved))
+                else None
+            )
+            comm_attrs = {"mode": "grader_linked", "grader": grader_rel}
+            if header_rel:
+                comm_attrs["header"] = header_rel
+            ET.SubElement(testset, "communication", comm_attrs)
+        else:
+            comm_rel = (
+                resolve_communicator_source_existing(problem_dir, manifest_model)
+                or resolve_communicator_source_rel(manifest_model).replace("\\", "/")
+            )
+            ET.SubElement(testset, "interactor", {"type": "testlib", "path": comm_rel})
+            comm_attrs = {"mode": comm_mode or "run_twice"}
+            if manifest_model.protocol and comm_mode == "run_twice":
+                comm_attrs["passes"] = str(manifest_model.protocol.passes)
+            ET.SubElement(testset, "communication", comm_attrs)
+    elif has_interactor:
         ET.SubElement(testset, "interactor", {"type": "testlib", "path": "files/interactor.cpp"})
+
+    if manifest_model is not None and manifest_model.subtasks:
+        resolved_in_files = (
+            in_files if in_files is not None else [f"{i:02d}.in" for i in range(1, test_count + 1)]
+        )
+        st_map = map_tests_to_subtasks(resolved_in_files, manifest_model.subtasks, tests_manifest)
+        index_to_group: dict[int, int] = {}
+        for st in manifest_model.subtasks:
+            for idx in st_map.get(st.id, []):
+                if idx not in index_to_group:
+                    index_to_group[idx] = st.id
+        groups_el = ET.SubElement(testset, "groups")
+        valid_subtask_ids = {st.id for st in manifest_model.subtasks}
+        for st in manifest_model.subtasks:
+            grp_el = ET.SubElement(
+                groups_el,
+                "group",
+                {
+                    "name": f"subtask_{st.id}",
+                    "feedback-policy": "complete",
+                    "points-policy": "complete-group",
+                    "points": str(st.score),
+                },
+            )
+            deps = [d for d in st.dependencies if d in valid_subtask_ids]
+            if deps:
+                deps_el = ET.SubElement(grp_el, "dependencies")
+                for dep_id in deps:
+                    ET.SubElement(deps_el, "dependency", {"group": f"subtask_{dep_id}"})
+        tests_el = ET.SubElement(testset, "tests")
+        for idx in range(1, test_count + 1):
+            t_attrs: dict[str, str] = {"method": "manual"}
+            owner = index_to_group.get(idx)
+            if owner is not None:
+                t_attrs["group"] = f"subtask_{owner}"
+            ET.SubElement(tests_el, "test", t_attrs)
 
     files = ET.SubElement(problem, "files")
     resources = ET.SubElement(files, "resources")
     ET.SubElement(resources, "file", {"path": "files/testlib.h"})
+    if grader_rel and os.path.isfile(os.path.join(problem_dir, grader_rel)):
+        ET.SubElement(resources, "file", {"path": grader_rel, "type": "cpp.g++"})
+    if header_rel and os.path.isfile(os.path.join(problem_dir, header_rel)):
+        ET.SubElement(resources, "file", {"path": header_rel, "type": "h.g++"})
 
     executables = ET.SubElement(files, "executables")
     _add_executable(executables, "files/gen.cpp")
@@ -1257,7 +1561,9 @@ def _build_problem_xml(
         _add_executable(executables, "files/val.cpp")
     if has_checker:
         _add_executable(executables, "files/checker.cpp")
-    if has_interactor:
+    if comm_rel and os.path.isfile(os.path.join(problem_dir, comm_rel)):
+        _add_executable(executables, comm_rel)
+    elif has_interactor:
         _add_executable(executables, "files/interactor.cpp")
 
     assets = ET.SubElement(problem, "assets")
@@ -1268,11 +1574,35 @@ def _build_problem_xml(
         "wrong": "rejected",
         "reference": "accepted",
     }
-    if manifest_model and manifest_model.solutions:
+    part_sols = (
+        list(manifest_model.protocol.participant_solutions)
+        if (manifest_model is not None and manifest_model.protocol is not None)
+        else []
+    )
+    if manifest_model and (manifest_model.solutions or part_sols):
+        emitted_sol_paths: set[str] = set()
         for sol_entry in manifest_model.solutions:
-            tag = role_to_tag.get(sol_entry.role, "rejected")
+            if (
+                part_sols
+                and sol_entry.role == "main"
+                and sol_entry.path == "solutions/sol.cpp"
+                and not os.path.isfile(os.path.join(problem_dir, "solutions", "sol.cpp"))
+            ):
+                continue
+            if sol_entry.role == "wrong" and sol_entry.expected == "pass":
+                tag = "accepted"
+            else:
+                tag = role_to_tag.get(sol_entry.role, "rejected")
             sol_node = ET.SubElement(solutions, "solution", {"tag": tag})
             ET.SubElement(sol_node, "source", {"path": sol_entry.path})
+            emitted_sol_paths.add(sol_entry.path)
+        for part_name in part_sols:
+            if is_safe_stem(part_name):
+                part_path = f"solutions/{part_name}.cpp"
+                if part_path not in emitted_sol_paths:
+                    pnode = ET.SubElement(solutions, "solution", {"tag": "main"})
+                    ET.SubElement(pnode, "source", {"path": part_path})
+                    emitted_sol_paths.add(part_path)
     else:
         main = ET.SubElement(solutions, "solution", {"tag": "main"})
         ET.SubElement(main, "source", {"path": "solutions/sol.cpp"})
@@ -1294,14 +1624,12 @@ class ProblemPackPolygonTool(Tool):
 
     @property
     def description(self) -> str:
-        return """将题目打包为 Polygon 格式。
+        return """将题目打包为 Polygon 格式，并可选导出 Hydro 与 QOJ/UOJ 格式。
 
-        整理文件到 Polygon 标准目录结构：
-        - files/: testlib.h, gen.cpp, val.cpp
-        - solutions/: sol.cpp, brute.cpp
-        - statements/: README.md
-        - tests/: 测试数据
-        - problem.xml: 配置文件
+        支持通过 export_formats 指定导出目标（默认 ["polygon"]，可选 "hydro"、"qoj"）：
+        - polygon: 整理到标准目录结构并生成 problem.xml（含 subtask groups/tests）
+        - hydro: 导出到 exports/hydro/（problem.yaml、problem_zh.md、testdata/config.yaml）
+        - qoj: 导出到 exports/qoj/（problem.conf、statement.md、data/1.in..N.in）
         """
 
     @property
@@ -1311,17 +1639,42 @@ class ProblemPackPolygonTool(Tool):
     async def execute(
         self,
         problem_dir: str,
-        time_limit: int = 1,
-        memory_limit: int = 256,
+        time_limit: int | None = None,
+        memory_limit: int | None = None,
+        export_formats: list[Literal["polygon", "hydro", "qoj"]] | None = None,
     ) -> ToolResult:
-        """执行 Polygon 打包。"""
+        """执行 Polygon / Hydro / QOJ 打包导出。"""
         if not os.path.exists(problem_dir):
             return ToolResult.fail(f"Problem directory not found: {problem_dir}")
+
+        allowed_formats = {"polygon", "hydro", "qoj"}
+        if export_formats is None:
+            formats: list[str] = ["polygon"]
+        else:
+            if not isinstance(export_formats, list) or not export_formats:
+                return ToolResult.fail(
+                    "export_formats must be a non-empty list of: polygon, hydro, qoj"
+                )
+            formats = []
+            for fmt in export_formats:
+                if not isinstance(fmt, str) or fmt not in allowed_formats:
+                    return ToolResult.fail(
+                        f"unsupported export format {fmt!r}; expected one of: polygon, hydro, qoj"
+                    )
+                if fmt not in formats:
+                    formats.append(fmt)
 
         tests_dir = os.path.join(problem_dir, "tests")
         if not os.path.isdir(tests_dir):
             return ToolResult.fail("tests directory not found, run problem_generate_tests first")
-        in_files = sorted(f for f in os.listdir(tests_dir) if f.endswith(".in"))
+        def _test_sort_key(filename: str) -> tuple[int, int, str]:
+            stem = os.path.splitext(filename)[0]
+            return (0, int(stem), filename) if stem.isdigit() else (1, 0, filename)
+
+        in_files = sorted(
+            (f for f in os.listdir(tests_dir) if f.endswith(".in")),
+            key=_test_sort_key,
+        )
         if not in_files:
             return ToolResult.fail("no test input files found, run problem_generate_tests first")
 
@@ -1345,11 +1698,6 @@ class ProblemPackPolygonTool(Tool):
         if not os.path.exists(statement_path):
             return ToolResult.fail("statement file missing: statements/README.md")
 
-        sol_source = os.path.join(problem_dir, "solutions", "sol.cpp")
-        root_sol_source = os.path.join(problem_dir, "sol.cpp")
-        if not os.path.exists(sol_source) and not os.path.exists(root_sol_source):
-            return ToolResult.fail("main solution source missing: solutions/sol.cpp")
-
         # 门禁配置统一从 Pydantic manifest 读取；存在但损坏即阻断，缺失则回退默认门禁（保持向后兼容）。
         try:
             manifest_model = load_manifest(problem_dir)
@@ -1364,17 +1712,57 @@ class ProblemPackPolygonTool(Tool):
         if manifest_model is None:
             manifest_model = default_manifest(os.path.basename(os.path.normpath(problem_dir)))
 
+        sol_source = os.path.join(problem_dir, "solutions", "sol.cpp")
+        root_sol_source = os.path.join(problem_dir, "sol.cpp")
+        has_main_sol = os.path.exists(sol_source) or os.path.exists(root_sol_source)
+        if (
+            not has_main_sol
+            and manifest_is_communication(manifest_model)
+            and manifest_model.protocol is not None
+            and manifest_model.protocol.participant_solutions
+        ):
+            resolved_parts = [
+                safe_resolve_under_root(problem_dir, f"solutions/{name}.cpp")
+                for name in manifest_model.protocol.participant_solutions
+                if is_safe_stem(name)
+            ]
+            if (
+                len(resolved_parts) == len(manifest_model.protocol.participant_solutions)
+                and all(p is not None and os.path.isfile(p) for p in resolved_parts)
+            ):
+                has_main_sol = True
+        if not has_main_sol:
+            return ToolResult.fail("main solution source missing: solutions/sol.cpp")
+
         quality_gates_cfg = manifest_model.quality_gates
         audit_gates_cfg = manifest_model.audit_gates
         require_tests_verified = quality_gates_cfg.require_tests_verified
         min_limit_case_ratio = min(1.0, max(0.0, quality_gates_cfg.min_limit_case_ratio))
         require_full_audit = audit_gates_cfg.require_full_audit
-        is_interactive_problem = manifest_model.interactive
+        is_interactive_problem = manifest_is_interactive(manifest_model)
+        is_communication_problem = manifest_is_communication(manifest_model)
+        is_protocol_problem = manifest_uses_protocol_judge(manifest_model)
+        comm_needs_communicator = is_communication_problem and (
+            manifest_model.protocol is None or manifest_model.protocol.mode != "grader_linked"
+        )
 
         interactor_cpp = os.path.join(problem_dir, "files", "interactor.cpp")
         root_interactor_cpp = os.path.join(problem_dir, "interactor.cpp")
         if is_interactive_problem and not os.path.exists(interactor_cpp) and not os.path.exists(root_interactor_cpp):
             return ToolResult.fail("interactive problem requires files/interactor.cpp")
+        if is_communication_problem:
+            if comm_needs_communicator:
+                comm_rel = resolve_communicator_source_rel(manifest_model)
+                if resolve_communicator_source_existing(problem_dir, manifest_model) is None:
+                    return ToolResult.fail(f"communication problem requires {comm_rel}")
+            else:
+                grader_rel = (
+                    manifest_model.protocol.grader_file
+                    if (manifest_model.protocol and manifest_model.protocol.grader_file)
+                    else "files/grader.cpp"
+                )
+                if resolve_grader_source_existing(problem_dir, manifest_model) is None:
+                    return ToolResult.fail(f"grader_linked communication problem requires {grader_rel}")
 
         workflow_state = get_section(problem_dir, WORKFLOW)
         if not isinstance(workflow_state, dict):
@@ -1433,12 +1821,13 @@ class ProblemPackPolygonTool(Tool):
                 ("purpose_coverage", True),
                 (
                     "validator_self_test",
-                    audit_gates_cfg.require_validator_self_test and not is_interactive_problem,
+                    audit_gates_cfg.require_validator_self_test and not is_protocol_problem,
                 ),
                 ("checker_self_test", audit_gates_cfg.require_checker_self_test and spj_checker),
                 (
                     "interactor_self_test",
-                    audit_gates_cfg.require_interactor_self_test and is_interactive_problem,
+                    audit_gates_cfg.require_interactor_self_test
+                    and (is_interactive_problem or comm_needs_communicator),
                 ),
             ]
             for signal_name, required in audit_signal_rules:
@@ -1492,17 +1881,42 @@ class ProblemPackPolygonTool(Tool):
                 min_limit_case_ratio=min_limit_case_ratio,
             )
 
-        # 转换单位：秒 -> 毫秒，MB -> 字节
-        time_limit_ms = time_limit * 1000
-        memory_limit_bytes = memory_limit * 1024 * 1024
+        # 单位转换与合法性校验：显式传参优先；缺省时回读 manifest 中的 time_limit_ms / memory_limit_mb
+        if time_limit is not None:
+            if isinstance(time_limit, bool) or not isinstance(time_limit, int) or time_limit <= 0:
+                return ToolResult.fail("time_limit must be a positive integer (seconds)")
+            time_limit_ms = time_limit * 1000
+        else:
+            time_limit_ms = int(manifest_model.time_limit_ms)
+            if time_limit_ms <= 0:
+                return ToolResult.fail("manifest.time_limit_ms must be positive")
+        if memory_limit is not None:
+            if isinstance(memory_limit, bool) or not isinstance(memory_limit, int) or memory_limit <= 0:
+                return ToolResult.fail("memory_limit must be a positive integer (MB)")
+            memory_limit_mb = memory_limit
+            memory_limit_bytes = memory_limit * 1024 * 1024
+        else:
+            memory_limit_mb = int(manifest_model.memory_limit_mb)
+            if memory_limit_mb <= 0:
+                return ToolResult.fail("manifest.memory_limit_mb must be positive")
+            memory_limit_bytes = memory_limit_mb * 1024 * 1024
 
-        # 1~4. 创建标准目录并拷贝源文件。
-        results = _pack_polygon_files(problem_dir)
+        tests_manifest_dict = tests_manifest if isinstance(tests_manifest, dict) else None
+        results: dict[str, Any] = {
+            "files_copied": [],
+            "files_removed": [],
+            "directories_created": [],
+        }
+        exports: dict[str, Any] = {}
+        actual_test_count = len(in_files)
 
-        # 5. 创建 problem.xml（基于 xml.etree.ElementTree 生成，避免手工拼接）
-        problem_xml = os.path.join(problem_dir, "problem.xml")
-        if not os.path.exists(problem_xml):
-            actual_test_count = len([f for f in os.listdir(tests_dir) if f.endswith(".in")])
+        if "polygon" in formats:
+            # 1~4. 创建标准目录并拷贝源文件。
+            results = _pack_polygon_files(problem_dir)
+
+            # 5. 创建或刷新 problem.xml（基于 xml.etree.ElementTree 生成，避免手工拼接与陈旧配置残留）
+            problem_xml = os.path.join(problem_dir, "problem.xml")
+            xml_existed = os.path.exists(problem_xml)
             files_dir = os.path.join(problem_dir, "files")
             has_checker = os.path.isfile(os.path.join(files_dir, "checker.cpp"))
             has_interactor = is_interactive_problem and os.path.isfile(
@@ -1518,12 +1932,58 @@ class ProblemPackPolygonTool(Tool):
                 has_checker=has_checker,
                 has_interactor=has_interactor,
                 manifest_model=manifest_model,
+                in_files=in_files,
+                tests_manifest=tests_manifest_dict,
             )
             with open(problem_xml, "w", encoding="utf-8") as f:
                 f.write(xml_content)
-            results["files_copied"].append("problem.xml (created)")
+            results["files_copied"].append(
+                "problem.xml (updated)" if xml_existed else "problem.xml (created)"
+            )
+            exports["polygon"] = {
+                "format": "polygon",
+                "output_dir": os.path.abspath(problem_dir),
+                "problem_xml": problem_xml,
+                "test_count": actual_test_count,
+                "subtask_count": len(manifest_model.subtasks),
+            }
 
+        if "hydro" in formats:
+            try:
+                exports["hydro"] = export_hydro(
+                    problem_dir,
+                    manifest_model,
+                    time_limit_ms=time_limit_ms,
+                    memory_limit_mb=memory_limit_mb,
+                    in_files=in_files,
+                    answer_ext=answer_ext,
+                    tests_manifest=tests_manifest_dict,
+                )
+            except (ValueError, OSError) as exc:
+                return ToolResult.fail(f"Hydro export failed: {exc}")
+
+        if "qoj" in formats:
+            try:
+                exports["qoj"] = export_qoj(
+                    problem_dir,
+                    manifest_model,
+                    time_limit_ms=time_limit_ms,
+                    memory_limit_mb=memory_limit_mb,
+                    in_files=in_files,
+                    answer_ext=answer_ext,
+                    tests_manifest=tests_manifest_dict,
+                )
+            except (ValueError, OSError) as exc:
+                return ToolResult.fail(f"QOJ export failed: {exc}")
+
+        msg = (
+            "Packed to Polygon format"
+            if formats == ["polygon"]
+            else f"Exported problem package ({', '.join(formats)})"
+        )
         return ToolResult.ok(
             results=results,
-            message="Packed to Polygon format",
+            exports=exports,
+            export_formats=formats,
+            message=msg,
         )

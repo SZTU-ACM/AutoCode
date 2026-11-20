@@ -2136,3 +2136,136 @@ async def test_problem_generate_tests_serial_matches_concurrent():
 
     assert serial == concurrent
     assert len(serial) == 8
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_inherits_manifest_limits_and_refreshes_xml():
+    """缺省 time_limit/memory_limit 时继承 manifest 配置，且再次打包应刷新 problem.xml。"""
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "xml_refresh")
+        for d in ("statements", "solutions", "tests", ".autocode"):
+            os.makedirs(os.path.join(problem_dir, d), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "problem_name": "RefreshTest",
+                    "time_limit_ms": 3500,
+                    "memory_limit_mb": 512,
+                },
+                f,
+            )
+        Path(problem_dir, "statements", "README.md").write_text("# Test\n", encoding="utf-8")
+        Path(problem_dir, "solutions", "sol.cpp").write_text("// sol\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.in").write_text("1\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.ans").write_text("1\n", encoding="utf-8")
+        write_verified_workflow_state(problem_dir)
+
+        first = await tool.execute(problem_dir=problem_dir)
+        assert first.success
+        xml_path = Path(problem_dir, "problem.xml")
+        xml1 = xml_path.read_text(encoding="utf-8")
+        assert "<time-limit>3500</time-limit>" in xml1
+        assert f"<memory-limit>{512 * 1024 * 1024}</memory-limit>" in xml1
+        assert "<test-count>1</test-count>" in xml1
+
+        Path(problem_dir, "tests", "02.in").write_text("2\n", encoding="utf-8")
+        Path(problem_dir, "tests", "02.ans").write_text("2\n", encoding="utf-8")
+        second = await tool.execute(problem_dir=problem_dir)
+        assert second.success
+        xml2 = xml_path.read_text(encoding="utf-8")
+        assert "<test-count>2</test-count>" in xml2
+        assert "problem.xml (updated)" in second.data["results"]["files_copied"]
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_rejects_non_positive_limits_and_syncs_solutions():
+    """非法 time_limit/memory_limit 必须失败，且 manifest.solutions 应同步写入 problem.xml。"""
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "xml_limits")
+        for d in ("statements", "solutions", "tests", ".autocode"):
+            os.makedirs(os.path.join(problem_dir, d), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "problem_name": "LimitCheck",
+                    "time_limit_ms": 2000,
+                    "memory_limit_mb": 256,
+                    "solutions": [
+                        {"name": "sol", "role": "main", "path": "solutions/sol.cpp"},
+                        {"name": "wa", "role": "wrong", "path": "solutions/wa.cpp", "expected": "fail"},
+                        {"name": "alt", "role": "wrong", "path": "solutions/alt.cpp", "expected": "pass"},
+                    ],
+                },
+                f,
+            )
+        Path(problem_dir, "statements", "README.md").write_text("# Test\n", encoding="utf-8")
+        Path(problem_dir, "solutions", "sol.cpp").write_text("// sol\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.in").write_text("1\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.ans").write_text("1\n", encoding="utf-8")
+        write_verified_workflow_state(problem_dir)
+
+        assert not (await tool.execute(problem_dir=problem_dir, time_limit=0)).success
+        assert not (await tool.execute(problem_dir=problem_dir, time_limit=-1)).success
+        assert not (await tool.execute(problem_dir=problem_dir, memory_limit=0)).success
+        assert not (await tool.execute(problem_dir=problem_dir, time_limit=False)).success  # type: ignore[arg-type]
+
+        ok = await tool.execute(problem_dir=problem_dir, time_limit=4, memory_limit=512)
+        assert ok.success
+        xml = Path(problem_dir, "problem.xml").read_text(encoding="utf-8")
+        assert "<time-limit>4000</time-limit>" in xml
+        assert f"<memory-limit>{512 * 1024 * 1024}</memory-limit>" in xml
+        assert 'tag="main"' in xml
+        assert 'tag="rejected"' in xml
+        assert 'tag="accepted"' in xml
+
+
+@pytest.mark.asyncio
+async def test_problem_create_communication_and_conflict_rejection():
+    """problem_create 支持 communication 题型、oracle_mode 且拒绝矛盾参数。"""
+    from autocode_mcp.workflow import load_manifest
+
+    tool = ProblemCreateTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        comm_dir = os.path.join(tmpdir, "comm_prob")
+        res = await tool.execute(
+            problem_dir=comm_dir,
+            problem_name="Bit Carrier",
+            problem_type="communication",
+            protocol_mode="run_twice",
+            oracle_mode="interactor_only",
+        )
+        assert res.success, res.error
+        assert res.data["problem_type"] == "communication"
+        assert res.data["protocol_mode"] == "run_twice"
+        assert res.data["oracle_mode"] == "interactor_only"
+        assert os.path.isfile(os.path.join(comm_dir, "files", "communicator.cpp"))
+        readme = Path(comm_dir, "statements", "README.md").read_text(encoding="utf-8")
+        assert "## 通信协议" in readme
+        manifest = load_manifest(comm_dir)
+        assert manifest is not None
+        assert manifest.problem_type == "communication"
+        assert manifest.oracle_mode == "interactor_only"
+        assert manifest.protocol is not None and manifest.protocol.mode == "run_twice"
+        assert [s.name for s in manifest.solutions] == ["sol"]
+
+        bad_dir = os.path.join(tmpdir, "bad_conflict")
+        bad = await tool.execute(
+            problem_dir=bad_dir,
+            problem_name="Conflict",
+            interactive=True,
+            problem_type="standard",
+        )
+        assert not bad.success
+        assert "conflicting" in (bad.error or "").lower()
+        bad_proto = await tool.execute(
+            problem_dir=os.path.join(tmpdir, "bad_proto"),
+            problem_name="BadProto",
+            problem_type="standard",
+            protocol_mode="run_twice",
+        )
+        assert not bad_proto.success
+        assert "protocol_mode" in (bad_proto.error or "")

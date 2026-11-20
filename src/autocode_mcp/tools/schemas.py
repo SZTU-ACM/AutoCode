@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..workflow.models import OracleMode, ProblemType, ProtocolMode
+
 # --------------------------------------------------------------------------- #
 # Pilot tools (7.2 / 7.3)
 # --------------------------------------------------------------------------- #
@@ -23,6 +25,7 @@ class ProblemAuditInput(BaseModel):
     mode: Literal["quick", "full"] = "full"
     include_difficulty: bool = True
     report_path: str | None = None
+    standalone: bool = False
 
 
 class FileReadInput(BaseModel):
@@ -42,7 +45,7 @@ class FileSaveInput(BaseModel):
 
 class StatementSample(BaseModel):
     input: str
-    expected_output: str
+    expected_output: str = ""
 
 
 class ProblemValidateInput(BaseModel):
@@ -62,7 +65,7 @@ class CheckerScenario(BaseModel):
     input: str
     contestant_output: str
     reference_output: str
-    expected_verdict: Literal["AC", "WA", "PE", "FAIL"] = "AC"
+    expected_verdict: Literal["AC", "WA", "PE", "PC", "FAIL"] = "AC"
 
 
 class CheckerBuildInput(BaseModel):
@@ -94,7 +97,8 @@ class InteractionScenario(BaseModel):
     input: str
     answer: str | None = None
     contestant_output: str
-    expected_verdict: Literal["AC", "WA", "PE", "FAIL", "TLE"] = "AC"
+    expected_verdict: Literal["AC", "WA", "PE", "PC", "FAIL", "TLE"] = "AC"
+    stage: int | None = Field(default=None, ge=1)
 
 
 class InteractorBuildInput(BaseModel):
@@ -104,6 +108,7 @@ class InteractorBuildInput(BaseModel):
     reference_solution_path: str | None = None
     mutant_solutions: list[str] | None = None
     interaction_scenarios: list[InteractionScenario] | None = None
+    test_inputs: list[str] | None = None
     compiler: str = "g++"
 
 
@@ -301,6 +306,9 @@ class ProblemCreateInput(BaseModel):
     problem_dir: str
     problem_name: str
     interactive: bool = False
+    problem_type: ProblemType | None = None
+    protocol_mode: ProtocolMode | None = None
+    oracle_mode: OracleMode = "brute"
 
 
 class GenerateConstraints(BaseModel):
@@ -345,5 +353,6 @@ class ProblemCleanupProcessesInput(BaseModel):
 
 class ProblemPackPolygonInput(BaseModel):
     problem_dir: str
-    time_limit: int = 1
-    memory_limit: int = 256
+    time_limit: int | None = Field(default=None, ge=1)
+    memory_limit: int | None = Field(default=None, ge=1)
+    export_formats: list[Literal["polygon", "hydro", "qoj"]] = ["polygon"]

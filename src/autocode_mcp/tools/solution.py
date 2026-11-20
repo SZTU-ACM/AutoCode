@@ -6,7 +6,16 @@ import os
 import shutil
 from typing import Literal
 
+from pydantic import ValidationError
+
+from ..utils.communication_runner import (
+    CommunicationRunner,
+    resolve_participant_binaries,
+    safe_resolve_under_root,
+)
+from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_is_communication, manifest_is_interactive
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, RunToolMixin, resolve_source
 from .schemas import SolutionBuildInput, SolutionRunInput
@@ -101,8 +110,61 @@ class SolutionBuildTool(Tool, BuildToolMixin):
 
         # 编译：source_path 时从原始文件编译，否则从标准位置编译
         compile_source = resolved.original_source_path or canonical_path
-        include_dirs = [resolved.include_dir] if resolved.include_dir else None
-        result = await self.build(compile_source, binary_path, compiler=compiler, include_dirs=include_dirs)
+        include_dirs_list: list[str] = []
+        if resolved.include_dir:
+            include_dirs_list.append(resolved.include_dir)
+        extra_sources: list[str] | None = None
+
+        try:
+            manifest = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+
+        if (
+            manifest is not None
+            and manifest_is_communication(manifest)
+            and manifest.protocol is not None
+            and manifest.protocol.mode == "grader_linked"
+        ):
+            grader_rel = manifest.protocol.grader_file or "files/grader.cpp"
+            grader_abs = safe_resolve_under_root(problem_dir, grader_rel)
+            if grader_abs is None:
+                return ToolResult.fail(f"grader_file path escapes problem_dir: {grader_rel}")
+            if not os.path.isfile(grader_abs):
+                return ToolResult.fail(
+                    f"grader_linked communication problem requires {grader_rel}. "
+                    "Save the grader source file before running solution_build."
+                )
+            extra_sources = [grader_abs]
+            files_inc = os.path.join(problem_dir, "files")
+            if os.path.isdir(files_inc) and files_inc not in include_dirs_list:
+                include_dirs_list.append(files_inc)
+            if manifest.protocol.header_file:
+                hdr_abs = safe_resolve_under_root(problem_dir, manifest.protocol.header_file)
+                if hdr_abs is None:
+                    return ToolResult.fail(
+                        f"header_file path escapes problem_dir: {manifest.protocol.header_file}"
+                    )
+                hdr_dir = os.path.dirname(hdr_abs)
+                if hdr_dir and os.path.isdir(hdr_dir) and hdr_dir not in include_dirs_list:
+                    include_dirs_list.append(hdr_dir)
+
+        include_dirs = include_dirs_list or None
+        if extra_sources:
+            result = await self.build(
+                compile_source,
+                binary_path,
+                compiler=compiler,
+                include_dirs=include_dirs,
+                extra_sources=extra_sources,
+            )
+        else:
+            result = await self.build(
+                compile_source,
+                binary_path,
+                compiler=compiler,
+                include_dirs=include_dirs,
+            )
 
         if not result.success:
             return ToolResult.fail(
@@ -169,6 +231,12 @@ class SolutionRunTool(Tool, RunToolMixin):
         """执行解法运行。"""
         effective_name = name or solution_type
         exe_ext = get_exe_extension()
+
+        try:
+            manifest = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+
         binary_path = os.path.join(problem_dir, "solutions", f"{effective_name}{exe_ext}")
 
         # 如果子目录没有，检查根目录（向后兼容）
@@ -176,8 +244,120 @@ class SolutionRunTool(Tool, RunToolMixin):
             binary_path = os.path.join(problem_dir, f"{effective_name}{exe_ext}")
 
         if not os.path.exists(binary_path):
+            if (
+                manifest is not None
+                and manifest_is_communication(manifest)
+                and manifest.protocol is not None
+                and manifest.protocol.participant_solutions
+                and effective_name == "sol"
+            ):
+                parts = resolve_participant_binaries(problem_dir, manifest, None, exe_ext)
+                if parts and all(os.path.isfile(p) for p in parts):
+                    binary_path = os.path.join(problem_dir, "solutions", f"sol{exe_ext}")
+                else:
+                    return ToolResult.fail(
+                        "Participant solution binaries not found: "
+                        + ", ".join(manifest.protocol.participant_solutions)
+                    )
+            else:
+                return ToolResult.fail(
+                    f"Binary not found: {effective_name}. Please run solution_build first."
+                )
+
+        if manifest is not None and manifest_is_communication(manifest):
+            if solution_type == "brute":
+                run_tl_ms = float(timeout) * 1000.0
+            else:
+                tl_ms = float(
+                    manifest.time_limit_ms
+                    if manifest.time_limit_ms > 0
+                    else timeout * 1000
+                )
+                run_tl_ms = min(tl_ms, float(timeout) * 1000.0)
+            mem_mb = float(manifest.memory_limit_mb) if manifest.memory_limit_mb > 0 else 256.0
+            comm_mode = manifest.protocol.mode if manifest.protocol else "run_twice"
+            judge_res = await CommunicationRunner.run_from_manifest(
+                problem_dir=problem_dir,
+                manifest=manifest,
+                solution_exe=binary_path,
+                input_data=input_data,
+                time_limit_ms=run_tl_ms,
+                memory_limit_mb=mem_mb,
+            )
+            payload = {
+                "mode": f"communication:{comm_mode}",
+                "verdict": judge_res.verdict,
+                "stdout": judge_res.judge_stdout or judge_res.stdout,
+                "stderr": judge_res.stderr,
+                "judge_stderr": judge_res.judge_stderr,
+                "time_ms": int(judge_res.wall_time_ms),
+                "cpu_time_ms": judge_res.cpu_time_ms,
+                "memory_mb": judge_res.memory_mb,
+                "return_code": judge_res.solution_returncode,
+                "judge_return_code": judge_res.judge_returncode,
+                "score": judge_res.score,
+                "metrics": judge_res.metrics,
+                "transcript": judge_res.transcript,
+                "detail": judge_res.detail,
+            }
+            if judge_res.accepted:
+                return ToolResult.ok(**payload)
             return ToolResult.fail(
-                f"Binary not found: {effective_name}. Please run solution_build first."
+                f"Communication execution verdict: {judge_res.verdict}"
+                + (f" ({judge_res.detail})" if judge_res.detail else ""),
+                **payload,
+            )
+
+        # 交互题自动通过 InteractiveRunner 与 files/interactor 运行双向交互
+        if manifest_is_interactive(manifest):
+            interactor_exe = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
+            if not os.path.isfile(interactor_exe):
+                fallback_int = os.path.join(problem_dir, f"interactor{exe_ext}")
+                if os.path.isfile(fallback_int):
+                    interactor_exe = fallback_int
+            if not os.path.isfile(interactor_exe):
+                return ToolResult.fail(
+                    f"Interactive problem requires files/interactor{exe_ext}. Run interactor_build first."
+                )
+            if solution_type == "brute":
+                run_tl_ms = float(timeout) * 1000.0
+            else:
+                tl_ms = float(
+                    manifest.time_limit_ms
+                    if (manifest and manifest.time_limit_ms > 0)
+                    else timeout * 1000
+                )
+                run_tl_ms = min(tl_ms, float(timeout) * 1000.0)
+            mem_mb = float(manifest.memory_limit_mb) if (manifest and manifest.memory_limit_mb > 0) else 256.0
+            judge_res = await InteractiveRunner.run(
+                interactor_exe=interactor_exe,
+                solution_exe=binary_path,
+                input_data=input_data,
+                time_limit_ms=run_tl_ms,
+                memory_limit_mb=mem_mb,
+                cwd=problem_dir,
+            )
+            payload = {
+                "mode": "interactive",
+                "verdict": judge_res.verdict,
+                "stdout": judge_res.judge_stdout,
+                "stderr": judge_res.stderr,
+                "judge_stderr": judge_res.judge_stderr,
+                "time_ms": int(judge_res.wall_time_ms),
+                "cpu_time_ms": judge_res.cpu_time_ms,
+                "memory_mb": judge_res.memory_mb,
+                "return_code": judge_res.solution_returncode,
+                "judge_return_code": judge_res.judge_returncode,
+                "metrics": judge_res.metrics,
+                "transcript": judge_res.transcript,
+                "detail": judge_res.detail,
+            }
+            if judge_res.accepted:
+                return ToolResult.ok(**payload)
+            return ToolResult.fail(
+                f"Interactive execution verdict: {judge_res.verdict}"
+                + (f" ({judge_res.detail})" if judge_res.detail else ""),
+                **payload,
             )
 
         # 运行

@@ -454,3 +454,161 @@ struct Fenwick {
     complexity, patterns = detect_algorithm_patterns(code)
     assert "tree_data_structure" in patterns
     assert complexity == ComplexityLevel.N_LOG_N
+
+
+def test_loop_inside_if_not_miscounted_as_quadratic():
+    """if/else/struct 花括号不应计入循环嵌套深度。"""
+    code = """
+struct Solver {
+    void run(int n) {
+        if (n > 0) {
+            if (n < 100) {
+                for (int i = 0; i < n; i++) {
+                    sum += i;
+                }
+            }
+        }
+    }
+};
+"""
+    assert analyze_loop_complexity(code) == ComplexityLevel.LINEAR
+
+
+def test_braceless_and_allman_nested_loops():
+    """无花括号嵌套循环与 Allman 换行花括号应正确识别嵌套深度。"""
+    braceless = """
+int main() {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            sum += i + j;
+}
+"""
+    allman = """
+int main()
+{
+    for (int i = 0; i < n; i++)
+    {
+        for (int j = 0; j < n; j++)
+        {
+            sum += i + j;
+        }
+    }
+}
+"""
+    assert analyze_loop_complexity(braceless) == ComplexityLevel.QUADRATIC
+    assert analyze_loop_complexity(allman) == ComplexityLevel.QUADRATIC
+
+
+def test_bitset_not_misclassified_as_exponential():
+    """std::bitset 不应误判为 O(2^n) 指数复杂度。"""
+    code = """
+#include <bitset>
+int main() {
+    std::bitset<100000> bs;
+    for (int i = 0; i < n; i++) bs.set(i);
+    return 0;
+}
+"""
+    complexity, patterns = detect_algorithm_patterns(code)
+    assert "bitset" in patterns
+    assert "bitmask" not in patterns
+    assert complexity != ComplexityLevel.EXPONENTIAL
+
+
+def test_sort_plus_bfs_preserves_higher_pattern_complexity():
+    """同时出现 sort 与 bfs 时应保留更高复杂度 O(n log n)，不被后续低阶模式覆盖。"""
+    code = """
+int main() {
+    sort(a, a + n);
+    queue<int> q;
+    bfs(q);
+    return 0;
+}
+"""
+    complexity, patterns = detect_algorithm_patterns(code)
+    assert "sorting" in patterns
+    assert "graph_traversal" in patterns
+    assert complexity == ComplexityLevel.N_LOG_N
+
+
+def test_cpp20_digit_separators_and_tricky_loop_structures():
+    """C++20 数字分隔符、同行嵌套、do-while 与跨行 for 头不应破坏循环嵌套解析。"""
+    digit_sep_code = """
+const int MOD = 1'000'000'007;
+int main() {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            ans = (ans + i + j) % MOD;
+        }
+    }
+}
+"""
+    assert analyze_loop_complexity(digit_sep_code) == ComplexityLevel.QUADRATIC
+
+    same_line_braceless = "int main() { for (int i=0;i<n;i++) for (int j=0;j<n;j++) sum += i; }"
+    assert analyze_loop_complexity(same_line_braceless) == ComplexityLevel.QUADRATIC
+
+    same_line_braced = "int main() { for (int i=0;i<n;i++) { if (cond) { for (int j=0;j<n;j++) { s++; } } } }"
+    assert analyze_loop_complexity(same_line_braced) == ComplexityLevel.QUADRATIC
+
+    do_while_nested = """
+int main() {
+    do {
+        for (int i = 0; i < n; i++) {
+            sum += i;
+        }
+    } while (cond);
+}
+"""
+    assert analyze_loop_complexity(do_while_nested) == ComplexityLevel.QUADRATIC
+
+    multiline_header = """
+int main() {
+    for (int i = 0;
+         i < n;
+         i++) {
+        for (int j = 0; j < n; j++) {
+            sum += 1;
+        }
+    }
+}
+"""
+    assert analyze_loop_complexity(multiline_header) == ComplexityLevel.QUADRATIC
+
+
+def test_constant_shift_comments_and_lowercase_bit_not_misclassified():
+    """常量位移 1<<30、注释关键词与小写 bit 变量不应误报高阶复杂度。"""
+    code = """
+// avoid O(2^n) bitmask and dp[i]
+int main() {
+    const int INF = 1 << 30;
+    int bit = 0;
+    for (int i = 0; i < n; i++) bit ^= a[i];
+    return INF + bit;
+}
+"""
+    complexity, patterns = detect_algorithm_patterns(code)
+    assert complexity is None
+    assert patterns == []
+
+
+def test_extract_claimed_complexity_word_boundary_and_nested_parens():
+    from autocode_mcp.tools.complexity import extract_claimed_complexity
+
+    assert extract_claimed_complexity("// TODO(fix) ZERO(x)") is None
+    assert extract_claimed_complexity("// Complexity: O(n log(n))") == "O(n log(n))"
+
+
+def test_extract_n_max_ignores_bool_negative_and_prefers_n_over_value_range():
+    from autocode_mcp.tools.complexity import extract_n_max_from_constraints
+
+    assert extract_n_max_from_constraints({"multi_test": True, "min_val": -100}) is None
+    assert (
+        extract_n_max_from_constraints(
+            {"n": {"min": 1, "max": 200000}, "a_i": {"min": 0, "max": 10**9}}
+        )
+        == 200000
+    )
+    assert extract_n_max_from_constraints({"n_max": 50000, "v_max": 10**9}) == 50000
+
+

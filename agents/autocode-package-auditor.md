@@ -20,9 +20,10 @@ Minimum evidence before `go`:
 
 - successful statement/sample validation evidence (`problem_validate`);
 - successful final test verification evidence (`problem_verify_tests`);
-- no unresolved blocker in checker/interactor strategy when applicable.
-- for interactive problems: statement protocol checklist is complete, `files/interactor.cpp` uses `registerInteraction` with `tout`/`ouf`, and `interactor_build` has scripted scenarios covering valid and invalid conversations.
-- if `problem_audit` is available, prefer its `decision`, `blocking_issues`, and `difficulty_signals` as the final packaging evidence bundle.
+- no unresolved blocker in checker/interactor/communicator/grader strategy when applicable.
+- for interactive problems: statement protocol checklist is complete, `files/interactor.cpp` uses `registerInteraction(argc, argv)` writing to contestant via `std::cout` + `std::flush` and reading via `ouf` (`tout` is only for diagnostic output), and `interactor_build` has scripted scenarios covering valid and invalid conversations.
+- for communication problems: statement includes `## 通信协议` (isolation/interface, budget limits, channel model) and multi-stage transcripts; `communication_metrics` shows zero budget violations (`budget_exceeded: false`); over-budget / buggy wrong solutions are killed by final tests.
+- if `problem_audit` is available, prefer its `decision`, `blocking_issues`, `communication_metrics`, and `difficulty_signals` as the final packaging evidence bundle (for external non-AutoCode packages, run `problem_audit(standalone=True)` read-only).
 
 Output requirements:
 

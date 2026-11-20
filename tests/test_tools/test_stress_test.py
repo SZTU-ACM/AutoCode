@@ -550,3 +550,56 @@ def test_load_complexity_context_non_object_returns_empty():
         with open(runtime_file, "w", encoding="utf-8") as f:
             f.write("[1,2]")
         assert tool._load_complexity_context(tmpdir) == {}
+
+
+@pytest.mark.asyncio
+async def test_stress_test_reference_solutions_requires_oracle_and_compares():
+    """Non-interactive oracle_mode=reference_solutions must NOT silently skip output checking."""
+    import shutil
+
+    if not shutil.which("g++"):
+        pytest.skip("g++ not available")
+
+    from autocode_mcp.tools.generator import GeneratorBuildTool
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.utils.compiler import compile_cpp
+    from autocode_mcp.utils.platform import get_exe_extension
+    from autocode_mcp.workflow import default_manifest, save_manifest
+    from autocode_mcp.workflow.models import SolutionEntry
+
+    gen_tool = GeneratorBuildTool()
+    build_tool = SolutionBuildTool()
+    stress_tool = StressTestRunTool()
+    exe_ext = get_exe_extension()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest = default_manifest("ref-oracle", oracle_mode="reference_solutions")
+        manifest.solutions = [
+            SolutionEntry(name="sol", role="main", path="solutions/sol.cpp", expected="pass"),
+            SolutionEntry(name="ref", role="reference", path="solutions/ref.cpp", expected="pass"),
+        ]
+        save_manifest(tmpdir, manifest)
+
+        gen_code = '#include <iostream>\nint main(){ std::cout << "5\\n"; return 0; }'
+        wrong_sol = '#include <iostream>\nint main(){ int x; std::cin >> x; std::cout << (x + 1) << "\\n"; }'
+        ref_sol = '#include <iostream>\nint main(){ int x; std::cin >> x; std::cout << (x * 2) << "\\n"; }'
+
+        assert (await gen_tool.execute(problem_dir=tmpdir, code=gen_code)).success
+        assert (await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=wrong_sol)).success
+
+        # Without brute or compiled reference binary, stress test MUST fail (no silent skip)
+        res_missing = await stress_tool.execute(problem_dir=tmpdir, trials=2)
+        assert not res_missing.success
+        assert "oracle" in (res_missing.error or "").lower()
+
+        # Once reference binary is compiled, stress test compares sol against ref and catches mismatch
+        ref_src = os.path.join(tmpdir, "solutions", "ref.cpp")
+        ref_bin = os.path.join(tmpdir, "solutions", f"ref{exe_ext}")
+        with open(ref_src, "w", encoding="utf-8") as rf:
+            rf.write(ref_sol)
+        assert (await compile_cpp(ref_src, ref_bin)).success
+
+        res_mismatch = await stress_tool.execute(problem_dir=tmpdir, trials=2)
+        assert not res_mismatch.success
+        assert res_mismatch.data.get("round") == 1
+        assert "mismatch" in (res_mismatch.error or "").lower()

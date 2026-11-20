@@ -125,8 +125,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
 
     tool = TOOLS[name]
     problem_dir = arguments.get("problem_dir")
+    is_standalone_audit = name == "problem_audit" and bool(arguments.get("standalone"))
     enforce_workflow = (
-        isinstance(problem_dir, str)
+        not is_standalone_audit
+        and isinstance(problem_dir, str)
         and problem_dir.strip()
         and (name == "problem_create" or has_workflow_context(problem_dir))
     )

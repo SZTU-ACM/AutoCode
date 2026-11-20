@@ -133,3 +133,29 @@ def test_verify_complexity_factorial() -> None:
     res = EmpiricalRatioAnalyzer.verify_complexity("O(n!)", samples, time_limit_ms=2000.0)
     assert res["passed"] is True
     assert res["verdict"] == "verified"
+
+
+def test_verify_complexity_sub_15ms_clean_quadratic_still_falsified() -> None:
+    """Clean high-SNR O(n^2) growth under 15ms must STILL be falsified, not bypassed as noise."""
+    samples = [
+        {"n": 100, "cpu_time_ms": 0.2, "status": "ok"},
+        {"n": 200, "cpu_time_ms": 0.8, "status": "ok"},
+        {"n": 400, "cpu_time_ms": 3.2, "status": "ok"},
+        {"n": 800, "cpu_time_ms": 12.8, "status": "ok"},
+    ]
+    res = EmpiricalRatioAnalyzer.verify_complexity("O(n)", samples, time_limit_ms=2000.0)
+    assert res["passed"] is False
+    assert res["verdict"] == "ratio_mismatch"
+    assert res["fitted_complexity"] == "O(n^2)"
+
+
+def test_verify_complexity_noisy_o1_within_noise_floor_accepted() -> None:
+    """Tiny-scale O(1) jitter under 15ms without a clean scaling signal passes within noise floor."""
+    samples = [
+        {"n": 10, "cpu_time_ms": 2.1, "status": "ok"},
+        {"n": 12, "cpu_time_ms": 1.8, "status": "ok"},
+        {"n": 15, "cpu_time_ms": 4.5, "status": "ok"},
+    ]
+    res = EmpiricalRatioAnalyzer.verify_complexity("O(1)", samples, time_limit_ms=1000.0)
+    assert res["passed"] is True
+    assert res["verdict"] == "verified_within_noise_floor"

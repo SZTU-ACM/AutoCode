@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-blue.svg)](https://modelcontextprotocol.io/)
 
-**AutoCode 是面向竞赛编程出题人的 AI 出题工作台，支持 Claude Code、Codex 和 DeepSeek Harness (DSH)。**
+**AutoCode 是面向竞赛编程出题人的 AI 出题工作台，支持 Claude Code、Codex、DeepSeek Harness (DSH) 与 Antigravity (`agy`)，原生覆盖标准题、特殊判题题、交互题与通信题。**
 
 从一个想法开始，AutoCode 会协助你完成题面、解法、测试数据、验证和题包整理，把创作过程变成一条清晰、可靠、可复用的工作流。
 
@@ -41,9 +41,10 @@ AutoCode 会把出题过程拆成相互衔接的质量环节：
 AutoCode 适合：
 
 - 想用 AI 加速出题，但担心题面、样例、数据和复杂度不可靠的出题人。
-- 需要把题目从 idea 推到可打包 Polygon 结构的竞赛组织者。
+- 需要把题目从 idea 推到 Polygon / Hydro / QOJ 可发布题包的竞赛组织者。
+- 需要对已有外部题包进行独立只读验题（`autocode-audit --standalone`）的审题人与出题组。
 - 希望 AI 遵循完整验证流程的团队。
-- 想在 Claude Code、Codex 或 DeepSeek Harness (DSH) 中获得完整、可验证出题工作流的用户。
+- 想在 Claude Code、Codex、DeepSeek Harness (DSH) 或 Antigravity (`agy`) 中获得完整、可验证出题工作流的用户。
 
 ## 快速开始
 
@@ -52,7 +53,7 @@ AutoCode 适合：
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/)
 - 支持 C++20 的 `g++`，推荐 GCC 10+
-- Claude Code、Codex CLI 或 DeepSeek Harness (DSH)（至少安装一个）
+- Claude Code、Codex CLI、DeepSeek Harness (DSH) 或 Antigravity (`agy`)（至少安装一个）
 
 常用的竞赛编程工具库已经随 AutoCode 一起提供。
 
@@ -90,6 +91,24 @@ dsh plugin add ./.dsh-plugin
 dsh --patch ./.dsh-plugin/cordis.patch.yml
 ```
 
+### 安装 Antigravity (`agy`) 插件
+
+通过内置打包脚本生成 Antigravity 薄壳插件包并安装：
+
+```bash
+uv run python scripts/build_plugin_bundle.py --target agy --output /tmp/autocode-agy-plugin
+```
+
+打包产物在根目录包含 `plugin.json`、`mcp_config.json`、`rules/AGENTS.md`、`agents/`、`assets/` 与全套 `skills/`，共享 22 个 MCP 工具和 server 级工作流门禁。
+
+### 独立只读验题（外部题包）
+
+无需 `.autocode/` 目录，即可对任意 Polygon / Hydro / QOJ 题包运行只读验题与数据一致性检查：
+
+```bash
+uv run autocode-audit /path/to/problem_dir --standalone
+```
+
 ### 开始使用
 
 安装完成后，可以直接描述你的出题目标：
@@ -113,7 +132,11 @@ AutoCode 会按以下顺序协助完成一题：
   -> 题面、代码、数据整理成题包
 ```
 
-普通题、特殊判题题和交互题都可以沿用这套流程。对于交互题，AutoCode 会额外关注交互协议、查询限制、错误行为和程序结束条件，帮助你把协议写得清楚、测得充分。
+标准题（`standard`）、特殊判题题（`spj`）、交互题（`interactive`）与通信题（`communication`）都可以沿用这套流程：
+
+- **交互题**：内置双进程双向管道 `InteractiveRunner`，自动检测死锁、超限与崩溃，完整覆盖交互协议、查询次数、flush 要求与异常退出。
+- **通信题**：内置 `CommunicationRunner`，原生支持三类主流通信题模式——两阶段进程隔离（`run_twice`）、头文件/Grader 联合编译（`grader_linked`）与多方并发进程通信（`multi_process`），并在验题与审计阶段强制检查比特/字节/轮次/查询预算。
+- **子任务与多 OJ 导出**：`manifest.json` 原生支持 `subtasks` 分值与依赖配置，`problem_pack_polygon` 支持通过 `export_formats=["polygon", "hydro", "qoj"]` 一键导出 Polygon（含 `<groups>`/`<tests>`）、Hydro（`exports/hydro/`）与 QOJ/UOJ（`exports/qoj/`）。
 
 ## 题目结构
 
@@ -136,7 +159,7 @@ AutoCode 会按以下顺序协助完成一题：
     └── 01.ans / 01.out
 ```
 
-特殊判题题会加入判题程序，交互题会加入交互程序，其余结构保持一致。
+特殊判题题会加入 `files/checker.cpp`，交互题会加入 `files/interactor.cpp`，通信题会按模式加入 `files/communicator.cpp` 或 `files/grader.cpp` + `files/problem.h`，导出多 OJ 题包时生成在 `exports/hydro/` 与 `exports/qoj/` 下。
 
 ## 题面建议
 
@@ -165,11 +188,12 @@ AutoCode 会在关键阶段自动复核：
 
 ## 示例目录
 
-仓库包含三个不同题型的样例：
+仓库包含四个不同题型的样例：
 
 - `examples/exact-sample`：标准精确输出题。
 - `examples/checker-sample`：特殊判题题。
 - `examples/interactive-sample`：交互题。
+- `examples/communication-sample`：两阶段（Run-Twice）噪声信道通信题（含子任务依赖、`communicator.cpp` 与标程）。
 
 这些样例可以作为不同题型的目录和文件组织参考。
 

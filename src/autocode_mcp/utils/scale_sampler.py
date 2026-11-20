@@ -45,7 +45,7 @@ class MultiScaleSampler:
         vars_map: dict[str, Any] = {
             "n": n,
             "seed": seed,
-            "type": "random",
+            "type": "2",
             "n_min": n,
             "n_max": n,
             "t_min": 1,
@@ -60,10 +60,11 @@ class MultiScaleSampler:
             return [generator_exe] + parts
 
         # 默认匹配既有 testlib 生成器标准格式: gen <seed> <type> <n_min> <n_max> <t_min> <t_max>
+        # 其中 type 约定为 1=tiny, 2=random, 3=extreme, 4=tle
         return [
             generator_exe,
-            str(seed),
-            str(vars_map.get("type", "random")),
+            str(vars_map.get("seed", seed)),
+            str(vars_map.get("type", "2")),
             str(vars_map.get("n_min", n)),
             str(vars_map.get("n_max", n)),
             str(vars_map.get("t_min", 1)),

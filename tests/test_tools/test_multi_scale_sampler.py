@@ -37,7 +37,7 @@ def test_compute_scale_points_tiny_boundary() -> None:
 
 def test_format_generator_command_default() -> None:
     cmd = MultiScaleSampler.format_generator_command("gen.exe", 5000, 42)
-    assert cmd == ["gen.exe", "42", "random", "5000", "5000", "1", "1"]
+    assert cmd == ["gen.exe", "42", "2", "5000", "5000", "1", "1"]
 
 
 def test_format_generator_command_template() -> None:
@@ -56,9 +56,9 @@ def test_format_generator_command_extra_vars_custom_type_and_n_max() -> None:
         "gen.exe",
         5000,
         42,
-        extra_vars={"type": "2", "n_max": 8000},
+        extra_vars={"type": "3", "n_max": 8000},
     )
-    assert cmd == ["gen.exe", "42", "2", "5000", "8000", "1", "1"]
+    assert cmd == ["gen.exe", "42", "3", "5000", "8000", "1", "1"]
 
 
 def test_generate_scale_input_file(tmp_path: os.PathLike[str]) -> None:

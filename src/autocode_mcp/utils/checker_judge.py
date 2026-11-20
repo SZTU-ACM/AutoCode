@@ -7,21 +7,31 @@ import os
 from .compiler import RunResult, run_binary_with_args
 
 
+def verdict_from_testlib_rc(rc: int | None) -> str:
+    """Map a testlib checker/interactor exit code to AC/WA/PE/PC/FAIL."""
+    if rc is None or rc < 0:
+        return "FAIL"
+    verdict_map = {
+        0: "AC",
+        1: "WA",
+        2: "PE",
+        3: "FAIL",
+        4: "PE",  # testlib DIRT_EXIT_CODE
+        7: "PC",  # testlib POINTS_EXIT_CODE
+        8: "PE",  # testlib UNEXPECTED_EOF_EXIT_CODE
+    }
+    return verdict_map.get(rc, "FAIL")
+
+
 def verdict_from_run(run: RunResult) -> str:
-    """将进程结果映射为 AC/WA/PE/FAIL/TLE。"""
+    """将进程结果映射为 AC/WA/PE/PC/FAIL/TLE。"""
     if run.timed_out:
         return "TLE"
     if run.error and not run.success:
         return "FAIL"
     if not run.success and run.return_code < 0:
         return "FAIL"
-    verdict_map = {0: "AC", 1: "WA", 2: "PE"}
-    rc = run.return_code
-    if rc in verdict_map:
-        return verdict_map[rc]
-    if rc >= 3:
-        return "FAIL"
-    return "WA"
+    return verdict_from_testlib_rc(run.return_code)
 
 
 async def run_testlib_checker(

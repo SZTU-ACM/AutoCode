@@ -9,8 +9,9 @@ import pytest
 
 from autocode_mcp.tools.interactor import InteractorBuildTool
 
-# 简单的 Interactor 代码（基于 testlib.h）
+# 简单的 Interactor 代码（基于 testlib.h registerInteraction 约定）
 INTERACTOR_CODE = """
+#include <iostream>
 #include "testlib.h"
 
 int main(int argc, char* argv[]) {
@@ -19,9 +20,10 @@ int main(int argc, char* argv[]) {
     // 读取输入
     int n = inf.readInt();
 
-    // 输出给选手
+    // 按 testlib registerInteraction 约定：通过 std::cout 发送给选手，并写入 tout 供记录
+    std::cout << n << std::endl;
+    std::cout.flush();
     tout << n << std::endl;
-    tout.flush();
 
     // 读取选手输出
     int answer = ouf.readInt();
@@ -197,17 +199,77 @@ async def test_interactor_with_reference_solution():
         build_result = await tool.execute(problem_dir=tmpdir, code=INTERACTOR_CODE)
         assert build_result.success
 
-        # 构建正确的参考解法 - solution_build 保存到 solutions/sol<exe>
-        await sol_tool.execute(problem_dir=tmpdir, solution_type="sol", code=SIMPLE_SOLUTION)
-        correct_sol_exe = os.path.join(tmpdir, "solutions", f"sol{get_exe_extension()}")
+        from autocode_mcp.utils.compiler import compile_cpp
 
-        # 验证正确解法
+        # 构建正确的参考解法与错误变异解法
+        sol_ok = await sol_tool.execute(problem_dir=tmpdir, solution_type="sol", code=SIMPLE_SOLUTION)
+        assert sol_ok.success
+        correct_sol_exe = os.path.join(tmpdir, "solutions", f"sol{get_exe_extension()}")
+        wrong_src = os.path.join(tmpdir, "solutions", "wrong_triple.cpp")
+        wrong_sol_exe = os.path.join(tmpdir, "solutions", f"wrong_triple{get_exe_extension()}")
+        with open(wrong_src, "w", encoding="utf-8") as wf:
+            wf.write(WRONG_SOLUTION)
+        wrong_compile = await compile_cpp(wrong_src, wrong_sol_exe)
+        assert wrong_compile.success, wrong_compile.stderr
+
+        # 走真实双向管道验证正确解与错误解
         result = await tool.execute(
             problem_dir=tmpdir,
             code=INTERACTOR_CODE,
             reference_solution_path=correct_sol_exe,
+            mutant_solutions=[wrong_sol_exe],
+            test_inputs=["5\n", "12\n"],
         )
 
         assert result.success
-        # 注意：由于 interactor 需要输入数据，实际验证可能受限
-        # 这里主要验证不崩溃即可
+        assert result.data["pass_rate"] == 1.0
+        assert result.data["pass_count"] == 2
+        assert result.data["pass_total"] == 2
+        assert result.data["fail_rate"] == 1.0
+        assert result.data["fail_count"] == 1
+        assert result.data["fail_total"] == 1
+        assert result.data["reference_results"][0]["verdict"] == "AC"
+        assert "[judge] 5" in result.data["reference_results"][0]["transcript"]
+        assert "[contestant] 10" in result.data["reference_results"][0]["transcript"]
+        assert result.data["mutant_results"][0]["killed"] is True
+        assert result.data["mutant_results"][0]["verdict"] == "WA"
+
+
+@pytest.mark.asyncio
+async def test_interactor_judge_fail_not_counted_as_mutant_kill():
+    """Interactor exiting with FAIL (_fail) must NOT count as killing a mutant."""
+    import shutil
+
+    if not shutil.which("g++"):
+        pytest.skip("g++ not available")
+
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    failing_interactor = """
+#include <iostream>
+#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerInteraction(argc, argv);
+    quitf(_fail, "internal interactor failure");
+}
+"""
+    tool = InteractorBuildTool()
+    sol_tool = SolutionBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sol_ok = await sol_tool.execute(problem_dir=tmpdir, solution_type="sol", code=WRONG_SOLUTION)
+        assert sol_ok.success
+        mutant_exe = os.path.join(tmpdir, "solutions", f"sol{get_exe_extension()}")
+
+        res = await tool.execute(
+            problem_dir=tmpdir,
+            code=failing_interactor,
+            mutant_solutions=[mutant_exe],
+            test_inputs=["5\n"],
+        )
+        assert res.success
+        assert res.data["fail_rate"] == 0.0
+        assert res.data["mutant_results"][0]["killed"] is False
+        assert res.data["mutant_results"][0]["verdict"] == "FAIL"
+        assert res.data["mutant_results"][0]["judge_failed"] is True

@@ -5,7 +5,7 @@ description: Use when creating competitive programming problems with AutoCode MC
 
 # AutoCode Problem Creation Workflow
 
-AutoCode is a host-independent MCP workflow distributed through Claude Code and Codex plugins. It exists because AI-generated problems often fail in subtle ways:
+AutoCode is a host-independent MCP workflow distributed through Claude Code, Codex, DeepSeek Harness (DSH), and Antigravity (`agy`) plugins. It supports `standard`, `spj`, `interactive`, and `communication` (`run_twice` / `grader_linked` / `multi_process`) problems. It exists because AI-generated problems often fail in subtle ways:
 
 - statement is ambiguous or samples do not match the intended solution;
 - standard solution has hidden bugs;
@@ -46,42 +46,44 @@ problem_create
   -> problem_pack_polygon
 ```
 
-Interactive problems:
+Interactive & Communication problems:
 
 ```text
-problem_create
-  -> solution_build(sol)
-  -> solution_build(brute)
-  -> solution_analyze / solution_audit_std / solution_audit_brute
-  -> interactor_build
+problem_create(problem_type="interactive" | "communication", protocol_mode=..., oracle_mode=...)
+  -> solution_build(sol)              # grader_linked auto-links files/grader.cpp + files/problem.h
+  -> [solution_build(brute)]          # required only when oracle_mode == "brute"
+  -> solution_analyze / solution_audit_std [/ solution_audit_brute]
+  -> interactor_build                 # interactive / run_twice / multi_process (optional validator_build allowed; no checker_build)
   -> generator_build
-  -> stress_test_run
+  -> stress_test_run                  # live InteractiveRunner / CommunicationRunner
   -> problem_validate
   -> problem_generate_tests
-  -> problem_verify_tests(passed)
-  -> problem_pack_polygon
+  -> problem_verify_tests(passed)     # collects protocol_metrics & enforces wrong_solution_kill
+  -> problem_audit(mode="full")       # reports communication_metrics & budget utilization
+  -> problem_pack_polygon(export_formats=["polygon", "hydro", "qoj"])
 ```
 
-The authoritative implementation is `src/autocode_mcp/workflow/enforcement.py`, called by the MCP server for every managed workflow tool. `scripts/workflow_guard.py` is only the Claude Code hook adapter; Codex and other MCP hosts use the same server-side gates without hooks.
+The authoritative implementation is `src/autocode_mcp/workflow/enforcement.py`, called by the MCP server for every managed workflow tool. `scripts/workflow_guard.py` is only the Claude Code hook adapter; Codex, DSH, and Antigravity use the same server-side gates without hooks.
 
-Interactive tasks are not just "no validator". They require an explicit protocol contract in the statement and a testlib interactor that can reject protocol violations. Treat missing protocol semantics as a blocker, the same severity as a missing validator for a non-interactive task.
+Interactive and communication tasks are not just "no validator". They require an explicit protocol contract in the statement and a testlib interactor / communicator / grader that can reject protocol and budget violations. Treat missing protocol semantics as a blocker, the same severity as a missing validator for a non-interactive task.
 
 ## Mandatory Gates
 
 | Gate | Requirement |
 |------|-------------|
 | Problem setup | `problem_create` must create directory structure and `manifest.json` |
-| Standard solution | `solution_build(solution_type="sol")` succeeds |
-| Brute solution | `solution_build(solution_type="brute")` succeeds after sol |
-| Complexity audit | `solution_analyze`, `solution_audit_std`, and `solution_audit_brute` reviewed |
-| Validator | Non-interactive only: `validator_build` returns valid `accuracy >= 0.9` |
-| Interactor | Interactive only: `interactor_build` is ready |
+| Standard solution | `solution_build(solution_type="sol")` succeeds (or `participant_solutions` for `multi_process`) |
+| Brute solution | `solution_build(solution_type="brute")` succeeds after sol (required when `oracle_mode == "brute"`) |
+| Complexity audit | `solution_analyze`, `solution_audit_std` (and `solution_audit_brute` when `oracle_mode == "brute"`) reviewed |
+| Validator | Standard / SPJ: `validator_build` returns valid `accuracy >= 0.9` (optional for interactive / communication) |
+| Interactor / Communicator | Interactive & communication (`run_twice` / `multi_process`): `interactor_build` is ready; `grader_linked`: `files/grader.cpp` + `files/problem.h` linked |
 | Generator | `generator_build` succeeds after validator/interactor gate |
 | Stress | `stress_test_run` completes all rounds |
-| Statement validation | `problem_validate` passes samples and sample files |
+| Statement validation | `problem_validate` passes samples / protocol checks and sample files |
 | Final tests | `problem_generate_tests` creates final tests |
 | Test verification | `problem_verify_tests` passes before packaging |
-| Packaging | `problem_pack_polygon` only after verified tests |
+| Full audit | `problem_audit(mode="full")` passes when `audit_gates.require_full_audit=true` (`standalone=True` for external read-only audits) |
+| Packaging | `problem_pack_polygon` only after verified tests (supports `export_formats`: `polygon`, `hydro`, `qoj`) |
 
 ## Audit Agents
 
@@ -150,28 +152,27 @@ Target:
 
 ### `interactor_build`
 
-Interactive problems use `interactor_build` instead of `validator_build` and `checker_build`.
+Interactive problems and communication problems (`run_twice` / `multi_process`) use `interactor_build` (and must not run `checker_build`; optional `validator_build` is permitted to validate `.in` files).
 
-Require an explicit interaction protocol in the statement before final packaging. The protocol must define:
+Require an explicit interaction or communication protocol in the statement before final packaging:
 
-- who outputs first;
-- hidden input/range/randomness/adaptiveness;
-- every query command and final-answer command;
-- judge response format and meaning;
-- numeric query/round limits;
-- flush requirement after every contestant output;
-- immediate termination behavior after final answer;
-- verdict for malformed tokens, out-of-range arguments, too many queries, premature EOF, blocked protocol, and extra output.
+- Interactive (`## 交互协议`): who outputs first; hidden input/range/randomness/adaptiveness; every query and final-answer command; judge response format and meaning; numeric query/round limits; flush requirement after every contestant output; immediate termination behavior after final answer; verdicts for malformed tokens, out-of-range arguments, too many queries, premature EOF, blocked protocol, and extra output.
+- Communication (`## 通信协议`): protocol mode (`run_twice` / `grader_linked` / `multi_process`); process isolation rules or header function signatures; numeric communication budgets (`max_bits` / `max_bytes` / `max_rounds` / `max_queries`); channel/noise model; over-budget and invalid-format verdicts; multi-stage transcript samples.
 
-Interactor implementation requirements:
+Interactive interactor implementation requirements:
 
 - use `registerInteraction(argc, argv)`;
 - read testcase data from `inf` and optional jury data from `ans`;
-- write to the contestant via `tout`, not `std::cout`;
-- call `tout.flush()` after every message to the contestant;
+- write to the contestant via `std::cout` and flush with `std::flush` / `std::endl` (use `tout` only for optional diagnostic logs written to `argv[2]`);
 - read contestant output via `ouf`;
 - end every branch with `quitf(_ok/_wa/_pe/_fail, ...)`;
 - include scripted `interaction_scenarios` in `interactor_build` that cover AC, wrong final answer, malformed command, out-of-range query, query-limit boundary, exceeding query limit, and premature EOF.
+
+Communication implementation requirements:
+
+- `run_twice`: `files/communicator.cpp` uses `registerTestlibCmd(argc, argv)` (strict 4-arg testlib convention) and reads `AUTOCODE_COMM_STAGE` / `AUTOCODE_COMM_ROLE` env vars; each pass runs in an isolated process and temporary working directory; emit `bits_used=... bytes_used=... rounds=...` in `quitf` messages so `CommunicationRunner` and `problem_audit` enforce budgets.
+- `grader_linked`: provide `files/grader.cpp` and `files/problem.h`; `solution_build` links them automatically and invalidates compile cache when local headers change.
+- `multi_process`: communicator routes lines across K participant processes using `TO <id> <payload>` / `CLOSE <id>` and reads `FROM <id> <payload>` / `EOF <id>`.
 
 ### `generator_build`
 
@@ -231,21 +232,29 @@ Run `autocode-verify <problem_dir>` for quick manifest/path checks; under the ch
 
 ### `problem_pack_polygon`
 
-Only package after `problem_verify_tests(passed=true)`.
+Only package after `problem_verify_tests(passed=true)` (and `problem_audit(mode="full")` when `audit_gates.require_full_audit=true`).
+
+Pass `export_formats` to export one or more judge formats in a single call (default `["polygon"]`):
+
+- `polygon`: standard Polygon layout + `problem.xml` (including `<groups>`/`<dependencies>`/`<tests>` when `subtasks` are defined, and `<communication>` for communication problems).
+- `hydro`: exports under `exports/hydro/` (`problem.yaml`, `problem_zh.md`, `testdata/config.yaml` with subtasks and judge sources).
+- `qoj`: exports under `exports/qoj/` (`problem.conf`, `statement.md`, 1-based contiguous `data/1.in..N.in`, `two_stage`/`with_implementer`/`interaction_mode`, and subtask dependencies).
 
 ## Manifest
 
 Each problem should maintain `manifest.json` as a readable contract. It should describe:
 
 - problem name;
-- interactive or non-interactive mode;
+- `problem_type` (`standard` | `spj` | `interactive` | `communication`) and `oracle_mode` (`brute` | `interactor_only` | `reference_solutions`);
+- `protocol` (for interactive/communication: `mode`, `passes`, `pass_headers`, `max_bits`, `max_bytes`, `max_rounds`, `max_queries`, `communicator_file`, `grader_file`, `header_file`, `participant_solutions`);
+- `subtasks` (id, name, score, constraints, dependencies, `test_indices` / `groups`);
 - statement/tutorial paths;
 - time and memory limits;
 - solution roles (including `wrong` solutions and optional per-entry `expected`: `fail` | `pass` for `wrong_solution_kill`);
 - case plan;
 - optional SPJ fields: `special_judge`, `stress_comparison` (`exact` | `checker`), and optional `stress_checker_bidirectional` (only meaningful with `special_judge` + `stress_comparison=checker`).
 
-Use `autocode-verify <problem_dir>` for quick structural checks.
+Use `autocode-verify <problem_dir>` for quick structural checks, and `autocode-audit <problem_dir> --standalone` (or `problem_audit(standalone=True)`) to audit external non-AutoCode packages read-only.
 
 ## Forbidden Actions
 

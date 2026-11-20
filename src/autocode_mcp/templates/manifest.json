@@ -1,6 +1,9 @@
 {
   "schema_version": "1.0",
   "problem_name": "Example Problem",
+  "problem_type": "standard",
+  "oracle_mode": "brute",
+  "protocol": null,
   "interactive": false,
   "special_judge": false,
   "stress_comparison": "exact",
@@ -52,6 +55,7 @@
       "path": "solutions/brute.cpp"
     }
   ],
+  "subtasks": [],
   "case_plan": [
     {
       "name": "tiny-1",

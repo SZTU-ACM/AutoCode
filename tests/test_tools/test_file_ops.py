@@ -82,7 +82,7 @@ async def test_file_save_canonicalizes_bare_problem_filenames():
 
         expected_path = os.path.join(tmpdir, "files", "val.cpp")
         assert result.success
-        assert result.data["path"] == expected_path
+        assert os.path.realpath(result.data["path"]) == os.path.realpath(expected_path)
         assert os.path.exists(expected_path)
         assert not os.path.exists(os.path.join(tmpdir, "val.cpp"))
 
@@ -144,7 +144,7 @@ async def test_file_save_prefers_existing_literal_relative_file():
         result = await tool.execute(path="val.cpp", content="new root", problem_dir=tmpdir)
 
         assert result.success
-        assert result.data["path"] == root_path
+        assert os.path.realpath(result.data["path"]) == os.path.realpath(root_path)
         with open(root_path, encoding="utf-8") as f:
             assert f.read() == "new root"
         with open(canonical_path, encoding="utf-8") as f:

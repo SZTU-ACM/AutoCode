@@ -6,19 +6,9 @@ from __future__ import annotations
 
 import os
 
+from ..workflow.manifest import CANONICAL_PROBLEM_FILES
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import FileReadInput, FileSaveInput
-
-CANONICAL_PROBLEM_FILES = {
-    "sol.cpp": "solutions/sol.cpp",
-    "brute.cpp": "solutions/brute.cpp",
-    "val.cpp": "files/val.cpp",
-    "gen.cpp": "files/gen.cpp",
-    "checker.cpp": "files/checker.cpp",
-    "interactor.cpp": "files/interactor.cpp",
-    "README.md": "statements/README.md",
-    "tutorial.md": "statements/tutorial.md",
-}
 
 
 def canonical_problem_path(path: str, problem_dir: str | None = None) -> str:

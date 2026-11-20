@@ -63,6 +63,7 @@ class BuildSpec:
     source: str
     binary: str | None = None
     include_dirs: list[str] | None = None
+    extra_sources: list[str] | None = None
     compiler: str = "g++"
     std: str = "c++20"
     opt_level: str = "O2"
@@ -106,6 +107,40 @@ def cleanup_work_dir(work_dir: str) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _has_local_headers(
+    include_dirs: list[str] | None,
+    source_path: str | None = None,
+) -> bool:
+    """Check whether any include directory or source directory contains local C/C++ headers."""
+    dirs_to_check: list[str] = list(include_dirs or [])
+    if source_path:
+        src_dir = os.path.dirname(os.path.abspath(source_path))
+        if src_dir:
+            dirs_to_check.append(src_dir)
+    if not dirs_to_check:
+        return False
+    templates_real = os.path.realpath(TEMPLATES_DIR) if os.path.exists(TEMPLATES_DIR) else ""
+    header_exts = (".h", ".hpp", ".hh", ".hxx")
+    seen_real: set[str] = set()
+    for inc_dir in dirs_to_check:
+        if not inc_dir or not os.path.isdir(inc_dir):
+            continue
+        real_dir = os.path.normcase(os.path.realpath(inc_dir))
+        if real_dir in seen_real:
+            continue
+        seen_real.add(real_dir)
+        if templates_real and real_dir == os.path.normcase(templates_real):
+            continue
+        try:
+            for entry in os.listdir(inc_dir):
+                lower = entry.lower()
+                if lower.endswith(header_exts) and lower != "testlib.h":
+                    return True
+        except OSError:
+            return True
+    return False
+
+
 async def compile_cpp(
     source_path: str,
     binary_path: str,
@@ -114,20 +149,22 @@ async def compile_cpp(
     std: str = "c++20",
     opt_level: str = "O2",
     include_dirs: list[str] | None = None,
+    extra_sources: list[str] | None = None,
     use_cache: bool = True,
 ) -> CompileResult:
     """
-    编译 C++ 文件，带超时控制。
+    编译 C++ 文件（支持多文件链接，如 grader_linked 通信题），带超时控制。
 
     Args:
-        source_path: 源文件路径
+        source_path: 主源文件路径
         binary_path: 输出二进制文件路径
         timeout: 超时时间（秒）
         compiler: 编译器名称
         std: C++ 标准
         opt_level: 优化级别
         include_dirs: 额外的 include 目录列表
-        use_cache: 是否使用编译缓存
+        extra_sources: 一起编译链接的附加源文件列表（如 files/grader.cpp）
+        use_cache: 是否使用编译缓存（多文件或存在本地头文件时自动绕过缓存避免陈旧命中）
 
     Returns:
         CompileResult: 编译结果
@@ -138,7 +175,19 @@ async def compile_cpp(
             error=f"Source file not found: {source_path}",
         )
 
-    if use_cache:
+    normalized_extra = list(extra_sources or [])
+    for extra_src in normalized_extra:
+        if not os.path.exists(extra_src):
+            return CompileResult(
+                success=False,
+                error=f"Extra source file not found: {extra_src}",
+            )
+
+    effective_use_cache = (
+        use_cache and not normalized_extra and not _has_local_headers(include_dirs, source_path)
+    )
+
+    if effective_use_cache:
         cached_binary = _cache.get(source_path, compiler, std, opt_level)
         if cached_binary:
             output_dir = os.path.dirname(binary_path)
@@ -176,6 +225,7 @@ async def compile_cpp(
         "-Wextra",
         *include_flags,
         source_path,
+        *normalized_extra,
         "-o",
         binary_path,
     ]
@@ -198,7 +248,7 @@ async def compile_cpp(
 
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except (TimeoutError, asyncio.CancelledError) as e:
+        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as e:
             if process.pid:
                 await terminate_pid_tree(process.pid)
             try:
@@ -220,7 +270,7 @@ async def compile_cpp(
                 stderr=stderr.decode("utf-8", errors="replace"),
             )
 
-        if use_cache:
+        if effective_use_cache:
             _cache.set(source_path, binary_path, compiler, std, opt_level)
 
         return CompileResult(
@@ -300,7 +350,7 @@ async def _force_terminate_process(
     # 等待进程退出，设置超时防止卡住
     try:
         await asyncio.wait_for(process.wait(), timeout=2.0)
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         # 如果 2 秒后进程仍未退出，再次尝试强制终止
         try:
             process.kill()
@@ -403,7 +453,7 @@ async def _run_process(
             # 调用被取消时也必须强制清理子进程，防止残留。
             await _force_terminate_process(process, job)
             raise
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             # 超时时强制终止进程
             await _force_terminate_process(process, job)
             out_str = ""
@@ -626,6 +676,14 @@ async def compile_all(
                 binary_path = spec.binary if os.path.isabs(spec.binary) else os.path.join(problem_dir, spec.binary)
             else:
                 binary_path = os.path.splitext(source_path)[0] + exe_ext
+            resolved_extra = (
+                [
+                    p if os.path.isabs(p) else os.path.join(problem_dir, p)
+                    for p in spec.extra_sources
+                ]
+                if spec.extra_sources
+                else None
+            )
             result = await compile_cpp(
                 source_path,
                 binary_path,
@@ -634,6 +692,7 @@ async def compile_all(
                 std=spec.std,
                 opt_level=spec.opt_level,
                 include_dirs=spec.include_dirs,
+                extra_sources=resolved_extra,
             )
             return source_key, result
 

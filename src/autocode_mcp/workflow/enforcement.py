@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime_store import AUDIT, WORKFLOW, get_section, runtime_file, set_section
-from .manifest import load_manifest, manifest_path, manifest_uses_testlib_checker
+from .manifest import (
+    CANONICAL_PROBLEM_FILES,
+    load_manifest,
+    manifest_path,
+    manifest_uses_testlib_checker,
+)
 
 DEFAULT_QUALITY_GATES: dict[str, Any] = {
     "require_stress_passed": True,
@@ -39,16 +44,52 @@ class GateViolation:
     next_action: str
 
 
+def _state_problem_type(state: dict[str, Any]) -> str:
+    ptype = state.get("problem_type")
+    if isinstance(ptype, str) and ptype in {"standard", "spj", "interactive", "communication"}:
+        return ptype
+    return "interactive" if bool(state.get("interactive", False)) else "standard"
+
+
 def _is_non_interactive(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    return not bool(state.get("interactive", False))
+    return _state_problem_type(state) not in {"interactive", "communication"}
 
 
 def _is_interactive(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    return bool(state.get("interactive", False))
+    return _state_problem_type(state) == "interactive"
+
+
+def _is_protocol_problem(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return _state_problem_type(state) in {"interactive", "communication"}
+
+
+def _requires_external_interactor(state: dict[str, Any]) -> bool:
+    ptype = _state_problem_type(state)
+    if ptype == "interactive":
+        return True
+    if ptype == "communication":
+        return bool(state.get("protocol_mode", "run_twice") != "grader_linked")
+    return False
+
+
+def _interactor_build_allowed(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return _requires_external_interactor(state)
+
+
+_NON_BRUTE_ORACLE_MODES = frozenset({"interactor_only", "reference_solutions"})
+
+
+def _brute_required(state: dict[str, Any]) -> bool:
+    mode = state.get("oracle_mode")
+    return not (isinstance(mode, str) and mode in _NON_BRUTE_ORACLE_MODES)
+
+
+def _brute_built_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
+    return (not _brute_required(state)) or bool(state.get("brute_built"))
 
 
 def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    if bool(state.get("interactive", False)):
+    if _is_protocol_problem(state, {}):
         return True
     accuracy = state.get("validator_accuracy")
     parsed = _finite_ratio(accuracy)
@@ -56,7 +97,7 @@ def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
 
 
 def _interactor_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    if not bool(state.get("interactive", False)):
+    if not _requires_external_interactor(state):
         return True
     if bool(state.get("interactor_ready")):
         return True
@@ -89,7 +130,9 @@ def _tests_verified_required_gate_ok(state: dict[str, Any], _: dict[str, Any]) -
 
 
 def _audit_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
-    return bool(state.get("std_audited")) and bool(state.get("brute_audited"))
+    return bool(state.get("std_audited")) and (
+        (not _brute_required(state)) or bool(state.get("brute_audited"))
+    )
 
 
 def _finite_ratio(value: Any) -> float | None:
@@ -154,10 +197,11 @@ def _validator_check_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
 def _stress_prereq_core_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
     return (
         bool(state.get("sol_built"))
-        and bool(state.get("brute_built"))
+        and _brute_built_ok(state, {})
         and bool(state.get("solution_analyzed"))
         and _audit_gate_ok(state, {})
         and _validator_gate_ok(state, {})
+        and _interactor_gate_ok(state, {})
         and bool(state.get("generator_built"))
     )
 
@@ -202,7 +246,6 @@ _DOWNSTREAM_INVALIDATING_TOOLS = frozenset(
         "generator_build",
         "checker_build",
         "interactor_build",
-        "problem_validate",
     }
 )
 
@@ -232,28 +275,15 @@ def _saved_relative_path(problem_dir: str, raw_path: Any) -> str | None:
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
     path_text = raw_path.replace("\\", "/")
-    aliases = {
-        "sol.cpp": "solutions/sol.cpp",
-        "brute.cpp": "solutions/brute.cpp",
-        "val.cpp": "files/val.cpp",
-        "gen.cpp": "files/gen.cpp",
-        "checker.cpp": "files/checker.cpp",
-        "interactor.cpp": "files/interactor.cpp",
-        "README.md": "statements/README.md",
-        "tutorial.md": "statements/tutorial.md",
-    }
     if not Path(path_text).is_absolute() and "/" not in path_text:
-        path_text = aliases.get(path_text, path_text)
+        path_text = CANONICAL_PROBLEM_FILES.get(path_text, path_text)
+    root = Path(problem_dir).resolve()
     path = Path(path_text)
-    if path.is_absolute():
-        try:
-            return path.resolve().relative_to(Path(problem_dir).resolve()).as_posix()
-        except ValueError:
-            return None
-    relative = path.as_posix()
-    while relative.startswith("./"):
-        relative = relative[2:]
-    return relative
+    candidate = path.resolve() if path.is_absolute() else (root / path).resolve()
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return None
 
 
 def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_input: dict[str, Any]) -> None:
@@ -269,6 +299,7 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "std_claimed_complexity": None,
                 "validator_ready": False,
                 "validator_accuracy": None,
                 "generator_built": False,
@@ -276,8 +307,41 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "checker_accuracy": None,
                 "interactor_ready": False,
                 "interaction_scenarios": {},
+                "statement_dirty": False,
             }
         )
+        return
+    if relative == "statements/tutorial.md":
+        # 题解仅影响打包与完整审计，不应清空已完成的对拍与终测状态。
+        state["packaged"] = False
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+        return
+    if relative == "statements/README.md":
+        # 修改题面只需重新做题面/样例校验与审计/打包，不清空已通过的对拍结果，
+        # 但标记 statement_dirty 以阻断未重新校验就打包。
+        state.update(
+            {
+                "statement_validated": False,
+                "validation_passed": False,
+                "statement_dirty": True,
+                "packaged": False,
+            }
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+        return
+    if relative == "tests" or relative.startswith("tests/"):
+        # 修改 tests/ 文件需重新校验样例/终测，不清空对拍结果。
+        state.update(
+            {
+                "sample_files_validated": False,
+                "validation_passed": False,
+                "tests_verified": False,
+                "limit_case_ratio": None,
+                "verify_signals": {},
+                "packaged": False,
+            }
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
         return
     if relative in {
         "solutions/sol.cpp",
@@ -286,13 +350,31 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
         "files/gen.cpp",
         "files/checker.cpp",
         "files/interactor.cpp",
-        "statements/README.md",
-        "statements/tutorial.md",
-        "tests",
-    } or relative.startswith("tests/"):
+    }:
         _invalidate_downstream(problem_dir, state)
+    elif relative.startswith("files/"):
+        # 公共头文件/辅助代码（如 problem.h / grader.cpp）变更影响整个下游产物。
+        _invalidate_downstream(problem_dir, state)
+    elif relative.startswith("solutions/"):
+        # 其它解法（例如 role=wrong 错解或参考解）变更会使终测与错解杀伤信号过期。
+        state.update(
+            {
+                "tests_verified": False,
+                "verify_signals": {},
+                "packaged": False,
+            }
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
     if relative == "solutions/sol.cpp":
-        state.update({"sol_built": False, "solution_analyzed": False, "std_audited": False, "brute_audited": False})
+        state.update(
+            {
+                "sol_built": False,
+                "solution_analyzed": False,
+                "std_audited": False,
+                "brute_audited": False,
+                "std_claimed_complexity": None,
+            }
+        )
     elif relative == "solutions/brute.cpp":
         state.update({"brute_built": False, "brute_audited": False})
     elif relative == "files/val.cpp":
@@ -301,8 +383,38 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
         state["generator_built"] = False
     elif relative == "files/checker.cpp":
         state.update({"checker_ready": False, "checker_accuracy": None})
-    elif relative == "files/interactor.cpp":
+    custom_comm_files: set[str] = set()
+    custom_grader_files: set[str] = set()
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    if manifest is not None and manifest.protocol is not None:
+        if manifest.protocol.communicator_file:
+            norm = _saved_relative_path(problem_dir, manifest.protocol.communicator_file)
+            if norm:
+                custom_comm_files.add(norm)
+        for p_file in (manifest.protocol.grader_file, manifest.protocol.header_file):
+            if p_file:
+                norm = _saved_relative_path(problem_dir, p_file)
+                if norm:
+                    custom_grader_files.add(norm)
+
+    if relative in ({"files/interactor.cpp", "files/communicator.cpp"} | custom_comm_files):
+        _invalidate_downstream(problem_dir, state)
         state.update({"interactor_ready": False, "interaction_scenarios": {}})
+    elif relative in ({"files/grader.cpp", "files/problem.h"} | custom_grader_files):
+        _invalidate_downstream(problem_dir, state)
+        state.update(
+            {
+                "sol_built": False,
+                "brute_built": False,
+                "solution_analyzed": False,
+                "std_audited": False,
+                "brute_audited": False,
+                "std_claimed_complexity": None,
+            }
+        )
 
 
 def _stress_rounds_complete(data: dict[str, Any]) -> bool:
@@ -346,47 +458,55 @@ PRE_GATES: dict[str, list[tuple[str, Gate]]] = {
         ("created", (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。")),
         ("sol_built", (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须先运行 solution_analyze，再构建 validator。")),
-        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std 与 solution_audit_brute。")),
-        ("non_interactive", (_is_non_interactive, "交互题不应构建 validator，应改用 interactor_build。")),
-        ("brute_built", (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute，再构建 validator。")),
+        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
+        ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute，再构建 validator。")),
     ],
     "interactor_build": [
         ("created", (lambda s, i: bool(s.get("created")), "必须先运行 problem_create 创建题目目录。")),
-        ("interactive", (_is_interactive, "只有交互题可运行 interactor_build。请在 problem_create 设 interactive=true。")),
+        ("interactive", (_interactor_build_allowed, "只有交互题或非 grader_linked 通信题可运行 interactor_build。")),
         ("sol_built", (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。")),
-        ("brute_built", (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute。")),
+        ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须运行 solution_analyze。")),
-        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std 与 solution_audit_brute。")),
+        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
     ],
     "generator_build": [
         ("sol_built", (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。")),
-        ("brute_built", (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute。")),
+        ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须运行 solution_analyze。")),
-        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std 与 solution_audit_brute。")),
+        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
         ("validator", (_validator_gate_ok, "必须先完成 validator_build，并且 validator accuracy >= 0.9。")),
-        ("interactor", (_interactor_gate_ok, "交互题必须先完成 interactor_build 并可用。")),
+        ("interactor", (_interactor_gate_ok, "交互题与通信题（非 grader_linked）必须先完成 interactor_build 并可用。")),
     ],
     "stress_test_run": [
         ("sol_built", (lambda s, i: bool(s.get("sol_built")), "必须先构建标准解 sol。")),
-        ("brute_built", (lambda s, i: bool(s.get("brute_built")), "必须先构建 brute。")),
+        ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须运行 solution_analyze。")),
-        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std 与 solution_audit_brute。")),
+        ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
         ("validator", (_validator_gate_ok, "必须先完成 validator_build(accuracy >= 0.9)。")),
+        ("interactor", (_interactor_gate_ok, "交互题与通信题（非 grader_linked）必须先完成 interactor_build 并可用。")),
         ("generator", (lambda s, i: bool(s.get("generator_built")), "必须先完成 generator_build。")),
         ("checker", (_stress_spj_checker_ready_ok, "SPJ 且 stress_comparison=checker 时需先完成 checker_build。")),
     ],
     "checker_build": [
-        ("non_interactive", (_is_non_interactive, "交互题不应构建 checker，请使用 interactor_build。")),
+        ("non_interactive", (_is_non_interactive, "交互题或通信题不应构建 checker，请使用 interactor_build / grader。")),
         ("prerequisites", (_checker_build_prereq_ok, "须先通过 stress_test_run；或在 SPJ checker 路径完成 stress 前置步骤。")),
     ],
     "problem_validate": [("stress", (_stress_required_gate_ok, "必须先通过 stress_test_run，再进行题面与样例验证。"))],
     "problem_generate_tests": [
         ("stress", (_stress_required_gate_ok, "必须先通过 stress_test_run。")),
         ("validation", (_validation_required_gate_ok, "必须先通过 problem_validate（题面与样例均通过）。")),
-        ("interactor", (lambda s, i: not bool(s.get("interactive")) or bool(s.get("interactor_ready")), "交互题必须先完成 interactor_build 并可用。")),
+        ("interactor", (_interactor_gate_ok, "交互题与通信题（非 grader_linked）必须先完成 interactor_build 并可用。")),
     ],
     "problem_verify_tests": [("tests_generated", (_has_generated_tests, "必须先运行 problem_generate_tests 生成最终测试数据。"))],
     "problem_pack_polygon": [
+        (
+            "statement_fresh",
+            (
+                lambda s, i: (not _quality_gate_enabled(s, "require_validation_passed"))
+                or (not bool(s.get("statement_dirty", False))),
+                "题面已修改，必须重新通过 problem_validate 后再打包。",
+            ),
+        ),
         ("tests_generated", (_has_generated_tests, "必须先生成最终测试数据。")),
         ("tests_verified", (_tests_verified_required_gate_ok, "必须先通过 problem_verify_tests(passed=true)，再进行打包。")),
         ("limit_ratio", (_min_limit_ratio_gate_ok, "最终测试中的极限样例占比未达到 quality_gates.min_limit_case_ratio。")),
@@ -404,17 +524,18 @@ NEXT_ACTIONS: dict[str, str] = {
     "brute_built": "调用 solution_build(solution_type='brute')",
     "solution_analyzed": "调用 solution_analyze",
     "std_audited": "调用 solution_audit_std",
-    "audits": "调用 solution_audit_std 和 solution_audit_brute",
+    "audits": "调用 solution_audit_std（brute 模式下还需调用 solution_audit_brute）",
     "validator_ready": "调用 validator_build",
     "validator": "调用 validator_build 并确保 accuracy >= 0.9",
-    "non_interactive": "按题目类型选择 validator_build 或 interactor_build",
-    "interactive": "用 interactive=true 创建题目后调用 interactor_build",
+    "non_interactive": "交互题或通信题请使用 interactor_build / grader，不要调用 checker_build",
+    "interactive": "交互题或非 grader_linked 通信题才可调用 interactor_build",
     "interactor": "调用 interactor_build 并通过交互场景检查",
     "generator": "调用 generator_build",
     "stress": "调用 stress_test_run 并完成全部轮次",
     "checker": "调用 checker_build（SPJ checker 路径）",
     "prerequisites": "完成 stress_test_run 或 SPJ checker 前置步骤",
     "validation": "调用 problem_validate 并通过题面、样例检查",
+    "statement_fresh": "题面已修改，请重新调用 problem_validate",
     "tests_generated": "调用 problem_generate_tests",
     "tests_verified": "调用 problem_verify_tests 并通过所有质量信号",
     "limit_ratio": "补充 type=3/type=4 测试数据",
@@ -430,9 +551,15 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
     manifest_error: str | None
     try:
         manifest = load_manifest(problem_dir)
+        problem_type = manifest.problem_type if manifest else "standard"
+        oracle_mode = manifest.oracle_mode if manifest else "brute"
+        protocol_mode = manifest.protocol.mode if (manifest and manifest.protocol) else None
         interactive = bool(manifest.interactive) if manifest else False
         gates = manifest.quality_gates.model_dump(mode="json") if manifest else dict(DEFAULT_QUALITY_GATES)
     except (OSError, ValueError) as exc:
+        problem_type = "standard"
+        oracle_mode = "brute"
+        protocol_mode = None
         interactive = False
         gates = dict(DEFAULT_QUALITY_GATES)
         manifest_error = str(exc)
@@ -444,6 +571,9 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
         and (root / "files").exists()
         and (root / "solutions").exists()
         and manifest is not None,
+        "problem_type": problem_type,
+        "oracle_mode": oracle_mode,
+        "protocol_mode": protocol_mode,
         "interactive": interactive,
         "sol_built": False,
         "brute_built": False,
@@ -461,6 +591,7 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
         "interactor_ready": False,
         "interaction_scenarios": {},
         "statement_validated": False,
+        "statement_dirty": False,
         "sample_files_validated": False,
         "validation_passed": False,
         "tests_generated": False,
@@ -486,6 +617,9 @@ def load_workflow_state(problem_dir: str) -> dict[str, Any]:
     else:
         state.pop("manifest_error", None)
         if manifest:
+            state["problem_type"] = manifest.problem_type
+            state["oracle_mode"] = manifest.oracle_mode
+            state["protocol_mode"] = manifest.protocol.mode if manifest.protocol else None
             state["interactive"] = bool(manifest.interactive)
             state["quality_gates"] = manifest.quality_gates.model_dump(mode="json")
     return state
@@ -513,6 +647,8 @@ def preflight(
     *,
     strict_manifest: bool = True,
 ) -> list[GateViolation]:
+    if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
+        return []
     state = load_workflow_state(problem_dir)
     violations: list[GateViolation] = []
     if strict_manifest and tool_name != "problem_create":
@@ -564,6 +700,8 @@ def _append_history(state: dict[str, Any], tool: str, success: bool, data: dict[
 
 def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], success: bool, data: dict[str, Any]) -> dict[str, Any]:
     state = load_workflow_state(problem_dir)
+    if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
+        return state
     if tool_name in _DOWNSTREAM_INVALIDATING_TOOLS:
         _invalidate_downstream(problem_dir, state)
     elif tool_name == "file_save" and success:
@@ -579,6 +717,11 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         state["statement_validated"] = bool(statement.get("validated")) if isinstance(statement, dict) else False
         state["sample_files_validated"] = bool(samples.get("validated")) if isinstance(samples, dict) else False
         state["validation_passed"] = bool(success)
+        if success and state["statement_validated"]:
+            state["statement_dirty"] = False
+        elif not success:
+            state["packaged"] = False
+            set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
     elif tool_name == "problem_verify_tests":
         results = data.get("results", {})
         ratio = results.get("limit_ratio", {}) if isinstance(results, dict) else {}
@@ -604,7 +747,15 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         if tool_name == "solution_build":
             solution_type = tool_input.get("solution_type")
             if solution_type == "sol":
-                state.update({"sol_built": False, "solution_analyzed": False, "std_audited": False, "brute_audited": False})
+                state.update(
+                    {
+                        "sol_built": False,
+                        "solution_analyzed": False,
+                        "std_audited": False,
+                        "brute_audited": False,
+                        "std_claimed_complexity": None,
+                    }
+                )
             elif solution_type == "brute":
                 state.update({"brute_built": False, "brute_audited": False})
         elif tool_name == "problem_validate":
@@ -619,7 +770,21 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
             state["validator_accuracy" if tool_name == "validator_build" else "checker_accuracy"] = None
     elif tool_name == "problem_create":
         state["created"] = True
-        state["interactive"] = bool(tool_input.get("interactive", False))
+        ptype = data.get("problem_type") or tool_input.get("problem_type")
+        if ptype is None:
+            ptype = "interactive" if bool(tool_input.get("interactive", False)) else "standard"
+        state["problem_type"] = ptype
+        state["interactive"] = ptype == "interactive"
+        state["oracle_mode"] = data.get("oracle_mode") or tool_input.get("oracle_mode") or state.get("oracle_mode") or "brute"
+        if "protocol_mode" in data:
+            state["protocol_mode"] = data["protocol_mode"]
+        elif state.get("protocol_mode") is None:
+            if ptype == "interactive":
+                state["protocol_mode"] = tool_input.get("protocol_mode") or "interactive_1v1"
+            elif ptype == "communication":
+                state["protocol_mode"] = tool_input.get("protocol_mode") or "run_twice"
+            else:
+                state["protocol_mode"] = None
         state.update(
             {
                 "sol_built": False,
@@ -627,6 +792,7 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "std_claimed_complexity": None,
                 "validator_ready": False,
                 "validator_accuracy": None,
                 "generator_built": False,
@@ -634,13 +800,22 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                 "checker_accuracy": None,
                 "interactor_ready": False,
                 "interaction_scenarios": {},
+                "statement_dirty": False,
             }
         )
     elif tool_name == "problem_build_all" and success:
         compiled = data.get("compiled", {})
         if isinstance(compiled, dict):
             if "solutions/sol.cpp" in compiled:
-                state.update({"sol_built": True, "solution_analyzed": False, "std_audited": False, "brute_audited": False})
+                state.update(
+                    {
+                        "sol_built": True,
+                        "solution_analyzed": False,
+                        "std_audited": False,
+                        "brute_audited": False,
+                        "std_claimed_complexity": None,
+                    }
+                )
             if "solutions/brute.cpp" in compiled:
                 state.update({"brute_built": True, "brute_audited": False})
             if "files/gen.cpp" in compiled:
@@ -648,18 +823,35 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
     elif tool_name == "solution_build":
         solution_type = tool_input.get("solution_type")
         if solution_type == "sol":
-            state.update({"sol_built": True, "solution_analyzed": False, "std_audited": False, "brute_audited": False})
+            state.update(
+                {
+                    "sol_built": True,
+                    "solution_analyzed": False,
+                    "std_audited": False,
+                    "brute_audited": False,
+                    "std_claimed_complexity": None,
+                }
+            )
         elif solution_type == "brute":
             state.update({"brute_built": True, "brute_audited": False})
     elif tool_name == "solution_analyze":
-        state.update({"solution_analyzed": True, "std_audited": False, "brute_audited": False})
-        complexity = data.get("estimated_complexity") or data.get("final_complexity") or data.get("worst_case_complexity")
-        if complexity is not None:
-            state["std_complexity"] = complexity
-        if "recommended_stress_params" in data:
-            state["recommended_stress_params"] = data["recommended_stress_params"]
+        solution_type = tool_input.get("solution_type", "sol")
+        if solution_type == "sol":
+            state.update({"solution_analyzed": True, "std_audited": False, "brute_audited": False})
+            complexity = data.get("estimated_complexity") or data.get("final_complexity") or data.get("worst_case_complexity")
+            if complexity is not None:
+                state["std_complexity"] = complexity
+            claimed = data.get("claimed_complexity") or tool_input.get("claimed_complexity")
+            state["std_claimed_complexity"] = (
+                claimed.strip() if isinstance(claimed, str) and claimed.strip() else None
+            )
+            if "recommended_stress_params" in data:
+                state["recommended_stress_params"] = data["recommended_stress_params"]
     elif tool_name == "solution_audit_std":
         state["std_audited"] = True
+        claimed = data.get("claimed_complexity") or tool_input.get("claimed_complexity")
+        if isinstance(claimed, str) and claimed.strip():
+            state["std_claimed_complexity"] = claimed.strip()
     elif tool_name == "solution_audit_brute":
         state["brute_audited"] = True
         for key in ("brute_complexity", "recommended_stress_params"):

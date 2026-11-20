@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-20
+
+### Added
+
+- **Antigravity (`agy`) 薄壳插件与多目标分发打包**：
+  - 新增 `.antigravity-plugin/plugin.json`、根目录 `mcp_config.json` 与 `rules/AGENTS.md`，共享全部 22 个 MCP 工具、Skills 与 server 级工作流门禁。
+  - `scripts/build_plugin_bundle.py` 升级支持 `--target marketplace|agy|dsh` 多目标可复现构建与 `--check` 一致性校验（`agy` 目标在 bundle 根目录输出 `plugin.json`、`mcp_config.json`、`rules/AGENTS.md`、`agents/`、`assets/` 与 `skills/`）；`scripts/sync_plugin_version.py` 扩展同步四宿主 manifest 版本。
+- **题目模型演进（交互、通信与子任务）**：
+  - `AutoCodeManifest` 新增 `problem_type`（`standard` | `spj` | `interactive` | `communication`）、`protocol`（`ProtocolConfig`：`interactive_1v1` / `run_twice` / `multi_process` / `grader_linked`、`passes`、`pass_headers`、`max_bits`、`max_bytes`、`max_rounds`、`max_queries`、`communicator_file`、`grader_file`、`header_file`、`participant_solutions`）、`oracle_mode`（`brute` | `interactor_only` | `reference_solutions`）与 `subtasks`（`SubtaskSpec`：分值、约束、依赖与测试映射）。
+  - 工作流门禁适配交互/通信题：`oracle_mode != "brute"` 时可跳过 `brute` 强门禁；允许可选运行 `validator_build` 校验 `.in` 输入。
+- **统一评测引擎 `JudgeRunner` 与端到端交互题工作流**：
+  - 新增 `src/autocode_mcp/utils/judge_runner.py`（`StandardRunner`、`CheckerRunner`、`InteractiveRunner`），统一实现双进程双向管道交互、计算后死锁检测、仅针对选手进程的 CPU/RSS 限制、崩溃转 `RE` 判定与全路径清理。
+  - 贯通交互题全链路：`interactor_build` 真实管道自测、`solution_run`、`stress_test_run`、`problem_validate`、`problem_generate_tests`、`problem_verify_tests`、实证复杂度校验与真实 C++ 端到端测试。
+- **原生通信题引擎 `CommunicationRunner`**：
+  - 新增 `src/autocode_mcp/utils/communication_runner.py`，原生支持三类通信模式：
+    - `run_twice`：物理多进程隔离 + 每阶段独立临时工作目录 + canonical 4 参数 testlib `registerTestlibCmd` + `AUTOCODE_COMM_STAGE`/`AUTOCODE_COMM_ROLE` 环境变量；
+    - `grader_linked`：多源码联合编译（`extra_sources` + 本地头文件变更失效缓存）与 grader 判分/`RE` 消歧；
+    - `multi_process`：K 方并发进程行级复用协议（`TO`/`CLOSE`/`FROM`/`EOF`，4 MiB 行上限与死锁检测）。
+  - 新增内置模板 `communicator_run_twice_template.cpp`、`grader_template.cpp`、`problem_h_template.h` 与完整示例 `examples/communication-sample/`。
+  - 全链路支持通信预算（`max_bits`/`max_bytes`/`max_queries`/`max_rounds`）强制校验与 `problem_audit` 的 `communication_metrics` 利用率汇总。
+- **多 OJ 导出与独立题包只读审计**：
+  - 新增 `src/autocode_mcp/utils/exporters.py`：`problem_pack_polygon` 新增可选 `export_formats`（`polygon` | `hydro` | `qoj`），支持 Polygon `<groups>`/`<dependencies>`/`<tests>` 子任务 XML、Hydro `exports/hydro/`（`problem.yaml`、`problem_zh.md`、`testdata/config.yaml`）与 QOJ/UOJ `exports/qoj/`（`problem.conf`、按子任务连续重排的 `data/1.in..N.in`、`two_stage`/`with_implementer`/`interaction_mode`）。
+  - `problem_audit` 新增 `standalone=True` 与 CLI `autocode-audit --standalone`，支持对无 `.autocode/` 的外部 Polygon/Hydro/QOJ 题包执行零写入只读实时校验。
+
+### Fixed
+
+- **核心质量与安全修复**：
+  - 修复实证复杂度采样与 OS 底噪防护、静态循环/算法复杂度启发式、Polygon XML 同步、`file_save` 细粒度门禁失效与 macOS `realpath` 路径断言。
+  - 统一 `checker_judge.verdict_from_testlib_rc` 映射（含 `7 -> PC`）；修正 `interactor_template.cpp` 与文档中 `registerInteraction` 的流语义（向选手发送须用 `std::cout` + `std::flush`，`tout` 写诊断输出文件）。
+  - 修复 `problem_audit._require_special_artifact_gates` 误覆盖 `workflow["verify_signals"]` 导致交互/SPJ 题审计后打包失败的缺陷。
+  - 加固全部 manifest 衍生路径（`solutions`、`participant_solutions`、communicator/grader/header 与导出目标目录）的路径穿越与符号链接逃逸防护。
+
 ## [3.1.0] - 2026-09-19
 
 ### Added

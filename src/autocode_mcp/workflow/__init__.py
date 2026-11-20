@@ -11,22 +11,46 @@ from .enforcement import (
 )
 from .guard import GateIssue, check_gates, signal_satisfied
 from .manifest import (
+    CANONICAL_PROBLEM_FILES,
     MANIFEST_NAME,
     default_manifest,
     load_manifest,
+    manifest_is_communication,
+    manifest_is_interactive,
     manifest_path,
+    manifest_problem_type,
+    manifest_requires_brute,
+    manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
     save_manifest,
 )
-from .models import AutoCodeManifest
+from .models import (
+    AutoCodeManifest,
+    OracleMode,
+    ProblemType,
+    ProtocolConfig,
+    ProtocolMode,
+    SubtaskSpec,
+)
 
 __all__ = [
     "AutoCodeManifest",
+    "OracleMode",
+    "ProblemType",
+    "ProtocolConfig",
+    "ProtocolMode",
+    "SubtaskSpec",
+    "CANONICAL_PROBLEM_FILES",
     "MANIFEST_NAME",
     "manifest_path",
     "load_manifest",
     "save_manifest",
     "default_manifest",
+    "manifest_problem_type",
+    "manifest_is_interactive",
+    "manifest_is_communication",
+    "manifest_uses_protocol_judge",
+    "manifest_requires_brute",
     "manifest_uses_testlib_checker",
     "check_gates",
     "GateIssue",

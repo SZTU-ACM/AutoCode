@@ -19,9 +19,11 @@ Use when:
 
 1. Run `problem_validate` against statement samples and sample files.
 2. When `manifest.json` has `special_judge: true`, `stress_comparison: "checker"`, and a compiled `files/checker`, sample checks use the checker (same argv convention as final verification); otherwise outputs are compared with the usual float/string rules.
-3. For interactive problems, do not treat transcript samples as ordinary stdin/stdout. Validate the protocol text with `statement-audit` and validate interactor behavior with `interactor_build interaction_scenarios`.
-4. Treat any mismatch as a release blocker.
-5. Classify failures by source: statement text, sample files, solution behavior, or interactor protocol.
+3. For interactive and communication problems, do not treat transcript samples as ordinary stdin/stdout:
+   - Interactive: validate protocol text with `statement-audit`, run live `InteractiveRunner` against sample files and `statement_samples` (expected_output is optional), and verify `interactor_build` `interaction_scenarios`.
+   - Communication: validate `## 通信协议` and multi-stage transcripts with `statement-audit`, run live `CommunicationRunner` (`run_twice` / `grader_linked` / `multi_process`) against sample files / `statement_samples`, and confirm communication budgets (`max_bits` / `max_bytes` / `max_rounds` / `max_queries`) are satisfied.
+4. Treat any mismatch or protocol/budget violation as a release blocker.
+5. Classify failures by source: statement text, sample files, solution behavior, checker, or interactor/communicator/grader protocol.
 6. Re-run validation after fixes before allowing progression.
 
 ## Output Contract

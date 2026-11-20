@@ -34,10 +34,11 @@ def _copy_example_manifest(name: str, problem_dir: str) -> None:
 
 @pytest.mark.asyncio
 async def test_examples_manifests_loadable_and_self_consistent():
-    """三个 example manifest 应能被真实加载且语义字段符合各自类型。"""
+    """四个 example manifest 应能被真实加载且语义字段符合各自类型。"""
     checker = load_manifest(os.path.join(EXAMPLES_DIR, "checker-sample"))
     exact = load_manifest(os.path.join(EXAMPLES_DIR, "exact-sample"))
     interactive = load_manifest(os.path.join(EXAMPLES_DIR, "interactive-sample"))
+    communication = load_manifest(os.path.join(EXAMPLES_DIR, "communication-sample"))
 
     assert checker is not None
     assert checker.special_judge is True
@@ -50,6 +51,16 @@ async def test_examples_manifests_loadable_and_self_consistent():
 
     assert interactive is not None
     assert interactive.interactive is True
+
+    assert communication is not None
+    assert communication.problem_type == "communication"
+    assert communication.protocol is not None
+    assert communication.protocol.mode == "run_twice"
+    assert communication.protocol.max_bits == 12
+    assert communication.oracle_mode == "interactor_only"
+    assert len(communication.subtasks) == 2
+    assert sum(st.score for st in communication.subtasks) == 100
+    assert communication.subtasks[1].dependencies == [1]
 
 
 async def _run_example_generate(concurrency_limit: int) -> list[tuple]:

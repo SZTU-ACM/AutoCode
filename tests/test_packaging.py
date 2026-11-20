@@ -12,7 +12,7 @@ def test_import():
     """测试模块导入。"""
     from autocode_mcp import __version__
 
-    assert __version__ == "3.1.0"
+    assert __version__ == "3.2.0"
 
 
 def test_tool_result():
@@ -137,6 +137,9 @@ def test_all_template_files_exist():
         "generator_template.cpp",
         "checker_template.cpp",
         "interactor_template.cpp",
+        "communicator_run_twice_template.cpp",
+        "grader_template.cpp",
+        "problem_h_template.h",
         "manifest.json",
         "tutorial_template.md",
     ]
@@ -203,6 +206,8 @@ def test_autocode_verify_accepts_valid_manifest(monkeypatch, capsys, tmp_path):
     assert parsed["success"] is True
     assert parsed["missing_paths"] == []
     assert parsed.get("special_judge") is False
+    assert parsed.get("problem_type") == "standard"
+    assert parsed.get("oracle_mode") == "brute"
 
 
 def test_autocode_verify_special_judge_exact_skips_checker_warn(monkeypatch, capsys, tmp_path):
@@ -300,6 +305,53 @@ def test_autocode_verify_spj_warns_without_checker(monkeypatch, capsys, tmp_path
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["special_judge"] is True
     assert parsed["spj_warnings"]
+
+
+def test_autocode_verify_communication_missing_files_and_symlink_escape(monkeypatch, capsys, tmp_path):
+    """autocode-verify 对缺失通信组件返回非 0 退出码，并阻止符号链接逃逸。"""
+    from autocode_mcp.cli.verify import main
+    from autocode_mcp.workflow import default_manifest, save_manifest
+
+    prob = tmp_path / "comm_verify"
+    (prob / "statements").mkdir(parents=True)
+    (prob / "files").mkdir(parents=True)
+    (prob / "statements" / "README.md").write_text("# S\n", encoding="utf-8")
+    (prob / "statements" / "tutorial.md").write_text("# T\n", encoding="utf-8")
+
+    save_manifest(
+        str(prob),
+        default_manifest("Comm", problem_type="communication", protocol_mode="grader_linked"),
+    )
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(prob)])
+    assert main() == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert parsed["protocol_warnings"]
+
+    # Create outbound symlink pretending to be files/grader.cpp
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (prob / "files" / "problem.h").write_text("#pragma once\n", encoding="utf-8")
+    grader_link = prob / "files" / "grader.cpp"
+    try:
+        grader_link.symlink_to(outside)
+    except OSError:
+        pass
+    else:
+        monkeypatch.setattr("sys.argv", ["autocode-verify", str(prob)])
+        assert main() == 1
+        parsed_sym = json.loads(capsys.readouterr().out)
+        assert parsed_sym["success"] is False
+        assert any("symlink escape" in w for w in parsed_sym["protocol_warnings"])
+        grader_link.unlink()
+
+    # Valid local grader.cpp + problem.h passes
+    (prob / "files" / "grader.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["autocode-verify", str(prob)])
+    assert main() == 0
+    parsed_ok = json.loads(capsys.readouterr().out)
+    assert parsed_ok["success"] is True
+    assert parsed_ok["protocol_warnings"] == []
 
 
 # ============== MCP 类型测试 ==============

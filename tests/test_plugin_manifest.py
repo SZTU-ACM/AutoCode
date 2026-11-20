@@ -48,12 +48,85 @@ def test_codex_plugin_manifest_declares_shared_assets():
 
 
 def test_host_manifests_and_package_share_one_version_source():
-    """Claude, Codex, and the importable package must not drift in version."""
+    """Claude, Codex, DSH, AGY, and the importable package must not drift in version."""
     claude = json.loads(Path(".claude-plugin/plugin.json").read_text(encoding="utf-8"))
     codex = json.loads(Path(".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+    dsh = json.loads(Path(".dsh-plugin/package.json").read_text(encoding="utf-8"))
+    agy = json.loads(Path(".antigravity-plugin/plugin.json").read_text(encoding="utf-8"))
     from autocode_mcp import __version__
 
-    assert claude["version"] == codex["version"] == __version__ == project_version()
+    assert (
+        claude["version"]
+        == codex["version"]
+        == dsh["version"]
+        == agy["version"]
+        == __version__
+        == project_version()
+    )
+
+
+def test_antigravity_plugin_manifest_uses_only_supported_fields():
+    """AGY plugin.json must stay strictly within supported top-level schema fields."""
+    manifest = json.loads(Path(".antigravity-plugin/plugin.json").read_text(encoding="utf-8"))
+    allowed_fields = {
+        "name",
+        "displayName",
+        "description",
+        "version",
+        "author",
+        "homepage",
+        "repository",
+        "logo",
+        "suggestedPrompts",
+        "disabled",
+    }
+    assert set(manifest).issubset(allowed_fields)
+    assert manifest["name"] == "autocode"
+    assert manifest["version"] == project_version()
+    assert manifest["description"]
+    assert len(manifest["suggestedPrompts"]) == 3
+    assert all(isinstance(p, str) and p.strip() for p in manifest["suggestedPrompts"])
+    logo_rel = manifest.get("logo")
+    assert isinstance(logo_rel, str) and not logo_rel.startswith(("http://", "https://", "/"))
+    assert not Path(logo_rel).is_absolute()
+    assert ".." not in Path(logo_rel).parts
+    assert Path(logo_rel).is_file()
+
+
+def test_antigravity_mcp_config_and_rules_exist():
+    """AGY native plugin config should expose autocode MCP server and plain-markdown rules."""
+    config = json.loads(Path("mcp_config.json").read_text(encoding="utf-8"))
+    server = config["mcpServers"]["autocode"]
+    assert server["command"] == "uv"
+    assert isinstance(server["args"], list) and server["args"]
+    assert "${PLUGIN_ROOT}" in server["args"]
+    assert "PLUGIN_ROOT" in " ".join(server["args"])
+
+    rules = Path("rules/AGENTS.md").read_text(encoding="utf-8")
+    assert not rules.startswith("---"), "AGY plugin rules/AGENTS.md must be plain markdown without frontmatter"
+    assert "problem_create" in rules
+
+
+def test_sync_plugin_version_check_and_py310_fallback():
+    """sync_plugin_version.py --check succeeds on repo and scopes fallback to [project]."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "sync_plugin_version", Path("scripts/sync_plugin_version.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.main(["--check"]) == 0
+    assert mod.check_versions(expected="0.0.0-mismatch")
+
+    sample_toml = (
+        '[tool.example]\nversion = "9.9.9"\n\n'
+        '[project]\nname = "demo"\nversion = "3.1.0"\n\n'
+        '[tool.other]\nversion = "8.8.8"\n'
+    )
+    assert mod._extract_project_version_fallback(sample_toml) == "3.1.0"
 
 
 def test_mcp_dependency_stays_on_supported_major():

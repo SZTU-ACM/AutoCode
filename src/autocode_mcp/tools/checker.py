@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+from ..utils.checker_judge import verdict_from_run
 from ..utils.compiler import run_binary_with_args
 from ..utils.platform import get_exe_extension
 from .base import Tool, ToolResult, input_schema_from_model
@@ -138,20 +139,8 @@ class CheckerBuildTool(Tool, BuildToolMixin):
                     timeout=5,
                 )
 
-                # Checker 返回码约定 (testlib.h):
-                # 0 = AC, 1 = WA, 2 = PE, 3+ = Fail (checker error)
-                verdict_map = {0: "AC", 1: "WA", 2: "PE"}
-                if run_result.return_code in verdict_map:
-                    actual_verdict = verdict_map[run_result.return_code]
-                elif run_result.return_code >= 3:
-                    # Checker 自身失败，返回 FAIL 而非 WA
-                    actual_verdict = "FAIL"
-                else:
-                    actual_verdict = "WA"
-
-                # 检查是否超时
-                if run_result.timed_out:
-                    actual_verdict = "TLE"
+                # Checker 返回码约定 (testlib.h): 0=AC, 1=WA, 2/4/8=PE, 7=PC, 3/其他=FAIL
+                actual_verdict = verdict_from_run(run_result)
 
                 is_correct = actual_verdict == expected_verdict
                 if is_correct:

@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "problem_name": "Communication Sample",
+  "problem_type": "communication",
+  "interactive": false,
+  "special_judge": false,
+  "stress_comparison": "exact",
+  "oracle_mode": "interactor_only",
+  "time_limit_ms": 2000,
+  "memory_limit_mb": 256,
+  "constraints": {
+    "X": {"min": 0, "max": 15},
+    "mode": {"min": 0, "max": 1}
+  },
+  "protocol": {
+    "mode": "run_twice",
+    "passes": 2,
+    "pass_headers": ["first", "second"],
+    "max_bits": 12,
+    "max_bytes": 2,
+    "max_rounds": 2,
+    "communicator_file": "files/communicator.cpp"
+  },
+  "subtasks": [
+    {
+      "id": 1,
+      "name": "noiseless",
+      "score": 40,
+      "constraints": {"mode": 0},
+      "groups": ["sanity", "coverage"]
+    },
+    {
+      "id": 2,
+      "name": "single-bit-flip",
+      "score": 60,
+      "constraints": {"mode": 1},
+      "dependencies": [1],
+      "groups": ["limit"]
+    }
+  ],
+  "statement_path": "statements/README.md",
+  "tutorial_path": "statements/tutorial.md",
+  "quality_gates": {
+    "require_stress_passed": true,
+    "require_validation_passed": true,
+    "require_tests_verified": true,
+    "require_limit_semantics": true,
+    "require_wrong_solution_kill": true,
+    "require_validator_check": false,
+    "min_limit_case_ratio": 0.5
+  },
+  "solutions": [
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"}
+  ],
+  "case_plan": [
+    {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},
+    {"name": "random-1", "type": "2", "seed": 2, "group": "coverage"},
+    {"name": "extreme-1", "type": "3", "seed": 3, "group": "limit"},
+    {"name": "tle-1", "type": "4", "seed": 4, "group": "limit"}
+  ]
+}

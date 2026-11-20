@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "autocode": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--no-project",
+        "python",
+        "-c",
+        "import os, shutil, subprocess, sys; raw = sys.argv[1] if len(sys.argv) > 1 else ''; root = (raw if raw and raw != '$' + '{PLUGIN_ROOT}' else '') or os.environ.get('PLUGIN_ROOT') or '.'; env = dict(os.environ); pdata = env.get('PLUGIN_DATA'); env.setdefault('UV_PROJECT_ENVIRONMENT', os.path.join(pdata, 'venv')) if pdata else None; uv = shutil.which('uv') or 'uv'; args = [uv, '--directory', os.path.abspath(root), 'run', '--quiet', '--frozen', 'autocode-mcp']; os.execvpe(uv, args, env) if os.name != 'nt' else sys.exit(subprocess.call(args, env=env))",
+        "${PLUGIN_ROOT}"
+      ]
+    }
+  }
+}

@@ -71,16 +71,28 @@ def test_audit_schema_from_model():
     schema = input_schema_from_model(ProblemAuditInput)
     assert schema["type"] == "object"
     props = schema["properties"]
-    assert set(props) == {"problem_dir", "mode", "include_difficulty", "report_path"}
+    assert set(props) == {"problem_dir", "mode", "include_difficulty", "report_path", "standalone"}
     assert props["problem_dir"]["type"] == "string"
     assert props["mode"]["enum"] == ["quick", "full"]
     assert props["mode"]["default"] == "full"
     assert props["include_difficulty"]["type"] == "boolean"
     assert props["include_difficulty"]["default"] is True
+    assert props["standalone"]["type"] == "boolean"
+    assert props["standalone"]["default"] is False
     # report_path is optional (absent from required, nullable string)
     assert "report_path" not in schema["required"]
     assert _non_null(props["report_path"])["type"] == "string"
     assert schema["required"] == ["problem_dir"]
+
+
+def test_pack_polygon_schema_export_formats():
+    schema = input_schema_from_model(ProblemPackPolygonInput)
+    props = schema["properties"]
+    assert "export_formats" in props
+    ef = props["export_formats"]
+    assert ef["type"] == "array"
+    assert ef["items"]["enum"] == ["polygon", "hydro", "qoj"]
+    assert ef["default"] == ["polygon"]
 
 
 def test_file_read_schema_from_model():
@@ -109,7 +121,7 @@ def test_validate_schema_nested_and_enum():
     ss_item = ss["items"]
     assert ss_item["type"] == "object"
     assert set(ss_item["properties"]) == {"input", "expected_output"}
-    assert ss_item["required"] == ["input", "expected_output"]
+    assert ss_item["required"] == ["input"]
     # numeric defaults
     assert props["tolerance"]["type"] == "number"
     assert props["tolerance"]["default"] == 1e-9

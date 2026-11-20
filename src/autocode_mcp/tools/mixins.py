@@ -89,6 +89,7 @@ class BuildToolMixin:
         opt_level: str = "O2",
         timeout: int = 30,
         include_dirs: list[str] | None = None,
+        extra_sources: list[str] | None = None,
     ) -> CompileResult:
         return await compile_cpp(
             source_path,
@@ -98,6 +99,7 @@ class BuildToolMixin:
             std=std,
             opt_level=opt_level,
             include_dirs=include_dirs,
+            extra_sources=extra_sources,
         )
 
     async def build_all(

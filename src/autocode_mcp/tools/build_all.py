@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import os
 
+from pydantic import ValidationError
+
 from .. import TEMPLATES_DIR
+from ..utils.communication_runner import is_safe_stem, safe_resolve_under_root
 from ..utils.compiler import BuildSpec, compile_all
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest, manifest_is_communication
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin
 from .schemas import ProblemBuildAllInput
@@ -26,6 +30,7 @@ _STANDARD_SOURCES = (
 _OPTIONAL_SOURCES = (
     ("files/checker.cpp", "files"),
     ("files/interactor.cpp", "files"),
+    ("files/communicator.cpp", "files"),
 )
 
 
@@ -62,28 +67,126 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
         if not os.path.isdir(problem_dir):
             return ToolResult.fail(f"problem_dir not found: {problem_dir}")
 
+        try:
+            manifest = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+
         extra = [d if os.path.isabs(d) else os.path.join(problem_dir, d) for d in (include_extra_dirs or [])]
         if os.path.isdir(TEMPLATES_DIR):
             extra.append(TEMPLATES_DIR)
 
+        is_grader_linked = (
+            manifest is not None
+            and manifest_is_communication(manifest)
+            and manifest.protocol is not None
+            and manifest.protocol.mode == "grader_linked"
+        )
+        grader_rel: str | None = None
+        grader_inc_dirs: list[str] = []
+        if is_grader_linked and manifest is not None and manifest.protocol is not None:
+            grader_rel = manifest.protocol.grader_file or "files/grader.cpp"
+            resolved_grader = safe_resolve_under_root(problem_dir, grader_rel)
+            if resolved_grader is None:
+                return ToolResult.fail(
+                    f"grader_file path escapes problem_dir: {grader_rel}"
+                )
+            if not os.path.isfile(resolved_grader):
+                return ToolResult.fail(
+                    f"grader_linked communication problem requires {grader_rel}"
+                )
+            files_dir = os.path.join(problem_dir, "files")
+            if os.path.isdir(files_dir):
+                grader_inc_dirs.append(files_dir)
+            if manifest.protocol.header_file:
+                resolved_hdr = safe_resolve_under_root(problem_dir, manifest.protocol.header_file)
+                if resolved_hdr is None:
+                    return ToolResult.fail(
+                        f"header_file path escapes problem_dir: {manifest.protocol.header_file}"
+                    )
+                hdr_dir = os.path.dirname(resolved_hdr)
+                if hdr_dir and os.path.isdir(hdr_dir) and hdr_dir not in grader_inc_dirs:
+                    grader_inc_dirs.append(hdr_dir)
+
+        def _norm_rel(raw: str) -> str:
+            return os.path.normpath(raw.replace("\\", "/")).replace("\\", "/")
+
+        # (rel_path, include_rel_dir, is_solution)
+        candidate_sources: list[tuple[str, str, bool]] = [
+            (_norm_rel(rel), inc, _norm_rel(rel).startswith("solutions/"))
+            for rel, inc in list(_STANDARD_SOURCES) + list(_OPTIONAL_SOURCES)
+        ]
+        seen_rels = {rel for rel, _, _ in candidate_sources}
+
+        if manifest is not None and manifest.protocol is not None:
+            if manifest.protocol.communicator_file:
+                comm_rel = _norm_rel(manifest.protocol.communicator_file)
+                if safe_resolve_under_root(problem_dir, comm_rel) is None:
+                    return ToolResult.fail(
+                        f"communicator_file path escapes problem_dir: {manifest.protocol.communicator_file}"
+                    )
+                if comm_rel not in seen_rels:
+                    candidate_sources.append((comm_rel, os.path.dirname(comm_rel) or "files", False))
+                    seen_rels.add(comm_rel)
+            for part_name in manifest.protocol.participant_solutions:
+                if not is_safe_stem(part_name):
+                    return ToolResult.fail(
+                        f"invalid participant_solutions stem: {part_name!r}"
+                    )
+                part_rel = _norm_rel(f"solutions/{part_name}.cpp")
+                if part_rel not in seen_rels:
+                    candidate_sources.append((part_rel, "solutions", True))
+                    seen_rels.add(part_rel)
+
+        if manifest is not None:
+            for sol_entry in manifest.solutions:
+                if sol_entry.language != "cpp":
+                    continue
+                sol_rel = _norm_rel(sol_entry.path)
+                if safe_resolve_under_root(problem_dir, sol_rel) is None:
+                    return ToolResult.fail(
+                        f"manifest solution path escapes problem_dir: {sol_entry.path}"
+                    )
+                if sol_rel not in seen_rels and sol_rel.endswith(".cpp"):
+                    candidate_sources.append((sol_rel, os.path.dirname(sol_rel) or "solutions", True))
+                    seen_rels.add(sol_rel)
+
         specs: list[BuildSpec] = []
         discovered: list[str] = []
-        for rel, inc in list(_STANDARD_SOURCES) + list(_OPTIONAL_SOURCES):
-            src_path = os.path.join(problem_dir, rel)
+        for rel, inc, is_solution in candidate_sources:
+            src_path = safe_resolve_under_root(problem_dir, rel)
+            if src_path is None:
+                return ToolResult.fail(f"source path escapes problem_dir: {rel}")
             if os.path.isfile(src_path):
                 include_dirs = [os.path.join(problem_dir, inc)] + extra
-                specs.append(BuildSpec(source=rel, include_dirs=include_dirs, compiler=compiler))
+                extra_sources: list[str] | None = None
+                if is_grader_linked and grader_rel and is_solution:
+                    for gi in grader_inc_dirs:
+                        if gi not in include_dirs:
+                            include_dirs.append(gi)
+                    extra_sources = [grader_rel]
+                specs.append(
+                    BuildSpec(
+                        source=rel,
+                        include_dirs=include_dirs,
+                        extra_sources=extra_sources,
+                        compiler=compiler,
+                    )
+                )
                 discovered.append(rel)
 
         if not specs:
             return ToolResult.fail(
-                "No compilable sources found (gen/val/sol/brute/checker/interactor)",
+                "No compilable sources found (gen/val/sol/brute/checker/interactor/communicator)",
                 discovered=[],
             )
 
         exe_ext = get_exe_extension()
         for spec in specs:
-            old_bin = os.path.join(problem_dir, f"{os.path.splitext(spec.source)[0]}{exe_ext}")
+            bin_rel = f"{os.path.splitext(spec.source)[0]}{exe_ext}"
+            old_bin = safe_resolve_under_root(problem_dir, bin_rel)
+            if old_bin is None:
+                return ToolResult.fail(f"binary output path escapes problem_dir: {bin_rel}")
             if os.path.isfile(old_bin):
                 try:
                     os.remove(old_bin)

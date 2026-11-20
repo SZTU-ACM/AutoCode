@@ -7,7 +7,29 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from ..utils.platform import get_exe_extension
-from ..workflow import load_manifest, manifest_uses_testlib_checker
+from ..workflow import (
+    load_manifest,
+    manifest_is_communication,
+    manifest_is_interactive,
+    manifest_uses_testlib_checker,
+)
+
+
+def _resolve_safe_in_problem(problem_dir: Path, rel: str) -> tuple[Path | None, str | None]:
+    """Resolve a manifest-declared path strictly inside ``problem_dir`` (blocking traversal and symlink escapes)."""
+    normalized = rel.replace("\\", "/").strip()
+    if not normalized or "\x00" in normalized:
+        return None, f"invalid path: {rel!r}"
+    raw_path = Path(normalized)
+    if raw_path.is_absolute() or normalized.startswith("/") or any(part == ".." for part in raw_path.parts):
+        return None, f"path escapes problem_dir: {rel}"
+    root = problem_dir.resolve()
+    candidate = (root / raw_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None, f"path resolves outside problem_dir (symlink escape): {rel}"
+    return candidate, None
 
 
 def _check_paths(problem_dir: Path, manifest: dict) -> list[str]:
@@ -15,7 +37,10 @@ def _check_paths(problem_dir: Path, manifest: dict) -> list[str]:
     for key in ("statement_path", "tutorial_path"):
         rel = manifest.get(key)
         if isinstance(rel, str) and rel:
-            if not (problem_dir / rel).exists():
+            resolved, err = _resolve_safe_in_problem(problem_dir, rel)
+            if err is not None:
+                missing.append(f"{rel} ({err})")
+            elif resolved is None or not resolved.exists():
                 missing.append(rel)
     return missing
 
@@ -58,15 +83,49 @@ def main() -> int:
                 f"{get_exe_extension()}"
             )
 
+    protocol_warnings: list[str] = []
+    protocol_mode = manifest_model.protocol.mode if manifest_model.protocol else None
+    if manifest_is_communication(manifest_model) and manifest_model.protocol is not None:
+        if protocol_mode == "grader_linked":
+            grader_rel = manifest_model.protocol.grader_file or "files/grader.cpp"
+            grader_path, grader_err = _resolve_safe_in_problem(problem_dir, grader_rel)
+            if grader_err is not None:
+                protocol_warnings.append(f"invalid grader_file: {grader_err}")
+            elif grader_path is None or not grader_path.is_file():
+                protocol_warnings.append(f"grader_linked communication problem missing {grader_rel}")
+
+            if manifest_model.protocol.header_file:
+                hdr_rel = manifest_model.protocol.header_file
+                hdr_path, hdr_err = _resolve_safe_in_problem(problem_dir, hdr_rel)
+                if hdr_err is not None:
+                    protocol_warnings.append(f"invalid header_file: {hdr_err}")
+                elif hdr_path is None or not hdr_path.is_file():
+                    protocol_warnings.append(f"grader_linked communication problem missing {hdr_rel}")
+        else:
+            comm_rel = manifest_model.protocol.communicator_file or "files/communicator.cpp"
+            comm_path, comm_err = _resolve_safe_in_problem(problem_dir, comm_rel)
+            fallback_interactor = problem_dir / "files" / "interactor.cpp"
+            if comm_err is not None:
+                protocol_warnings.append(f"invalid communicator_file: {comm_err}")
+            elif (comm_path is None or not comm_path.is_file()) and not fallback_interactor.is_file():
+                protocol_warnings.append(
+                    f"communication problem ({protocol_mode}) missing {comm_rel} (or files/interactor.cpp)"
+                )
+
     result = {
-        "success": len(missing) == 0 and len(spj_warnings) == 0,
+        "success": len(missing) == 0 and len(spj_warnings) == 0 and len(protocol_warnings) == 0,
         "problem_dir": str(problem_dir),
-        "interactive": manifest.get("interactive", False),
+        "problem_type": manifest_model.problem_type,
+        "oracle_mode": manifest_model.oracle_mode,
+        "protocol_mode": protocol_mode,
+        "interactive": manifest_is_interactive(manifest_model),
         "special_judge": spj,
         "stress_comparison": manifest.get("stress_comparison", "exact"),
         "case_plan_count": len(manifest.get("case_plan", [])),
+        "subtask_count": len(manifest_model.subtasks),
         "missing_paths": missing,
         "spj_warnings": spj_warnings,
+        "protocol_warnings": protocol_warnings,
     }
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["success"] else 1

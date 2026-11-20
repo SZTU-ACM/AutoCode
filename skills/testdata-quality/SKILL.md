@@ -7,9 +7,13 @@ description: "Verify final tests with hard quality gates: integrity, consistency
 
 Final test data must pass:
 
-1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`. When `manifest.json` has `special_judge: true` **and** `stress_comparison: "checker"`, `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they still compare strings to `.ans`.
+1. `problem_verify_tests` checks: `file_count` / `answer_consistency` / `validator` / `no_empty`.
+   - SPJ (`special_judge: true` + `stress_comparison: "checker"`): `answer_consistency` and `wrong_solution_kill` use `files/checker` (testlib); with `stress_comparison: "exact"` they compare strings to `.ans`.
+   - Interactive (`problem_type: "interactive"`): runs live dual-process `InteractiveRunner` against `files/interactor`.
+   - Communication (`problem_type: "communication"`): runs `CommunicationRunner` (`run_twice` / `grader_linked` / `multi_process`), collects `protocol_metrics` (`max_bits_used` / `max_bytes_used` / `max_rounds` / `max_queries`), and verifies budgets are never exceeded.
 2. `limit_ratio` and `limit_semantics` (type=3 and type=4 must not be semantically overlapping).
-3. `wrong_solution_kill`: for each `role=wrong` solution in `manifest.json`, behavior depends on `expected` (default `fail`). **`expected=fail`**: at least one final test must be non-AC under checker mode, or not match `.ans` under exact mode (wrong solution must be "killed"). **`expected=pass`**: every final test must be AC / match `.ans` (e.g. alternate valid output). The tool reports `killed`, `expected`, and a `hint` per wrong solution; interpret them together.
+3. `wrong_solution_kill`: for each `role=wrong` solution in `manifest.json`, behavior depends on `expected` (default `fail`). **`expected=fail`**: at least one final test must be non-AC under checker/interactive/communication mode (including over-budget communication wrong solutions), or not match `.ans` under exact mode (wrong solution must be "killed"). **`expected=pass`**: every final test must be AC / match `.ans` (e.g. alternate valid output). The tool reports `killed`, `expected`, and a `hint` per wrong solution; interpret them together.
+4. Subtasks (when defined in `manifest.json`): verify every subtask maps to valid tests, score sum and dependencies are consistent, and multi-OJ export (`polygon` / `hydro` / `qoj`) matches the intended subtask partition.
 
 ## Additional Required Checks
 

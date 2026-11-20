@@ -17,6 +17,11 @@ def main() -> int:
         action="store_true",
         help="Skip difficulty signal generation",
     )
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="Audit an arbitrary problem directory directly without requiring prior workflow state",
+    )
     args = parser.parse_args()
 
     async def run() -> dict:
@@ -26,6 +31,7 @@ def main() -> int:
             mode=args.mode,
             include_difficulty=not args.no_difficulty,
             report_path=args.report_path,
+            standalone=args.standalone,
         )
         return result.to_dict()
 

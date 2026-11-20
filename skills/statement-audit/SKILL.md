@@ -36,6 +36,18 @@ For `interactive: true`, require all items below before `go`:
 - Transcript examples identify lines from the judge and contestant and are consistent with the protocol.
 - If the judge is adaptive, the maintained invariant is stated so contestants know what they are solving.
 
+## Communication Statement Checklist
+
+For `problem_type: "communication"`, require all items below before `go`:
+
+- `## 通信协议` section is present and specifies the exact communication mode (`run_twice` / `grader_linked` / `multi_process`).
+- Process isolation rules (no cross-pass globals, temp files, or shared state) or exact `problem.h` C++ function signatures are stated unambiguously.
+- Numeric communication budgets (`max_bits`, `max_bytes`, `max_rounds`, `max_queries`) and over-budget verdict/scoring rules are stated explicitly.
+- Channel transformation / noise / adversarial corruption model is defined (or explicitly stated as noiseless).
+- Invalid output format, premature EOF, extra output, and multi-stage verdicts are defined.
+- Sample section provides a complete multi-stage transcript (e.g., Pass 1 -> Channel -> Pass 2) consistent with `communicator.cpp` / `grader.cpp` and `sol.cpp`.
+- If subtasks are defined in `manifest.json`, subtask scores, constraints, and dependencies match the statement.
+
 ## Output Format
 
 - `decision`: `go` / `no_go`

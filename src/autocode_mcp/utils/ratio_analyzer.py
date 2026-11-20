@@ -265,10 +265,40 @@ class EmpiricalRatioAnalyzer:
 
         max_sample = valid_samples[-1]
         max_time = float(max_sample["cpu_time_ms"])
+        all_times = [float(s["cpu_time_ms"]) for s in valid_samples]
+        peak_time = max(all_times)
+        min_time = min(all_times)
         max_n = int(max_sample.get("n", 0))
         headroom_ratio = max_time / time_limit_ms if time_limit_ms > 0 else 1.0
+        peak_headroom = peak_time / time_limit_ms if time_limit_ms > 0 else 1.0
 
         if not is_alpha_match:
+            # 当全部样本耗时均处于 OS 计时底噪区间（<=15ms 且峰值 <5% TL），
+            # 仅在不存在干净的高信噪比超阶增长信号（R^2>=0.90 且首尾缩放 >=4x 且最大点 >=2ms）时
+            # 才按底噪豁免，既避免 O(1)/O(log n) 亚毫秒抖动误报，又不放过干净的 O(n^2)/O(n^3) 曲线。
+            has_clean_high_order_signal = (
+                alpha > expected_range[1]
+                and r_squared >= 0.90
+                and (max_time / max(min_time, 0.1)) >= 4.0
+                and max_time >= 2.0
+            )
+            if peak_time <= 15.0 and peak_headroom < 0.05 and not has_clean_high_order_signal:
+                return {
+                    "passed": True,
+                    "verdict": "verified_within_noise_floor",
+                    "claimed_complexity": norm_claimed,
+                    "fitted_complexity": norm_claimed,
+                    "fitted_alpha": round(alpha, 2),
+                    "r_squared": round(r_squared, 3),
+                    "samples": samples,
+                    "growth_ratios": growth_ratios,
+                    "max_scale_headroom_ratio": round(headroom_ratio, 3),
+                    "noise_floor_note": (
+                        f"All scale samples completed within OS timer noise floor "
+                        f"(peak={peak_time:.2f}ms <= 15ms, headroom={peak_headroom:.3f})."
+                    ),
+                }
+
             # 仅在规模足够大（跨越硬件缓存）且耗时余量充足时允许缓存跳跃容差
             if alpha > expected_range[1] and len(valid_samples) >= 3 and headroom_ratio < 0.40 and max_n >= 50000:
                 sub_samples = valid_samples[:-1]
