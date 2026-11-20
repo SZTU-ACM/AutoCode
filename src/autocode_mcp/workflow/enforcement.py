@@ -7,6 +7,7 @@ preflight checks and workflow state transitions in this module.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 from collections.abc import Callable
@@ -43,6 +44,93 @@ class GateViolation:
     gate: str
     reason: str
     next_action: str
+
+
+def _file_sha256(problem_dir: str, rel_path: str) -> str | None:
+    path = Path(problem_dir) / rel_path
+    if not path.is_file():
+        return None
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _matches_canonical_source(
+    problem_dir: str,
+    tool_input: dict[str, Any],
+    canonical_rel: str,
+) -> bool:
+    """Return True when tool_input audited the canonical source file (not an unrelated path/inline snippet)."""
+    source_path = tool_input.get("source_path")
+    if isinstance(source_path, str) and source_path.strip():
+        resolved = _saved_relative_path(problem_dir, source_path)
+        if resolved != canonical_rel:
+            return False
+    code = tool_input.get("code")
+    if isinstance(code, str):
+        canonical_path = Path(problem_dir) / canonical_rel
+        if canonical_path.is_file():
+            try:
+                disk_text = canonical_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return False
+            if code.replace("\r\n", "\n") != disk_text.replace("\r\n", "\n"):
+                return False
+    return True
+
+
+def _sync_solution_hashes(problem_dir: str, state: dict[str, Any]) -> None:
+    """Invalidate cached build/audit/downstream gates if backing source file hashes drifted."""
+    cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
+    sol_source_hash = state.get("sol_source_hash")
+    sol_drifted = (
+        isinstance(sol_source_hash, str) and bool(sol_source_hash) and cur_sol != sol_source_hash
+    )
+    if sol_drifted:
+        state.update(
+            {
+                "sol_built": False,
+                "solution_analyzed": False,
+                "std_audited": False,
+                "sol_source_hash": None,
+                "sol_analyzed_hash": None,
+                "std_audited_hash": None,
+                "std_claimed_complexity": None,
+            }
+        )
+    std_hash = state.get("std_audited_hash")
+    if isinstance(std_hash, str) and std_hash and cur_sol != std_hash:
+        state["std_audited"] = False
+        state["std_audited_hash"] = None
+    analyzed_hash = state.get("sol_analyzed_hash")
+    if isinstance(analyzed_hash, str) and analyzed_hash and cur_sol != analyzed_hash:
+        state["solution_analyzed"] = False
+        state["sol_analyzed_hash"] = None
+
+    cur_brute = _file_sha256(problem_dir, "solutions/brute.cpp")
+    brute_source_hash = state.get("brute_source_hash")
+    brute_drifted = (
+        isinstance(brute_source_hash, str)
+        and bool(brute_source_hash)
+        and cur_brute != brute_source_hash
+    )
+    if brute_drifted:
+        state.update(
+            {
+                "brute_built": False,
+                "brute_audited": False,
+                "brute_source_hash": None,
+                "brute_audited_hash": None,
+            }
+        )
+    brute_hash = state.get("brute_audited_hash")
+    if isinstance(brute_hash, str) and brute_hash and cur_brute != brute_hash:
+        state["brute_audited"] = False
+        state["brute_audited_hash"] = None
+
+    if sol_drifted or brute_drifted:
+        _invalidate_downstream(problem_dir, state)
 
 
 def _state_problem_type(state: dict[str, Any]) -> str:
@@ -239,7 +327,6 @@ _DOWNSTREAM_INVALIDATING_TOOLS = frozenset(
     {
         "problem_create",
         "solution_build",
-        "problem_build_all",
         "solution_analyze",
         "solution_audit_std",
         "solution_audit_brute",
@@ -304,6 +391,11 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "sol_source_hash": None,
+                "sol_analyzed_hash": None,
+                "std_audited_hash": None,
+                "brute_source_hash": None,
+                "brute_audited_hash": None,
                 "std_claimed_complexity": None,
                 "validator_ready": False,
                 "validator_accuracy": None,
@@ -376,12 +468,21 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "sol_built": False,
                 "solution_analyzed": False,
                 "std_audited": False,
-                "brute_audited": False,
+                "sol_source_hash": None,
+                "sol_analyzed_hash": None,
+                "std_audited_hash": None,
                 "std_claimed_complexity": None,
             }
         )
     elif relative == "solutions/brute.cpp":
-        state.update({"brute_built": False, "brute_audited": False})
+        state.update(
+            {
+                "brute_built": False,
+                "brute_audited": False,
+                "brute_source_hash": None,
+                "brute_audited_hash": None,
+            }
+        )
     elif relative == "files/val.cpp":
         state.update({"validator_ready": False, "validator_accuracy": None})
     elif relative == "files/gen.cpp":
@@ -417,6 +518,11 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "sol_source_hash": None,
+                "sol_analyzed_hash": None,
+                "std_audited_hash": None,
+                "brute_source_hash": None,
+                "brute_audited_hash": None,
                 "std_claimed_complexity": None,
             }
         )
@@ -585,6 +691,11 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
         "solution_analyzed": False,
         "std_audited": False,
         "brute_audited": False,
+        "sol_source_hash": None,
+        "sol_analyzed_hash": None,
+        "std_audited_hash": None,
+        "brute_source_hash": None,
+        "brute_audited_hash": None,
         "validator_ready": False,
         "validator_accuracy": None,
         "generator_built": False,
@@ -627,6 +738,7 @@ def load_workflow_state(problem_dir: str) -> dict[str, Any]:
             state["protocol_mode"] = manifest.protocol.mode if manifest.protocol else None
             state["interactive"] = bool(manifest.interactive)
             state["quality_gates"] = manifest.quality_gates.model_dump(mode="json")
+    _sync_solution_hashes(problem_dir, state)
     return state
 
 
@@ -703,6 +815,126 @@ def _append_history(state: dict[str, Any], tool: str, success: bool, data: dict[
     state["history"] = history[-200:]
 
 
+def _apply_problem_build_all(
+    problem_dir: str,
+    state: dict[str, Any],
+    data: dict[str, Any],
+) -> None:
+    """Apply granular per-target build/invalidation state for problem_build_all."""
+    compiled = data.get("compiled", {}) if isinstance(data.get("compiled"), dict) else {}
+    failures = data.get("failures", {}) if isinstance(data.get("failures"), dict) else {}
+
+    custom_comm_files: set[str] = set()
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    if manifest is not None and manifest.protocol is not None and manifest.protocol.communicator_file:
+        norm = _saved_relative_path(problem_dir, manifest.protocol.communicator_file)
+        if norm:
+            custom_comm_files.add(norm)
+
+    comm_targets = {"files/interactor.cpp", "files/communicator.cpp"} | custom_comm_files
+    invalidate_full = False
+    invalidate_verify_only = False
+
+    # Failed targets had their old binaries removed prior to compilation; reset their gates.
+    for rel in failures:
+        if rel == "solutions/sol.cpp":
+            state.update(
+                {
+                    "sol_built": False,
+                    "solution_analyzed": False,
+                    "std_audited": False,
+                    "sol_source_hash": None,
+                    "sol_analyzed_hash": None,
+                    "std_audited_hash": None,
+                    "std_claimed_complexity": None,
+                }
+            )
+            invalidate_full = True
+        elif rel == "solutions/brute.cpp":
+            state.update(
+                {
+                    "brute_built": False,
+                    "brute_audited": False,
+                    "brute_source_hash": None,
+                    "brute_audited_hash": None,
+                }
+            )
+            invalidate_full = True
+        elif rel == "files/gen.cpp":
+            state["generator_built"] = False
+            invalidate_full = True
+        elif rel == "files/val.cpp":
+            state.update({"validator_ready": False, "validator_accuracy": None})
+            invalidate_full = True
+        elif rel == "files/checker.cpp":
+            state.update({"checker_ready": False, "checker_accuracy": None})
+            invalidate_full = True
+        elif rel in comm_targets:
+            state.update({"interactor_ready": False, "interaction_scenarios": {}})
+            invalidate_full = True
+        elif isinstance(rel, str) and rel.startswith("files/"):
+            invalidate_full = True
+        elif isinstance(rel, str) and rel.startswith("solutions/"):
+            invalidate_verify_only = True
+
+    for rel in compiled:
+        if rel == "solutions/sol.cpp":
+            cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
+            sol_changed = (
+                (not bool(state.get("sol_built")))
+                or cur_sol is None
+                or cur_sol != state.get("sol_source_hash")
+            )
+            state["sol_built"] = True
+            state["sol_source_hash"] = cur_sol
+            if sol_changed:
+                state.update(
+                    {
+                        "solution_analyzed": False,
+                        "std_audited": False,
+                        "sol_analyzed_hash": None,
+                        "std_audited_hash": None,
+                        "std_claimed_complexity": None,
+                    }
+                )
+                invalidate_full = True
+        elif rel == "solutions/brute.cpp":
+            cur_brute = _file_sha256(problem_dir, "solutions/brute.cpp")
+            brute_changed = (
+                (not bool(state.get("brute_built")))
+                or cur_brute is None
+                or cur_brute != state.get("brute_source_hash")
+            )
+            state["brute_built"] = True
+            state["brute_source_hash"] = cur_brute
+            if brute_changed:
+                if cur_brute is None or cur_brute != state.get("brute_audited_hash"):
+                    state.update({"brute_audited": False, "brute_audited_hash": None})
+                invalidate_full = True
+        elif rel == "files/gen.cpp":
+            state["generator_built"] = True
+            invalidate_full = True
+        elif isinstance(rel, str) and (rel in comm_targets or rel.startswith("files/")):
+            invalidate_full = True
+        elif isinstance(rel, str) and rel.startswith("solutions/"):
+            invalidate_verify_only = True
+
+    if invalidate_full:
+        _invalidate_downstream(problem_dir, state)
+    elif invalidate_verify_only:
+        state.update(
+            {
+                "tests_verified": False,
+                "verify_signals": {},
+                "packaged": False,
+            }
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+
+
 def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], success: bool, data: dict[str, Any]) -> dict[str, Any]:
     state = load_workflow_state(problem_dir)
     if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
@@ -741,6 +973,8 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         elif not success:
             state["packaged"] = False
             set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+    elif tool_name == "problem_build_all":
+        _apply_problem_build_all(problem_dir, state, data)
     elif tool_name == "problem_verify_tests":
         results = data.get("results", {})
         ratio = results.get("limit_ratio", {}) if isinstance(results, dict) else {}
@@ -751,10 +985,10 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         state["tests_verified"] = bool(success and data.get("passed", False) and ratio_ok)
     elif not success:
         resets: dict[str, tuple[str, ...]] = {
-            "solution_analyze": ("solution_analyzed",),
+            "solution_analyze": ("solution_analyzed", "sol_analyzed_hash"),
             "validator_build": ("validator_ready", "validator_accuracy"),
-            "solution_audit_std": ("std_audited",),
-            "solution_audit_brute": ("brute_audited",),
+            "solution_audit_std": ("std_audited", "std_audited_hash"),
+            "solution_audit_brute": ("brute_audited", "brute_audited_hash"),
             "generator_build": ("generator_built",),
             "stress_test_run": ("stress_completed_rounds", "stress_total_rounds", "stress_passed"),
             "checker_build": ("checker_ready", "checker_accuracy"),
@@ -762,7 +996,14 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
             "problem_pack_polygon": ("packaged",),
         }
         for key in resets.get(tool_name, ()):
-            state[key] = 0 if key.endswith("rounds") else ({} if key.endswith("scenarios") else False)
+            if key.endswith("_hash"):
+                state[key] = None
+            elif key.endswith("rounds"):
+                state[key] = 0
+            elif key.endswith("scenarios"):
+                state[key] = {}
+            else:
+                state[key] = False
         if tool_name == "solution_build":
             solution_type = tool_input.get("solution_type")
             if solution_type == "sol":
@@ -771,12 +1012,21 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                         "sol_built": False,
                         "solution_analyzed": False,
                         "std_audited": False,
-                        "brute_audited": False,
+                        "sol_source_hash": None,
+                        "sol_analyzed_hash": None,
+                        "std_audited_hash": None,
                         "std_claimed_complexity": None,
                     }
                 )
             elif solution_type == "brute":
-                state.update({"brute_built": False, "brute_audited": False})
+                state.update(
+                    {
+                        "brute_built": False,
+                        "brute_audited": False,
+                        "brute_source_hash": None,
+                        "brute_audited_hash": None,
+                    }
+                )
         elif tool_name == "problem_validate":
             state.update(
                 {
@@ -811,6 +1061,11 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "sol_source_hash": None,
+                "sol_analyzed_hash": None,
+                "std_audited_hash": None,
+                "brute_source_hash": None,
+                "brute_audited_hash": None,
                 "std_claimed_complexity": None,
                 "validator_ready": False,
                 "validator_accuracy": None,
@@ -822,41 +1077,46 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                 "statement_dirty": False,
             }
         )
-    elif tool_name == "problem_build_all" and success:
-        compiled = data.get("compiled", {})
-        if isinstance(compiled, dict):
-            if "solutions/sol.cpp" in compiled:
-                state.update(
-                    {
-                        "sol_built": True,
-                        "solution_analyzed": False,
-                        "std_audited": False,
-                        "brute_audited": False,
-                        "std_claimed_complexity": None,
-                    }
-                )
-            if "solutions/brute.cpp" in compiled:
-                state.update({"brute_built": True, "brute_audited": False})
-            if "files/gen.cpp" in compiled:
-                state["generator_built"] = True
     elif tool_name == "solution_build":
         solution_type = tool_input.get("solution_type")
         if solution_type == "sol":
-            state.update(
-                {
-                    "sol_built": True,
-                    "solution_analyzed": False,
-                    "std_audited": False,
-                    "brute_audited": False,
-                    "std_claimed_complexity": None,
-                }
-            )
+            cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
+            sol_changed = cur_sol is None or cur_sol != state.get("sol_source_hash")
+            state["sol_built"] = True
+            state["sol_source_hash"] = cur_sol
+            if sol_changed:
+                state.update(
+                    {
+                        "solution_analyzed": False,
+                        "std_audited": False,
+                        "sol_analyzed_hash": None,
+                        "std_audited_hash": None,
+                        "std_claimed_complexity": None,
+                    }
+                )
         elif solution_type == "brute":
-            state.update({"brute_built": True, "brute_audited": False})
+            cur_brute = _file_sha256(problem_dir, "solutions/brute.cpp")
+            brute_changed = cur_brute is None or cur_brute != state.get("brute_source_hash")
+            state["brute_built"] = True
+            state["brute_source_hash"] = cur_brute
+            if brute_changed and (
+                cur_brute is None or cur_brute != state.get("brute_audited_hash")
+            ):
+                state.update({"brute_audited": False, "brute_audited_hash": None})
     elif tool_name == "solution_analyze":
         solution_type = tool_input.get("solution_type", "sol")
-        if solution_type == "sol":
-            state.update({"solution_analyzed": True, "std_audited": False, "brute_audited": False})
+        if solution_type == "sol" and _matches_canonical_source(
+            problem_dir, tool_input, "solutions/sol.cpp"
+        ):
+            cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
+            state.update(
+                {
+                    "solution_analyzed": True,
+                    "sol_analyzed_hash": cur_sol,
+                    "std_audited": False,
+                    "std_audited_hash": None,
+                }
+            )
             complexity = data.get("estimated_complexity") or data.get("final_complexity") or data.get("worst_case_complexity")
             if complexity is not None:
                 state["std_complexity"] = complexity
@@ -867,15 +1127,27 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
             if "recommended_stress_params" in data:
                 state["recommended_stress_params"] = data["recommended_stress_params"]
     elif tool_name == "solution_audit_std":
-        state["std_audited"] = True
-        claimed = data.get("claimed_complexity") or tool_input.get("claimed_complexity")
-        if isinstance(claimed, str) and claimed.strip():
-            state["std_claimed_complexity"] = claimed.strip()
+        audit_passed = data.get("passed", True) is not False
+        if not audit_passed:
+            state["std_audited"] = False
+            state["std_audited_hash"] = None
+        elif _matches_canonical_source(problem_dir, tool_input, "solutions/sol.cpp"):
+            state["std_audited"] = True
+            state["std_audited_hash"] = _file_sha256(problem_dir, "solutions/sol.cpp")
+            claimed = data.get("claimed_complexity") or tool_input.get("claimed_complexity")
+            if isinstance(claimed, str) and claimed.strip():
+                state["std_claimed_complexity"] = claimed.strip()
     elif tool_name == "solution_audit_brute":
-        state["brute_audited"] = True
-        for key in ("brute_complexity", "recommended_stress_params"):
-            if key in data:
-                state[key] = data[key]
+        audit_passed = data.get("passed", True) is not False
+        if not audit_passed:
+            state["brute_audited"] = False
+            state["brute_audited_hash"] = None
+        elif _matches_canonical_source(problem_dir, tool_input, "solutions/brute.cpp"):
+            state["brute_audited"] = True
+            state["brute_audited_hash"] = _file_sha256(problem_dir, "solutions/brute.cpp")
+            for key in ("brute_complexity", "recommended_stress_params"):
+                if key in data:
+                    state[key] = data[key]
     elif tool_name == "validator_build":
         accuracy = data.get("accuracy")
         state["validator_accuracy"] = accuracy

@@ -298,3 +298,168 @@ async def test_interactor_build_persists_scenarios_for_verify_tests():
         self_test = await verifier._check_interactor_self_test(tmpdir, 10)
         assert self_test["passed"] is True
         assert self_test["total"] == 7
+
+
+async def test_interactor_resolves_relative_and_cpp_reference_and_default_sol():
+    """传入相对路径或 .cpp 源码路径时应自动映射/编译为可执行文件，且省略时自动探测 solutions/sol。"""
+    import shutil
+
+    if not shutil.which("g++"):
+        pytest.skip("g++ not available")
+
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.utils.judge_runner import InteractiveRunner
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    tool = InteractorBuildTool()
+    sol_tool = SolutionBuildTool()
+    exe_ext = get_exe_extension()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 1. 只存在 solutions/sol.cpp（未提前编译）+ 相对 .cpp 路径 -> 自动编译而非报 PermissionError
+        os.makedirs(os.path.join(tmpdir, "solutions"), exist_ok=True)
+        sol_cpp = os.path.join(tmpdir, "solutions", "sol.cpp")
+        with open(sol_cpp, "w", encoding="utf-8") as f:
+            f.write(SIMPLE_SOLUTION)
+        mutant_cpp = os.path.join(tmpdir, "solutions", "wrong_m.cpp")
+        with open(mutant_cpp, "w", encoding="utf-8") as f:
+            f.write(WRONG_SOLUTION)
+
+        res_cpp = await tool.execute(
+            problem_dir=tmpdir,
+            code=INTERACTOR_CODE,
+            reference_solution_path="solutions/sol.cpp",
+            mutant_solutions=["solutions/wrong_m.cpp"],
+            test_inputs=["5\n", "7\n"],
+        )
+        assert res_cpp.success, res_cpp.error
+        assert res_cpp.data["pass_rate"] == 1.0
+        assert res_cpp.data["fail_rate"] == 1.0
+        assert res_cpp.data["reference_solution_binary"].endswith(f"sol{exe_ext}")
+
+        # 2. 传入相对二进制路径 solutions/sol
+        res_rel = await tool.execute(
+            problem_dir=tmpdir,
+            code=INTERACTOR_CODE,
+            reference_solution_path=f"solutions/sol{exe_ext}",
+            test_inputs=["9\n"],
+        )
+        assert res_rel.success, res_rel.error
+        assert res_rel.data["pass_rate"] == 1.0
+
+        # 3. 省略 reference_solution_path 但传入 test_inputs -> 自动解析已编译 solutions/sol
+        sol_ok = await sol_tool.execute(problem_dir=tmpdir, solution_type="sol", code=SIMPLE_SOLUTION)
+        assert sol_ok.success
+        res_auto = await tool.execute(
+            problem_dir=tmpdir,
+            code=INTERACTOR_CODE,
+            test_inputs=["6\n"],
+        )
+        assert res_auto.success, res_auto.error
+        assert res_auto.data["pass_total"] == 1
+        assert res_auto.data["pass_rate"] == 1.0
+
+        # 4. 非可执行普通文件（非 .cpp）应返回清晰提示而非 PermissionError
+        note_file = os.path.join(tmpdir, "solutions", "not_exec.txt")
+        with open(note_file, "w", encoding="utf-8") as f:
+            f.write("plain text\n")
+        if os.name != "nt":
+            os.chmod(note_file, 0o644)
+            res_nonexec = await tool.execute(
+                problem_dir=tmpdir,
+                code=INTERACTOR_CODE,
+                reference_solution_path="solutions/not_exec.txt",
+                test_inputs=["5\n"],
+            )
+            assert not res_nonexec.success
+            assert "not executable" in (res_nonexec.error or "").lower()
+
+            # 5. InteractiveRunner 直接收到 .cpp 源码时也返回 FAIL 而非抛出 PermissionError
+            direct_res = await InteractiveRunner.run(
+                interactor_exe=res_auto.data["binary_path"],
+                solution_exe=sol_cpp,
+                input_data="5\n",
+                time_limit_ms=2000.0,
+                cwd=tmpdir,
+            )
+            assert direct_res.verdict == "FAIL"
+            assert "not executable" in direct_res.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_interactor_path_containment_mutant_dedup_and_oserror_fail(tmp_path):
+    """回归：绝对路径逃逸、派生二进制符号链接逃逸应阻断；.cpp mutant 不应与自动解析的 solutions/sol 冲突；OSError 返回 FAIL。"""
+    import shutil
+
+    if not shutil.which("g++"):
+        pytest.skip("g++ not available")
+
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.utils.judge_runner import InteractiveRunner
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    tool = InteractorBuildTool()
+    sol_tool = SolutionBuildTool()
+    exe_ext = get_exe_extension()
+
+    pdir = tmp_path / "prob"
+    outside = tmp_path / "outside"
+    (pdir / "solutions").mkdir(parents=True)
+    outside.mkdir(parents=True)
+
+    # 1. Absolute path outside problem_dir must be rejected
+    out_cpp = outside / "evil.cpp"
+    out_cpp.write_text(SIMPLE_SOLUTION, encoding="utf-8")
+    res_escape = await tool.execute(
+        problem_dir=str(pdir),
+        code=INTERACTOR_CODE,
+        reference_solution_path=str(out_cpp),
+        test_inputs=["5\n"],
+    )
+    assert not res_escape.success
+    assert "escapes" in (res_escape.error or "").lower()
+
+    # 2. Symlink at derived binary path escaping problem_dir must be rejected
+    if os.name != "nt":
+        in_cpp = pdir / "solutions" / "linked.cpp"
+        in_cpp.write_text(SIMPLE_SOLUTION, encoding="utf-8")
+        outside_bin = outside / "victim"
+        outside_bin.write_bytes(b"victim")
+        (pdir / "solutions" / f"linked{exe_ext}").symlink_to(outside_bin)
+        res_sym = await tool.execute(
+            problem_dir=str(pdir),
+            code=INTERACTOR_CODE,
+            reference_solution_path="solutions/linked.cpp",
+            test_inputs=["5\n"],
+        )
+        assert not res_sym.success
+        assert "escapes" in (res_sym.error or "").lower()
+        assert outside_bin.read_bytes() == b"victim"
+
+    # 3. mutant_solutions=["solutions/sol.cpp"] must NOT auto-select solutions/sol as reference too
+    sol_ok = await sol_tool.execute(problem_dir=str(pdir), solution_type="sol", code=WRONG_SOLUTION)
+    assert sol_ok.success
+    res_dedup = await tool.execute(
+        problem_dir=str(pdir),
+        code=INTERACTOR_CODE,
+        mutant_solutions=["solutions/sol.cpp"],
+        test_inputs=["5\n"],
+    )
+    assert res_dedup.success, res_dedup.error
+    assert res_dedup.data["pass_total"] == 0
+    assert res_dedup.data["fail_rate"] == 1.0
+
+    # 4. Executable file with invalid binary format (triggers OSError ENOEXEC) returns FAIL instead of raising
+    if os.name != "nt":
+        bad_exec = pdir / "solutions" / "bad_magic_exec"
+        bad_exec.write_bytes(b"\x00\x01\x02\x03not-an-elf-or-macho")
+        os.chmod(bad_exec, 0o755)
+        jres = await InteractiveRunner.run(
+            interactor_exe=res_dedup.data["binary_path"],
+            solution_exe=str(bad_exec),
+            input_data="5\n",
+            time_limit_ms=2000.0,
+            cwd=str(pdir),
+        )
+        assert jres.verdict == "FAIL"
+        assert "failed to start" in jres.detail.lower() or "exec" in jres.detail.lower()

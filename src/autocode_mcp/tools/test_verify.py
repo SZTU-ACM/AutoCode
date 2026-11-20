@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -45,6 +46,93 @@ from .schemas import ProblemVerifyTestsInput
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
 _VERIFY_CONCURRENCY = 4
+
+
+def _validate_tle_policy_params(
+    tle_kill_factor: float | None,
+    slowdown_kill_ratio: float | None,
+) -> str | None:
+    """Validate runtime TLE policy parameters (rejects bool, NaN/Inf, out-of-range)."""
+    if tle_kill_factor is not None:
+        if (
+            isinstance(tle_kill_factor, bool)
+            or not isinstance(tle_kill_factor, int | float)
+            or not math.isfinite(float(tle_kill_factor))
+            or not (0.0 < float(tle_kill_factor) <= 5.0)
+        ):
+            return (
+                f"invalid tle_kill_factor: {tle_kill_factor!r}; "
+                "must be a finite number in (0, 5.0]"
+            )
+    if slowdown_kill_ratio is not None:
+        if (
+            isinstance(slowdown_kill_ratio, bool)
+            or not isinstance(slowdown_kill_ratio, int | float)
+            or not math.isfinite(float(slowdown_kill_ratio))
+            or not (float(slowdown_kill_ratio) > 1.0)
+        ):
+            return (
+                f"invalid slowdown_kill_ratio: {slowdown_kill_ratio!r}; "
+                "must be a finite number > 1.0"
+            )
+    return None
+
+
+def _timing_cache_fingerprint(
+    problem_dir: str,
+    tests_dir: str,
+    sol_name: str,
+    in_files: list[str],
+    manifest: AutoCodeManifest | None = None,
+) -> str:
+    """Compute a compact fingerprint for std per-test timing cache validation."""
+    exe_ext = get_exe_extension()
+    sol_mtimes: list[tuple[str, int]] = []
+    for cand in (
+        os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}"),
+        os.path.join(problem_dir, f"{sol_name}{exe_ext}"),
+    ):
+        if os.path.isfile(cand):
+            try:
+                st = os.stat(cand)
+                sol_mtimes.append((os.path.realpath(cand), st.st_mtime_ns))
+            except OSError:
+                pass
+            break
+    if (
+        not sol_mtimes
+        and manifest is not None
+        and manifest_is_communication(manifest)
+        and manifest.protocol is not None
+        and manifest.protocol.participant_solutions
+        and sol_name == "sol"
+    ):
+        for part in resolve_participant_binaries(problem_dir, manifest, None, exe_ext) or []:
+            try:
+                st = os.stat(part)
+                sol_mtimes.append((os.path.realpath(part), st.st_mtime_ns))
+            except OSError:
+                pass
+
+    file_meta: list[tuple[str, int, int]] = []
+    for fname in sorted(in_files):
+        fpath = os.path.join(tests_dir, fname)
+        try:
+            st = os.stat(fpath)
+            file_meta.append((fname, st.st_size, st.st_mtime_ns))
+        except OSError:
+            file_meta.append((fname, -1, -1))
+
+    payload = json.dumps(
+        {
+            "tests_dir": os.path.realpath(tests_dir),
+            "sol_name": sol_name,
+            "sol_mtimes": sol_mtimes,
+            "files": file_meta,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class ProblemVerifyTestsTool(Tool):
@@ -88,8 +176,14 @@ class ProblemVerifyTestsTool(Tool):
         answer_ext: str | None = None,
         timeout: int = 60,
         wrong_solution_names: list[str] | None = None,
+        tle_kill_factor: float | None = None,
+        slowdown_kill_ratio: float | None = None,
     ) -> ToolResult:
         """执行测试数据验证。"""
+        policy_err = _validate_tle_policy_params(tle_kill_factor, slowdown_kill_ratio)
+        if policy_err is not None:
+            return ToolResult.fail(policy_err)
+
         effective_sol_name = sol_name or "sol"
 
         # 解析测试目录
@@ -124,6 +218,7 @@ class ProblemVerifyTestsTool(Tool):
             )
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         verify_with_checker = manifest_uses_testlib_checker(manifest_model)
+        is_interactive = manifest_is_interactive(manifest_model)
 
         # 默认执行所有验证
         if not verify_types:
@@ -142,14 +237,18 @@ class ProblemVerifyTestsTool(Tool):
 
         # 1. 文件完整性检查
         if "file_count" in verify_types:
-            result = self._check_file_count(tests_dir, resolved_answer_ext)
+            result = self._check_file_count(
+                tests_dir, resolved_answer_ext, is_interactive=is_interactive
+            )
             results["file_count"] = result
             if not result["passed"]:
                 all_passed = False
 
         # 2. 空文件检查
         if "no_empty" in verify_types:
-            result = self._check_no_empty(tests_dir)
+            result = self._check_no_empty(
+                tests_dir, is_interactive=is_interactive, answer_ext=resolved_answer_ext
+            )
             results["no_empty"] = result
             if not result["passed"]:
                 all_passed = False
@@ -194,6 +293,41 @@ class ProblemVerifyTestsTool(Tool):
                 for s in manifest_model.solutions:
                     if s.role == "wrong" and s.name not in wrong_names:
                         wrong_names.append(s.name)
+            std_timings: dict[str, float] | None = None
+            ans_res = results.get("answer_consistency")
+            if isinstance(ans_res, dict) and isinstance(ans_res.get("per_test_timings"), list):
+                std_timings = {
+                    str(item["file"]): float(item["time_ms"])
+                    for item in ans_res["per_test_timings"]
+                    if isinstance(item, dict)
+                    and isinstance(item.get("file"), str)
+                    and isinstance(item.get("time_ms"), int | float)
+                }
+            else:
+                prev_wf = get_section(problem_dir, WORKFLOW) or {}
+                prev_signals = prev_wf.get("verify_signals", {}) if isinstance(prev_wf, dict) else {}
+                prev_ans = prev_signals.get("answer_consistency", {}) if isinstance(prev_signals, dict) else {}
+                prev_ev = prev_ans.get("evidence", {}) if isinstance(prev_ans, dict) else {}
+                if isinstance(prev_ev, dict) and isinstance(prev_ev.get("per_test_timings"), list):
+                    cur_in_files = sorted(
+                        f for f in os.listdir(tests_dir) if f.endswith(".in")
+                    )
+                    expected_fp = _timing_cache_fingerprint(
+                        problem_dir,
+                        tests_dir,
+                        effective_sol_name,
+                        cur_in_files,
+                        manifest=manifest_model,
+                    )
+                    if prev_ev.get("timing_fingerprint") == expected_fp:
+                        std_timings = {
+                            str(item["file"]): float(item["time_ms"])
+                            for item in prev_ev["per_test_timings"]
+                            if isinstance(item, dict)
+                            and isinstance(item.get("file"), str)
+                            and isinstance(item.get("time_ms"), int | float)
+                            and not isinstance(item.get("time_ms"), bool)
+                        }
             result = await self._check_wrong_solution_kill(
                 problem_dir=problem_dir,
                 tests_dir=tests_dir,
@@ -202,6 +336,10 @@ class ProblemVerifyTestsTool(Tool):
                 timeout=timeout,
                 verify_with_checker=verify_with_checker,
                 manifest=manifest_model,
+                std_timings=std_timings,
+                tle_kill_factor=tle_kill_factor,
+                slowdown_kill_ratio=slowdown_kill_ratio,
+                sol_name=effective_sol_name,
             )
             results["wrong_solution_kill"] = result
             if not result["passed"]:
@@ -372,8 +510,14 @@ class ProblemVerifyTestsTool(Tool):
         state["history"] = history[-50:]
         set_section(problem_dir, WORKFLOW, state)
 
-    def _check_file_count(self, tests_dir: str, answer_ext: str) -> dict:
-        """检查文件完整性：每个 .in 有对应的 answer_ext。"""
+    def _check_file_count(
+        self,
+        tests_dir: str,
+        answer_ext: str,
+        *,
+        is_interactive: bool = False,
+    ) -> dict:
+        """检查文件完整性：每个 .in 有对应的 answer_ext（交互题允许省略 .ans），文件名连续。"""
         tests_path = Path(tests_dir)
         in_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
         ans_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.name.endswith(answer_ext))
@@ -407,7 +551,7 @@ class ProblemVerifyTestsTool(Tool):
         )
 
         passed = (
-            not missing_ans
+            (is_interactive or not missing_ans)
             and not orphan_ans
             and not non_numeric
             and not missing_indices
@@ -421,14 +565,25 @@ class ProblemVerifyTestsTool(Tool):
             "missing_indices": missing_indices,
             "duplicate_indices": duplicate_indices,
             "non_numeric": non_numeric,
+            "interactive_answers_optional": is_interactive,
         }
 
-    def _check_no_empty(self, tests_dir: str) -> dict:
-        """检查没有空文件。"""
+    def _check_no_empty(
+        self,
+        tests_dir: str,
+        *,
+        is_interactive: bool = False,
+        answer_ext: str = ".ans",
+    ) -> dict:
+        """检查没有空文件（交互题允许空占位答案文件，但输入 .in 仍不可为空）。"""
+        norm_ext = normalize_answer_ext(answer_ext) or ".ans"
+        interactive_optional_exts = tuple(sorted({".ans", ".out", norm_ext}))
         empty_files = []
         for f in os.listdir(tests_dir):
             filepath = os.path.join(tests_dir, f)
             if os.path.isfile(filepath) and os.path.getsize(filepath) == 0:
+                if is_interactive and f.endswith(interactive_optional_exts):
+                    continue
                 empty_files.append(f)
 
         return {
@@ -613,7 +768,12 @@ class ProblemVerifyTestsTool(Tool):
                             "transcript": jres.transcript[:1000],
                         },
                     )
-                return ("metrics", jres.metrics)
+                elapsed_ms = (
+                    float(jres.cpu_time_ms)
+                    if jres.cpu_time_ms is not None
+                    else float(jres.wall_time_ms)
+                )
+                return ("ok", {"file": in_file, "time_ms": round(elapsed_ms, 2), "metrics": jres.metrics})
 
             if not os.path.exists(ans_path):
                 return None
@@ -665,7 +825,7 @@ class ProblemVerifyTestsTool(Tool):
                                 "checker_stderr": (chk_run.stderr or "")[:500],
                             },
                         )
-                return None
+                return ("ok", {"file": in_file, "time_ms": round(float(result.time_ms), 2)})
             if result.stdout.replace("\r\n", "\n").strip() != expected.replace("\r\n", "\n").strip():
                 return (
                     "mismatch",
@@ -675,10 +835,11 @@ class ProblemVerifyTestsTool(Tool):
                         "actual": result.stdout[:200],
                     },
                 )
-            return None
+            return ("ok", {"file": in_file, "time_ms": round(float(result.time_ms), 2)})
 
         outcomes = await run_batch(in_files, _check_one, limit=_VERIFY_CONCURRENCY)
         protocol_metrics: dict[str, int] = {}
+        per_test_timings: list[dict[str, Any]] = []
         for outcome in outcomes:
             if outcome is None:
                 continue
@@ -689,20 +850,36 @@ class ProblemVerifyTestsTool(Tool):
                 errors.append(payload)
             elif kind == "mismatch":
                 mismatches.append(payload)
-            elif kind == "metrics" and isinstance(payload, dict):
-                for mkey in ("queries", "bits_used", "bytes_used", "rounds"):
-                    val = payload.get(mkey)
-                    if isinstance(val, int) and not isinstance(val, bool):
-                        agg_key = f"max_{mkey}"
-                        protocol_metrics[agg_key] = max(protocol_metrics.get(agg_key, 0), val)
+            elif kind == "ok" and isinstance(payload, dict):
+                if isinstance(payload.get("file"), str) and isinstance(
+                    payload.get("time_ms"), int | float
+                ):
+                    per_test_timings.append(
+                        {"file": payload["file"], "time_ms": float(payload["time_ms"])}
+                    )
+                metrics_dict = payload.get("metrics")
+                if isinstance(metrics_dict, dict):
+                    for mkey in ("queries", "bits_used", "bytes_used", "rounds"):
+                        val = metrics_dict.get(mkey)
+                        if isinstance(val, int) and not isinstance(val, bool):
+                            agg_key = f"max_{mkey}"
+                            protocol_metrics[agg_key] = max(protocol_metrics.get(agg_key, 0), val)
 
         passed = not mismatches and not timed_out and not errors
+        timing_vals = [float(item["time_ms"]) for item in per_test_timings]
+        timing_fp = _timing_cache_fingerprint(
+            problem_dir, tests_dir, sol_name, in_files, manifest=manifest
+        )
         out: dict = {
             "passed": passed,
             "total": len(in_files),
             "mismatches": mismatches,
             "timed_out": timed_out,
             "errors": errors,
+            "per_test_timings": per_test_timings,
+            "timing_fingerprint": timing_fp,
+            "max_time_ms": round(max(timing_vals), 2) if timing_vals else None,
+            "total_time_ms": round(sum(timing_vals), 2) if timing_vals else None,
         }
         if is_communication:
             out["mode"] = f"communication:{comm_mode}"
@@ -1330,6 +1507,84 @@ class ProblemVerifyTestsTool(Tool):
                     return s.expected or "fail"
         return "fail"
 
+    async def _measure_std_timings(
+        self,
+        problem_dir: str,
+        in_files: list[Path],
+        answer_ext: str,
+        sol_name: str,
+        test_timeout: float,
+        mem_mb: float,
+        *,
+        is_interactive: bool,
+        is_communication: bool,
+        interactor_bin: str,
+        manifest: AutoCodeManifest | None,
+        use_system_temp: bool,
+    ) -> dict[str, float]:
+        """Measure per-test runtime of the standard solution for wrong_ms/std_ms comparison."""
+        exe_ext = get_exe_extension()
+        sol_exe = os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}")
+        if not os.path.isfile(sol_exe):
+            sol_exe = os.path.join(problem_dir, f"{sol_name}{exe_ext}")
+        if not os.path.isfile(sol_exe):
+            if (
+                is_communication
+                and manifest is not None
+                and manifest.protocol is not None
+                and manifest.protocol.participant_solutions
+                and sol_name == "sol"
+            ):
+                parts = resolve_participant_binaries(problem_dir, manifest, None, exe_ext)
+                if parts and all(os.path.isfile(p) for p in parts):
+                    sol_exe = os.path.join(problem_dir, "solutions", f"sol{exe_ext}")
+                else:
+                    return {}
+            else:
+                return {}
+
+        async def _time_one(in_file: Path) -> tuple[str, float] | None:
+            ans_file = in_file.with_suffix(answer_ext)
+            input_data = in_file.read_text(encoding="utf-8", errors="replace")
+            if is_communication and manifest is not None:
+                answer_data = ans_file.read_text(encoding="utf-8", errors="replace") if ans_file.exists() else ""
+                jres = await CommunicationRunner.run_from_manifest(
+                    problem_dir=problem_dir,
+                    manifest=manifest,
+                    solution_exe=sol_exe,
+                    input_data=input_data,
+                    answer_data=answer_data,
+                    time_limit_ms=test_timeout * 1000.0,
+                    memory_limit_mb=mem_mb,
+                    use_system_temp=use_system_temp,
+                )
+                if not jres.accepted:
+                    return None
+                ms = float(jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms)
+                return (in_file.name, round(ms, 2))
+            if is_interactive and interactor_bin:
+                answer_data = ans_file.read_text(encoding="utf-8", errors="replace") if ans_file.exists() else ""
+                jres = await InteractiveRunner.run(
+                    interactor_exe=interactor_bin,
+                    solution_exe=sol_exe,
+                    input_data=input_data,
+                    answer_data=answer_data,
+                    time_limit_ms=test_timeout * 1000.0,
+                    memory_limit_mb=mem_mb,
+                    cwd=None if use_system_temp else problem_dir,
+                )
+                if not jres.accepted:
+                    return None
+                ms = float(jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms)
+                return (in_file.name, round(ms, 2))
+            run = await run_binary(sol_exe, input_data, timeout=test_timeout)
+            if not run.success or run.timed_out:
+                return None
+            return (in_file.name, round(float(run.time_ms), 2))
+
+        measured = await run_batch(in_files, _time_one, limit=_VERIFY_CONCURRENCY)
+        return {name: ms for item in measured if item is not None for name, ms in [item]}
+
     async def _check_wrong_solution_kill(
         self,
         problem_dir: str,
@@ -1341,7 +1596,14 @@ class ProblemVerifyTestsTool(Tool):
         verify_with_checker: bool = False,
         manifest: AutoCodeManifest | None = None,
         use_system_temp: bool = False,
+        std_timings: dict[str, float] | None = None,
+        tle_kill_factor: float | None = None,
+        slowdown_kill_ratio: float | None = None,
+        sol_name: str = "sol",
     ) -> dict:
+        policy_err = _validate_tle_policy_params(tle_kill_factor, slowdown_kill_ratio)
+        if policy_err is not None:
+            return {"passed": False, "validated": False, "error": policy_err, "message": policy_err}
         if not wrong_solution_names:
             return {"passed": True, "validated": False, "message": "No wrong solutions configured"}
 
@@ -1394,16 +1656,51 @@ class ProblemVerifyTestsTool(Tool):
         in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
         details = []
         all_killed = True
-        test_timeout = (
-            max(0.1, float(manifest.time_limit_ms) / 1000.0 * 1.5)
-            if (manifest and getattr(manifest, "time_limit_ms", None))
-            else min(5.0, float(timeout))
+
+        has_manifest_tl = bool(manifest and getattr(manifest, "time_limit_ms", None))
+        tl_ms = float(manifest.time_limit_ms) if (manifest and has_manifest_tl) else min(5000.0, float(timeout) * 1000.0)
+        effective_tle_factor = (
+            float(tle_kill_factor)
+            if tle_kill_factor is not None
+            else (float(manifest.quality_gates.wrong_tle_kill_factor) if manifest is not None else 1.0)
         )
+        effective_slowdown_ratio = (
+            float(slowdown_kill_ratio)
+            if slowdown_kill_ratio is not None
+            else (manifest.quality_gates.wrong_slowdown_kill_ratio if manifest is not None else None)
+        )
+        tle_threshold_ms = max(100.0, tl_ms * effective_tle_factor)
+        if has_manifest_tl or tle_kill_factor is not None:
+            hard_timeout_sec = max(
+                0.1,
+                tle_threshold_ms / 1000.0 + 0.5,
+                (tl_ms / 1000.0) * 1.5,
+            )
+        else:
+            hard_timeout_sec = min(5.0, float(timeout))
         mem_mb = (
             float(manifest.memory_limit_mb)
             if (manifest and getattr(manifest, "memory_limit_mb", None))
             else 256.0
         )
+
+        std_timings_map: dict[str, float] = dict(std_timings) if std_timings else {}
+        missing_std_files = [p for p in in_files if p.name not in std_timings_map]
+        if missing_std_files:
+            measured_std = await self._measure_std_timings(
+                problem_dir,
+                missing_std_files,
+                answer_ext,
+                sol_name,
+                hard_timeout_sec,
+                mem_mb,
+                is_interactive=is_interactive,
+                is_communication=is_communication,
+                interactor_bin=interactor_bin,
+                manifest=manifest,
+                use_system_temp=use_system_temp,
+            )
+            std_timings_map.update(measured_std)
 
         for wrong_name in wrong_solution_names:
             binary_path = Path(problem_dir) / "solutions" / f"{wrong_name}{exe_ext}"
@@ -1413,12 +1710,19 @@ class ProblemVerifyTestsTool(Tool):
                 continue
 
             exp = self._wrong_expected(wrong_name, manifest)
+            # expected=pass 解法按标准 TL（不低于 tle_threshold_ms）判定，避免 wrong_tle_kill_factor<1 或相对倍率误杀
+            run_tle_threshold_ms = tle_threshold_ms if exp == "fail" else max(tl_ms, tle_threshold_ms)
             # 与 checker / interactor / communicator 一致：每测 "AC" / 非 AC；expected=fail 须至少一测非 AC；expected=pass 须全部 AC
 
             async def _run_wrong_check(
-                in_file: Path, _binary_path: Path = binary_path
-            ) -> tuple[str, str | None]:
+                in_file: Path,
+                _binary_path: Path = binary_path,
+                _exp: str = exp,
+                _run_tle_ms: float = run_tle_threshold_ms,
+            ) -> dict[str, Any]:
                 ans_file = in_file.with_suffix(answer_ext)
+                tle_reason: str | None = None
+                fail_reason_detail: str | None = None
                 if is_communication and manifest is not None:
                     input_data = in_file.read_text(encoding="utf-8")
                     answer_data = ans_file.read_text(encoding="utf-8") if ans_file.exists() else ""
@@ -1428,13 +1732,17 @@ class ProblemVerifyTestsTool(Tool):
                         solution_exe=str(_binary_path),
                         input_data=input_data,
                         answer_data=answer_data,
-                        time_limit_ms=test_timeout * 1000.0,
+                        time_limit_ms=hard_timeout_sec * 1000.0,
                         memory_limit_mb=mem_mb,
                         use_system_temp=use_system_temp,
                     )
-                    detail = (jres.detail or jres.judge_stderr[:200]) if jres.verdict == "FAIL" else None
-                    return (jres.verdict, detail or None)
-                if is_interactive:
+                    verdict = jres.verdict
+                    measured_ms = float(
+                        jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms
+                    )
+                    if verdict == "FAIL":
+                        fail_reason_detail = (jres.detail or jres.judge_stderr[:200]) or None
+                elif is_interactive:
                     input_data = in_file.read_text(encoding="utf-8")
                     answer_data = ans_file.read_text(encoding="utf-8") if ans_file.exists() else ""
                     jres = await InteractiveRunner.run(
@@ -1442,72 +1750,127 @@ class ProblemVerifyTestsTool(Tool):
                         solution_exe=str(_binary_path),
                         input_data=input_data,
                         answer_data=answer_data,
-                        time_limit_ms=test_timeout * 1000.0,
+                        time_limit_ms=hard_timeout_sec * 1000.0,
                         memory_limit_mb=mem_mb,
                         cwd=None if use_system_temp else problem_dir,
                     )
-                    detail = (jres.detail or jres.judge_stderr[:200]) if jres.verdict == "FAIL" else None
-                    return (jres.verdict, detail or None)
-
-                if not ans_file.exists():
-                    return ("SKIP", None)
-                input_data = in_file.read_text(encoding="utf-8")
-                run = await run_binary(
-                    str(_binary_path),
-                    input_data,
-                    timeout=test_timeout,
-                    memory_mb=mem_mb,
-                )
-                if run.timed_out:
-                    return ("TLE", None)
-                if run.memory_limit_exceeded:
-                    return ("MLE", None)
-                if run.error and run.return_code == -1:
-                    return ("FAIL", run.error)
-                if not run.success:
-                    return ("RE", None)
-                if verify_with_checker:
-                    in_path = str(in_file)
-                    ans_path = str(ans_file)
-                    tmp_parent = None if use_system_temp else problem_dir
-                    with tempfile.TemporaryDirectory(dir=tmp_parent) as tmp:
-                        out_path = os.path.join(tmp, "output.txt")
-                        with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
-                            out_f.write(run.stdout)
-                        verdict, chk_run = await run_testlib_checker(
-                            checker_bin,
-                            in_path,
-                            out_path,
-                            ans_path,
-                            timeout=timeout,
-                        )
-                    detail = (
-                        (chk_run.error or chk_run.stderr[:200]) if verdict == "FAIL" else None
+                    verdict = jres.verdict
+                    measured_ms = float(
+                        jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms
                     )
-                    return (verdict, detail or None)
-                expected = ans_file.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
-                actual = run.stdout.replace("\r\n", "\n").strip()
-                return ("AC" if actual == expected else "WA", None)
+                    if verdict == "FAIL":
+                        fail_reason_detail = (jres.detail or jres.judge_stderr[:200]) or None
+                else:
+                    if not ans_file.exists():
+                        return {"file": in_file.name, "verdict": "SKIP", "time_ms": 0.0}
+                    input_data = in_file.read_text(encoding="utf-8")
+                    run = await run_binary(
+                        str(_binary_path),
+                        input_data,
+                        timeout=hard_timeout_sec,
+                        memory_mb=mem_mb,
+                    )
+                    measured_ms = float(run.time_ms)
+                    if run.timed_out:
+                        verdict = "TLE"
+                        tle_reason = "hard_timeout"
+                    elif run.memory_limit_exceeded:
+                        verdict = "MLE"
+                    elif run.error and run.return_code == -1:
+                        verdict = "FAIL"
+                        fail_reason_detail = run.error
+                    elif not run.success:
+                        verdict = "RE"
+                    elif measured_ms > _run_tle_ms:
+                        verdict = "TLE"
+                        tle_reason = "exceeded_tle_threshold"
+                    elif verify_with_checker:
+                        in_path = str(in_file)
+                        ans_path = str(ans_file)
+                        tmp_parent = None if use_system_temp else problem_dir
+                        with tempfile.TemporaryDirectory(dir=tmp_parent) as tmp:
+                            out_path = os.path.join(tmp, "output.txt")
+                            with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
+                                out_f.write(run.stdout)
+                            verdict, chk_run = await run_testlib_checker(
+                                checker_bin,
+                                in_path,
+                                out_path,
+                                ans_path,
+                                timeout=timeout,
+                            )
+                        if verdict == "FAIL":
+                            fail_reason_detail = (chk_run.error or chk_run.stderr[:200]) or None
+                    else:
+                        expected = ans_file.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+                        actual = run.stdout.replace("\r\n", "\n").strip()
+                        verdict = "AC" if actual == expected else "WA"
+
+                # Logical TLE promotion for interactive/communication runs exceeding _run_tle_ms
+                if verdict == "AC" and measured_ms > _run_tle_ms:
+                    verdict = "TLE"
+                    tle_reason = "exceeded_tle_threshold"
+
+                std_ms = std_timings_map.get(in_file.name)
+                ratio_to_std = (
+                    round(measured_ms / max(std_ms, 1.0), 2) if std_ms is not None else None
+                )
+                kill_ratio_to_std = (
+                    measured_ms / max(std_ms, 5.0) if std_ms is not None else None
+                )
+                if (
+                    _exp == "fail"
+                    and verdict == "AC"
+                    and effective_slowdown_ratio is not None
+                    and kill_ratio_to_std is not None
+                    and measured_ms >= 50.0
+                    and kill_ratio_to_std >= effective_slowdown_ratio
+                ):
+                    verdict = "TLE"
+                    tle_reason = "relative_slowdown"
+
+                out_item: dict[str, Any] = {
+                    "file": in_file.name,
+                    "verdict": verdict,
+                    "time_ms": round(measured_ms, 2),
+                }
+                if std_ms is not None:
+                    out_item["std_time_ms"] = round(std_ms, 2)
+                    out_item["ratio_to_std"] = ratio_to_std
+                if tle_reason is not None:
+                    out_item["tle_reason"] = tle_reason
+                if fail_reason_detail is not None:
+                    out_item["fail_detail"] = fail_reason_detail
+                return out_item
 
             per_test: list[str] = []
+            per_test_timings: list[dict[str, Any]] = []
             killing_verdict: str | None = None
+            killing_test: str | None = None
+            killing_tle_reason: str | None = None
             judge_failed = False
             fail_detail: str | None = None
             for start in range(0, len(in_files), _VERIFY_CONCURRENCY):
                 chunk = in_files[start : start + _VERIFY_CONCURRENCY]
-                chunk_verdicts = await run_batch(
+                chunk_results = await run_batch(
                     chunk, _run_wrong_check, limit=_VERIFY_CONCURRENCY
                 )
-                for v, detail in chunk_verdicts:
+                for item in chunk_results:
+                    v = str(item.get("verdict", "SKIP"))
+                    detail = item.get("fail_detail")
                     if v == "SKIP":
                         continue
                     per_test.append(v)
+                    per_test_timings.append(item)
                     if v == "FAIL":
                         judge_failed = True
                         if detail and fail_detail is None:
-                            fail_detail = detail
+                            fail_detail = str(detail)
                     elif v != "AC" and killing_verdict is None:
                         killing_verdict = v
+                        killing_test = str(item.get("file", ""))
+                        if item.get("tle_reason"):
+                            killing_tle_reason = str(item["tle_reason"])
                 if judge_failed:
                     break
                 if exp == "fail" and killing_verdict is not None:
@@ -1522,15 +1885,77 @@ class ProblemVerifyTestsTool(Tool):
             else:
                 killed = all(v == "AC" for v in per_test)
 
+            wrong_times = [float(item["time_ms"]) for item in per_test_timings]
+            std_matched = [
+                float(item["std_time_ms"])
+                for item in per_test_timings
+                if isinstance(item.get("std_time_ms"), int | float)
+            ]
+            ratios_meaningful = [
+                float(item["ratio_to_std"])
+                for item in per_test_timings
+                if isinstance(item.get("ratio_to_std"), int | float)
+                and float(item["time_ms"]) >= 5.0
+            ]
+            ratios_all = [
+                float(item["ratio_to_std"])
+                for item in per_test_timings
+                if isinstance(item.get("ratio_to_std"), int | float)
+            ]
+            max_time_ms = round(max(wrong_times), 2) if wrong_times else 0.0
+            total_time_ms = round(sum(wrong_times), 2) if wrong_times else 0.0
+            std_max_time_ms = round(max(std_matched), 2) if std_matched else None
+            std_total_time_ms = round(sum(std_matched), 2) if std_matched else None
+            max_ratio_to_std = (
+                round(max(ratios_meaningful), 2)
+                if ratios_meaningful
+                else (round(max(ratios_all), 2) if ratios_all else None)
+            )
+            total_ratio_to_std = (
+                round(total_time_ms / max(std_total_time_ms, 1.0), 2)
+                if std_total_time_ms is not None
+                else None
+            )
+            suspect_slow_tests = [
+                item
+                for item in per_test_timings
+                if float(item["time_ms"]) >= 0.5 * tl_ms
+                or (
+                    isinstance(item.get("ratio_to_std"), int | float)
+                    and float(item["ratio_to_std"]) >= 3.0
+                    and float(item["time_ms"]) >= 50.0
+                )
+            ]
+
             entry: dict[str, Any] = {
                 "name": wrong_name,
                 "killed": killed,
                 "expected": exp,
+                "max_time_ms": max_time_ms,
+                "total_time_ms": total_time_ms,
+                "std_max_time_ms": std_max_time_ms,
+                "max_ratio_to_std": max_ratio_to_std,
+                "total_ratio_to_std": total_ratio_to_std,
+                "tle_threshold_ms": round(tle_threshold_ms, 1),
+                "per_test_timings": per_test_timings,
                 "hint": (
                     "expected=fail：须至少一测非 AC（interactor/checker）或与 .ans 不一致（exact）；"
                     "expected=pass：须全部 AC 或与 .ans 一致"
                 ),
             }
+            if suspect_slow_tests:
+                entry["suspect_slow_tests"] = suspect_slow_tests
+            if exp == "fail" and not killed and (suspect_slow_tests or max_time_ms >= 0.25 * tl_ms):
+                ratio_desc = (
+                    f", max_ratio_to_std={max_ratio_to_std}x" if max_ratio_to_std is not None else ""
+                )
+                entry["host_speed_warning"] = (
+                    f"Wrong solution '{wrong_name}' survived locally (max_time_ms={max_time_ms}ms "
+                    f"vs tle_threshold_ms={round(tle_threshold_ms, 1)}ms{ratio_desc}). "
+                    "A fast local CPU (e.g. Apple Silicon) can mask TLE on typical OJ hardware; "
+                    "consider strengthening type=4 cases, tightening time_limit_ms, or configuring "
+                    "quality_gates.wrong_tle_kill_factor / wrong_slowdown_kill_ratio."
+                )
             if judge_failed:
                 entry["judge_failed"] = True
                 entry["reason"] = (
@@ -1540,6 +1965,10 @@ class ProblemVerifyTestsTool(Tool):
                 )
             elif killing_verdict is not None:
                 entry["killing_verdict"] = killing_verdict
+                if killing_test:
+                    entry["killing_test"] = killing_test
+                if killing_tle_reason:
+                    entry["killing_tle_reason"] = killing_tle_reason
             details.append(entry)
             if not killed:
                 all_killed = False
@@ -1557,6 +1986,13 @@ class ProblemVerifyTestsTool(Tool):
             "passed": all_killed,
             "validated": True,
             "details": details,
+            "tle_policy": {
+                "time_limit_ms": tl_ms,
+                "wrong_tle_kill_factor": effective_tle_factor,
+                "tle_threshold_ms": round(tle_threshold_ms, 1),
+                "hard_timeout_ms": round(hard_timeout_sec * 1000.0, 1),
+                "wrong_slowdown_kill_ratio": effective_slowdown_ratio,
+            },
             "message": "All wrong solutions were killed" if all_killed else "Some wrong solutions survived all tests",
             **mode_extra,
         }

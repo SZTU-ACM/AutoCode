@@ -214,3 +214,149 @@ def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> No
     res_exp = EmpiricalRatioAnalyzer.verify_complexity("O(1)", exp_samples, time_limit_ms=1000.0)
     assert res_exp["passed"] is False
     assert res_exp["verdict"] == "ratio_mismatch"
+
+
+def test_verify_complexity_exponential_bitmask_dp_semi_log_fit() -> None:
+    """O(2^n) / O(n 2^n) 状压题应使用半对数指数模型拟合底数而非扭曲幂律斜率。"""
+    assert normalize_complexity_expression("O(n * 2^n)") == "O(n 2^n)"
+    samples = [
+        {"n": 14, "cpu_time_ms": 4.0, "status": "ok"},
+        {"n": 16, "cpu_time_ms": 16.5, "status": "ok"},
+        {"n": 18, "cpu_time_ms": 67.0, "status": "ok"},
+        {"n": 20, "cpu_time_ms": 270.0, "status": "ok"},
+    ]
+    res = EmpiricalRatioAnalyzer.verify_complexity("O(2^n)", samples, time_limit_ms=3000.0)
+    assert res["passed"] is True
+    assert res["fit_model"] == "exponential"
+    assert res["fitted_complexity"] == "O(2^n)"
+    assert 1.9 <= res["exponential_fit"]["base"] <= 2.15
+
+
+def test_verify_query_complexity_interactive_log_n_and_falsify_linear() -> None:
+    """交互题 O(log n) 应按 queries 随 log2(n) 曲线验证，并能识破线性查询与超预算。"""
+    log_samples = [
+        {"n": 16, "queries": 4, "cpu_time_ms": 1.2, "status": "ok"},
+        {"n": 1024, "queries": 10, "cpu_time_ms": 1.1, "status": "ok"},
+        {"n": 1048576, "queries": 20, "cpu_time_ms": 1.3, "status": "ok"},
+        {"n": 10**12, "queries": 40, "cpu_time_ms": 1.2, "status": "ok"},
+        {"n": 10**18, "queries": 60, "cpu_time_ms": 1.2, "status": "ok"},
+    ]
+    ok_res = EmpiricalRatioAnalyzer.verify_query_complexity(
+        "O(log n)", log_samples, max_queries=65, time_limit_ms=2000.0
+    )
+    assert ok_res["passed"] is True
+    assert ok_res["verdict"] == "verified_query_curve"
+    assert ok_res["fit_metric"] == "queries"
+    assert ok_res["fitted_complexity"] == "O(log n)"
+    assert ok_res["query_curve"]["queries_per_log2_n"] == pytest.approx(1.0, abs=0.05)
+    assert ok_res["r_squared"] > 0.99
+
+    # Exceeding protocol.max_queries must fail
+    over_res = EmpiricalRatioAnalyzer.verify_query_complexity(
+        "O(log n)", log_samples, max_queries=50, time_limit_ms=2000.0
+    )
+    assert over_res["passed"] is False
+    assert over_res["verdict"] == "query_budget_exceeded"
+
+    # Linear query count pretending to be O(log n) must fail
+    linear_q_samples = [
+        {"n": 10, "queries": 10, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 100, "queries": 100, "cpu_time_ms": 1.2, "status": "ok"},
+        {"n": 1000, "queries": 1000, "cpu_time_ms": 1.5, "status": "ok"},
+        {"n": 10000, "queries": 10000, "cpu_time_ms": 2.0, "status": "ok"},
+    ]
+    bad_res = EmpiricalRatioAnalyzer.verify_query_complexity(
+        "O(log n)", linear_q_samples, time_limit_ms=2000.0
+    )
+    assert bad_res["passed"] is False
+    assert bad_res["verdict"] == "query_ratio_mismatch"
+    assert bad_res["fitted_complexity"] == "O(n)"
+
+
+def test_empirical_analyzer_review_regressions() -> None:
+    """回归：O(3^n) 冒充 O(2^n) 必须拦截、MLE/RE 不静默跳过、O(sqrt n) 交互查询拦截、dominant_var 归一化与模板防 DoS。"""
+    from pydantic import ValidationError
+
+    from autocode_mcp.utils.scale_sampler import MultiScaleSampler
+    from autocode_mcp.workflow.models import EmpiricalComplexityConfig
+
+    # 1. Normalization with dominant_var aliasing & LaTeX braces
+    assert normalize_complexity_expression("O(T)", dominant_var="T") == "O(n)"
+    assert normalize_complexity_expression("O(2^k)", dominant_var="k") == "O(2^n)"
+    assert normalize_complexity_expression("O(k 2^k)", dominant_var="k") == "O(n 2^n)"
+    assert normalize_complexity_expression("O(log M)", dominant_var="M") == "O(log n)"
+    assert normalize_complexity_expression("O(2^{n})") == "O(2^n)"
+    assert normalize_complexity_expression("O(2^n * n)") == "O(n 2^n)"
+    assert normalize_complexity_expression(r"O(\sqrt{n})") == "O(sqrt n)"
+
+    # 2. O(3^n) pretending to be O(2^n) must FAIL via authoritative exponential fit
+    three_pow_samples = [
+        {"n": 10, "cpu_time_ms": 2.0, "status": "ok"},
+        {"n": 12, "cpu_time_ms": 18.0, "status": "ok"},
+        {"n": 14, "cpu_time_ms": 162.0, "status": "ok"},
+        {"n": 16, "cpu_time_ms": 1458.0, "status": "ok"},
+    ]
+    res_3n = EmpiricalRatioAnalyzer.verify_complexity("O(2^n)", three_pow_samples, time_limit_ms=5000.0)
+    assert res_3n["passed"] is False
+    assert res_3n["verdict"] == "ratio_mismatch"
+    assert res_3n["fit_model"] == "exponential"
+    assert res_3n["fitted_complexity"] == "O(3^n)"
+
+    # 3. MLE / runtime_error at max scale must fail instead of silently dropping the sample
+    mle_samples = [
+        {"n": 1000, "cpu_time_ms": 5.0, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 50.0, "status": "ok"},
+        {"n": 100000, "cpu_time_ms": None, "status": "mle"},
+    ]
+    res_mle = EmpiricalRatioAnalyzer.verify_complexity("O(n)", mle_samples, time_limit_ms=2000.0)
+    assert res_mle["passed"] is False
+    assert res_mle["verdict"] == "mle_at_scale"
+
+    re_samples = [
+        {"n": 1000, "cpu_time_ms": 5.0, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 50.0, "status": "ok"},
+        {"n": 100000, "cpu_time_ms": None, "status": "runtime_error"},
+    ]
+    res_re = EmpiricalRatioAnalyzer.verify_complexity("O(n)", re_samples, time_limit_ms=2000.0)
+    assert res_re["passed"] is False
+    assert res_re["verdict"] == "runtime_error_at_scale"
+
+    # 4. Two samples where one has n=1 must return insufficient_samples (no dummy alpha=1.0)
+    n1_samples = [
+        {"n": 1, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 100, "cpu_time_ms": 50.0, "status": "ok"},
+    ]
+    res_n1 = EmpiricalRatioAnalyzer.verify_complexity("O(n)", n1_samples, time_limit_ms=2000.0)
+    assert res_n1["passed"] is False
+    assert res_n1["verdict"] == "insufficient_samples"
+
+    # 5. O(sqrt n) query curve claiming O(log n) must be falsified
+    sqrt_q_samples = [
+        {"n": 16, "queries": 4, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 64, "queries": 8, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 256, "queries": 16, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 1024, "queries": 32, "cpu_time_ms": 1.0, "status": "ok"},
+    ]
+    res_sqrt_q = EmpiricalRatioAnalyzer.verify_query_complexity("O(log n)", sqrt_q_samples)
+    assert res_sqrt_q["passed"] is False
+    assert res_sqrt_q["verdict"] == "query_ratio_mismatch"
+    assert res_sqrt_q["fitted_complexity"] == "O(sqrt n)"
+
+    # 6. contestant_messages fallback (= max_queries + 1 due to final `! ans`) must NOT trigger over_budget
+    fallback_samples = [
+        {"n": 16, "queries": 5, "queries_source": "contestant_messages", "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 1024, "queries": 11, "queries_source": "contestant_messages", "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 1048576, "queries": 21, "queries_source": "contestant_messages", "cpu_time_ms": 1.0, "status": "ok"},
+    ]
+    res_fb = EmpiricalRatioAnalyzer.verify_query_complexity("O(log n)", fallback_samples, max_queries=20)
+    assert res_fb["passed"] is True
+
+    # 7. Malicious format strings & duplicate scale_points rejected
+    for bad_tpl in ("{n:10000000000}", "{n.__class__}", "{seed}\n2 {n}"):
+        with pytest.raises(ValidationError):
+            EmpiricalComplexityConfig(generator_args_template=bad_tpl)
+        with pytest.raises(ValueError):
+            MultiScaleSampler.format_generator_command("gen", 10, 1, template=bad_tpl)
+
+    with pytest.raises(ValidationError):
+        EmpiricalComplexityConfig(scale_points=[10, 10])

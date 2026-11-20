@@ -175,6 +175,98 @@ class SubtaskSpec(BaseModel):
         return self
 
 
+class EmpiricalComplexityConfig(BaseModel):
+    """Optional empirical complexity sampling and verification settings."""
+
+    dominant_var: str = Field(
+        default="n",
+        description="主导复杂度的规模变量名（如 n / T / k / m）",
+    )
+    scale_points: list[int] | None = Field(
+        default=None,
+        description="显式采样点序列（如 [12, 14, 16, 18, 20] 或 [1000, 5000, 20000, 100000]）",
+    )
+    generator_args_template: str | None = Field(
+        default=None,
+        description="自定义 gen 传参模板（如 '{seed} 2 1000000000 1000000000 {T} {T}'）",
+    )
+    extra_vars: dict[str, Any] = Field(
+        default_factory=dict,
+        description="传给 MultiScaleSampler.format_generator_command 的额外变量（如 type/t_min/t_max）",
+    )
+    scale_mode: Literal["auto", "linear", "exponential", "log"] = Field(
+        default="auto",
+        description="自动采样点分布策略：auto / linear / exponential / log",
+    )
+    metric: Literal["auto", "cpu_time_ms", "queries"] = Field(
+        default="auto",
+        description="实证拟合指标：auto（交互题自动优先 queries）/ cpu_time_ms / queries",
+    )
+    max_value: int | None = Field(
+        default=None,
+        ge=1,
+        description="主导变量的最大值（缺省时自动从 constraints 中提取）",
+    )
+
+    @field_validator("dominant_var", mode="before")
+    @classmethod
+    def validate_dominant_var(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("empirical_complexity.dominant_var must be a non-empty string")
+        cleaned = value.strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", cleaned):
+            raise ValueError(
+                f"empirical_complexity.dominant_var must be a valid identifier: {value!r}"
+            )
+        return cleaned
+
+    @field_validator("max_value", mode="before")
+    @classmethod
+    def reject_bool_max_value(cls, value: Any) -> Any:
+        return _reject_bool_value(value, "empirical_complexity.max_value")
+
+    @field_validator("scale_points", mode="before")
+    @classmethod
+    def validate_scale_points(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        _reject_bool_list(value, "empirical_complexity.scale_points")
+        if not isinstance(value, list):
+            raise ValueError("empirical_complexity.scale_points must be a list of positive integers")
+        out: list[int] = []
+        for item in value:
+            if not isinstance(item, int) or item < 1:
+                raise ValueError("empirical_complexity.scale_points elements must be positive integers")
+            out.append(item)
+        unique = sorted(set(out))
+        if len(unique) < 2:
+            raise ValueError(
+                "empirical_complexity.scale_points must contain at least 2 distinct positive integers"
+            )
+        return unique
+
+    @field_validator("generator_args_template", mode="before")
+    @classmethod
+    def validate_template(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("empirical_complexity.generator_args_template must be a non-empty string")
+        if any(ch in value for ch in ("\x00", "\n", "\r")):
+            raise ValueError(
+                "empirical_complexity.generator_args_template contains invalid control characters"
+            )
+        cleaned = value.strip()
+        # Allow only simple {identifier} placeholders (disallow format specs/attribute/index traversal)
+        stripped = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "", cleaned)
+        if "{" in stripped or "}" in stripped:
+            raise ValueError(
+                "empirical_complexity.generator_args_template placeholders must be simple {name} identifiers "
+                "without format specifiers, attribute access, or unbalanced braces"
+            )
+        return cleaned
+
+
 class QualityGates(BaseModel):
     require_stress_passed: bool = True
     require_validation_passed: bool = True
@@ -183,6 +275,24 @@ class QualityGates(BaseModel):
     require_wrong_solution_kill: bool = False
     require_validator_check: bool = True
     min_limit_case_ratio: float = Field(default=0.5, ge=0, le=1)
+    wrong_tle_kill_factor: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=5.0,
+        allow_inf_nan=False,
+        description="wrong_solution_kill 逻辑 TLE 判定阈值（相对 time_limit_ms 倍数，默认 1.0）",
+    )
+    wrong_slowdown_kill_ratio: float | None = Field(
+        default=None,
+        gt=1.0,
+        allow_inf_nan=False,
+        description="可选：当错解相对标程耗时倍率达到该值（且绝对耗时 >= 50ms）时按相对耗时判定击杀",
+    )
+
+    @field_validator("wrong_tle_kill_factor", "wrong_slowdown_kill_ratio", mode="before")
+    @classmethod
+    def reject_bool_tle_fields(cls, value: Any, info: Any) -> Any:
+        return _reject_bool_value(value, str(info.field_name))
 
 
 class AuditGates(BaseModel):
@@ -225,15 +335,33 @@ class AutoCodeManifest(BaseModel):
     )
     time_limit_ms: int = 2000
     memory_limit_mb: int = 256
+    compiler: str | None = Field(
+        default=None,
+        description="可选自定义 C++ 编译器路径或命令（如 g++-14 / /opt/homebrew/bin/g++-14）；缺省为 g++",
+    )
     statement_path: str = "statements/README.md"
     tutorial_path: str = "statements/tutorial.md"
     constraints: dict[str, Any] = Field(default_factory=dict)
+    empirical_complexity: EmpiricalComplexityConfig | None = None
     solutions: list[SolutionEntry] = Field(default_factory=list)
     case_plan: list[CasePlanItem] = Field(default_factory=list)
     subtasks: list[SubtaskSpec] = Field(default_factory=list)
     quality_gates: QualityGates = Field(default_factory=QualityGates)
     audit_gates: AuditGates = Field(default_factory=AuditGates)
     difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
+
+    @field_validator("compiler", mode="before")
+    @classmethod
+    def validate_compiler(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("compiler must be a string")
+        if not value.strip():
+            return None
+        from ..utils.compiler import validate_compiler_spec
+
+        return validate_compiler_spec(value)
 
     @field_validator("statement_path", "tutorial_path", mode="before")
     @classmethod

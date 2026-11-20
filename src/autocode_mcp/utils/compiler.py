@@ -13,6 +13,7 @@ import asyncio
 import functools
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -57,6 +58,198 @@ class CompileResult:
     error: str | None = None
     stdout: str = ""
     stderr: str = ""
+    hint: str | None = None
+
+
+_BITS_STDCPP_RE = re.compile(r"#\s*include\s*<\s*bits/stdc\+\+\.h\s*>")
+_ALLOWED_COMPILER_BASENAME_RE = re.compile(
+    r"\A(?:[A-Za-z0-9_.-]+-)?(?:g\+\+|clang\+\+|c\+\+|icpx)(?:-\d+(?:\.\d+)?)?(?:\.exe)?\Z",
+    re.IGNORECASE,
+)
+_WINDOWS_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_COMPILER_INFO_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def validate_compiler_spec(compiler: str) -> str:
+    """Validate a C++ compiler command name or absolute path against a strict allowlist.
+
+    Blocks control characters, relative paths with directory separators (e.g. ``./evil.sh``),
+    and arbitrary non-compiler executables (e.g. ``/bin/sh``, ``python3``).
+    """
+    if not isinstance(compiler, str):
+        raise ValueError("compiler must be a string")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in compiler):
+        raise ValueError("compiler contains invalid control characters")
+    cleaned = compiler.strip()
+    if not cleaned:
+        raise ValueError("compiler must be a non-empty string")
+
+    has_sep = "/" in cleaned or "\\" in cleaned
+    is_abs = os.path.isabs(cleaned) or bool(_WINDOWS_DRIVE_PREFIX_RE.match(cleaned))
+    if has_sep and not is_abs:
+        raise ValueError(
+            f"relative compiler path with directory separators is not allowed: {compiler!r}; "
+            "use a bare compiler name (e.g. 'g++-14') or an absolute path"
+        )
+    if is_abs:
+        parts = re.split(r"[\\/]", cleaned)
+        if any(part == ".." for part in parts):
+            raise ValueError(f"compiler path must not contain '..' segments: {compiler!r}")
+    basename = os.path.basename(cleaned.replace("\\", "/"))
+    if not basename or not _ALLOWED_COMPILER_BASENAME_RE.match(basename):
+        raise ValueError(
+            f"unsupported C++ compiler executable {compiler!r}; expected a g++/clang++/c++/icpx binary"
+        )
+    return cleaned
+
+
+def has_bits_stdcpp_include(code: str) -> bool:
+    """Detect whether C++ source includes GCC-only <bits/stdc++.h>."""
+    return bool(_BITS_STDCPP_RE.search(code))
+
+
+def _find_suggested_gcc_compilers() -> list[str]:
+    """Probe common GNU g++ versioned binaries (e.g. Homebrew g++-14 on macOS)."""
+    candidates = ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11")
+    extra_dirs = ("/opt/homebrew/bin", "/usr/local/bin")
+    found: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        path = shutil.which(name)
+        if not path:
+            for d in extra_dirs:
+                candidate = os.path.join(d, name)
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    path = candidate
+                    break
+        if path and path not in seen:
+            seen.add(path)
+            found.append(path)
+    return found
+
+
+def resolve_effective_compiler(
+    explicit_compiler: str | None,
+    manifest: Any | None = None,
+    *,
+    default: str = "g++",
+) -> str:
+    """Resolve and validate C++ compiler priority: explicit arg > manifest.compiler > default ('g++')."""
+    if explicit_compiler is not None:
+        if not isinstance(explicit_compiler, str):
+            raise ValueError("compiler must be a string")
+        if explicit_compiler.strip():
+            return validate_compiler_spec(explicit_compiler)
+    manifest_compiler = getattr(manifest, "compiler", None) if manifest is not None else None
+    if isinstance(manifest_compiler, str) and manifest_compiler.strip():
+        return validate_compiler_spec(manifest_compiler)
+    return validate_compiler_spec(default)
+
+
+def _clone_compiler_info(info: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(info)
+    cloned["suggested_gcc_compilers"] = list(info.get("suggested_gcc_compilers", []))
+    return cloned
+
+
+def detect_compiler_info(compiler: str = "g++", *, use_cache: bool = True) -> dict[str, Any]:
+    """Inspect a C++ compiler binary to detect Apple Clang / GNU GCC and <bits/stdc++.h> support."""
+    try:
+        key = validate_compiler_spec((compiler or "g++").strip() or "g++")
+    except ValueError as exc:
+        return {
+            "compiler": str(compiler),
+            "resolved_path": None,
+            "available": False,
+            "is_apple_clang": False,
+            "is_clang": False,
+            "is_gcc": False,
+            "version_line": "",
+            "supports_bits_stdcpp": False,
+            "suggested_gcc_compilers": [],
+            "warning": str(exc),
+        }
+
+    has_sep = "/" in key or "\\" in key
+    resolved = shutil.which(key)
+    if resolved is None and has_sep and os.path.isfile(key) and (os.name == "nt" or os.access(key, os.X_OK)):
+        resolved = key
+    cache_key = resolved or key
+    if use_cache and cache_key in _COMPILER_INFO_CACHE:
+        return _clone_compiler_info(_COMPILER_INFO_CACHE[cache_key])
+
+    info: dict[str, Any] = {
+        "compiler": key,
+        "resolved_path": resolved,
+        "available": False,
+        "is_apple_clang": False,
+        "is_clang": False,
+        "is_gcc": False,
+        "version_line": "",
+        "supports_bits_stdcpp": False,
+        "suggested_gcc_compilers": [],
+        "warning": None,
+    }
+    try:
+        proc = subprocess.run(
+            [key, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3.0,
+            check=False,
+        )
+        combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        first_line = combined.splitlines()[0].strip() if combined else ""
+        lower = combined.lower()
+        is_apple_clang = "apple clang" in lower or ("clang" in lower and "apple" in lower)
+        is_clang = "clang" in lower
+        is_gcc = (not is_clang) and (
+            "free software foundation" in lower or "gcc" in lower or "g++" in lower
+        )
+        available = proc.returncode == 0
+        info["available"] = available
+        info["version_line"] = first_line
+        info["is_apple_clang"] = is_apple_clang
+        info["is_clang"] = is_clang
+        info["is_gcc"] = is_gcc
+        info["supports_bits_stdcpp"] = available and not is_apple_clang
+        if available and is_apple_clang:
+            suggested = _find_suggested_gcc_compilers()
+            info["suggested_gcc_compilers"] = suggested
+            if suggested:
+                gcc_hint = (
+                    f"Detected GNU GCC alternative(s): {', '.join(suggested)}. "
+                    f"You can set \"compiler\": \"{suggested[0]}\" in .autocode/manifest.json "
+                    "or pass compiler=..., or use standard C++20 headers instead of <bits/stdc++.h>."
+                )
+            else:
+                gcc_hint = (
+                    "Use standard C++20 headers (<iostream>, <vector>, <algorithm>, etc.) "
+                    "instead of <bits/stdc++.h>, or install Homebrew GCC (e.g. `brew install gcc`) "
+                    "and set \"compiler\": \"g++-14\" in .autocode/manifest.json."
+                )
+            info["warning"] = (
+                f"Compiler '{key}' is Apple Clang ({first_line}), which does not support "
+                f"GCC-only <bits/stdc++.h>. {gcc_hint}"
+            )
+        elif not available:
+            info["warning"] = f"Compiler '{key}' exited with code {proc.returncode} on --version."
+    except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError):
+        info["available"] = False
+        info["supports_bits_stdcpp"] = False
+        info["warning"] = f"Compiler '{key}' not found or not executable."
+
+    # Only cache positive availability results so installing a compiler mid-session takes effect
+    if use_cache and info["available"]:
+        _COMPILER_INFO_CACHE[cache_key] = _clone_compiler_info(info)
+    return _clone_compiler_info(info)
+
+
+async def detect_compiler_info_async(compiler: str = "g++", *, use_cache: bool = True) -> dict[str, Any]:
+    """Async wrapper around ``detect_compiler_info``."""
+    return await asyncio.to_thread(detect_compiler_info, compiler, use_cache=use_cache)
 
 
 @dataclass
@@ -309,18 +502,27 @@ async def compile_cpp(
             )
 
         if process.returncode != 0:
+            out_text = stdout.decode("utf-8", errors="replace")
             err_text = stderr.decode("utf-8", errors="replace")
-            if sys.platform == "darwin" and "bits/stdc++.h" in err_text:
-                err_text = (
-                    f"{err_text}\n"
-                    "Hint (macOS): Apple Clang does not include <bits/stdc++.h>. "
-                    "Install Homebrew GCC (`brew install gcc`) so `g++-14`/`g++-13` is available."
-                )
+            hint: str | None = None
+            error_msg = f"Compilation failed with code {process.returncode}"
+            if "bits/stdc++.h" in err_text:
+                comp_info = await detect_compiler_info_async(effective_compiler)
+                if comp_info.get("is_apple_clang") and comp_info.get("warning"):
+                    hint = str(comp_info["warning"])
+                    error_msg = f"{error_msg}. {hint}"
+                if sys.platform == "darwin":
+                    err_text = (
+                        f"{err_text}\n"
+                        "Hint (macOS): Apple Clang does not include <bits/stdc++.h>. "
+                        "Install Homebrew GCC (`brew install gcc`) so `g++-14`/`g++-13` is available."
+                    )
             return CompileResult(
                 success=False,
-                error=f"Compilation failed with code {process.returncode}",
-                stdout=stdout.decode("utf-8", errors="replace"),
+                error=error_msg,
+                stdout=out_text,
                 stderr=err_text,
+                hint=hint,
             )
 
         if effective_use_cache:
@@ -439,7 +641,7 @@ async def _run_process(
     """运行进程的公共逻辑。"""
     import tempfile
 
-    start_time = time.monotonic()
+    start_time = time.perf_counter()
     safe_memory_mb = max(1, int(round(float(memory_mb))))
     job = None
     process = None
@@ -576,10 +778,10 @@ async def _run_process(
                 error=f"Execution timeout after {timeout}s. The program may contain an infinite loop or the input data may be too large.",
                 stdout=out_str,
                 stderr=err_str,
-                time_ms=int((time.monotonic() - start_time) * 1000),
+                time_ms=int(round((time.perf_counter() - start_time) * 1000)),
             )
 
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        elapsed_ms = int(round((time.perf_counter() - start_time) * 1000))
 
         # 正常完成后关闭 Job Handle；若 Job 配置了 KILL_ON_JOB_CLOSE，
         # 关闭时仍可能终止 Job 中尚未退出的子进程。

@@ -50,6 +50,7 @@ class SolutionAuditStdTool(Tool):
         assert resolved is not None
         code = resolved.code
 
+        raw_claimed = claimed_complexity
         if claimed_complexity:
             claimed_complexity = normalize_complexity_expression(claimed_complexity)
 
@@ -87,7 +88,7 @@ class SolutionAuditStdTool(Tool):
             empirical_verification = await run_empirical_verification(
                 problem_dir,
                 "sol",
-                claimed_complexity,
+                raw_claimed,
                 constraints,
             )
             if empirical_verification.get("status") == "pending_generator":

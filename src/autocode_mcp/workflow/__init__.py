@@ -26,6 +26,7 @@ from .manifest import (
 )
 from .models import (
     AutoCodeManifest,
+    EmpiricalComplexityConfig,
     OracleMode,
     ProblemType,
     ProtocolConfig,
@@ -35,6 +36,7 @@ from .models import (
 
 __all__ = [
     "AutoCodeManifest",
+    "EmpiricalComplexityConfig",
     "OracleMode",
     "ProblemType",
     "ProtocolConfig",

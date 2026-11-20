@@ -1,22 +1,72 @@
 import math
 import os
+import re
+import shlex
 import subprocess
 from typing import Any
 
 from .ratio_analyzer import normalize_complexity_expression
 
+_SIMPLE_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
 
 class MultiScaleSampler:
+    _EXPONENTIAL_COMPLEXITIES = frozenset(
+        {"O(2^n)", "O(n 2^n)", "O(n^2 2^n)", "O(3^n)", "O(n!)"}
+    )
+
     @classmethod
-    def compute_scale_points(cls, n_max: int, complexity_type: str = "O(n)") -> list[int]:
+    def compute_scale_points(
+        cls,
+        n_max: int,
+        complexity_type: str = "O(n)",
+        *,
+        scale_mode: str = "auto",
+        dominant_var: str = "n",
+    ) -> list[int]:
         if n_max <= 0:
             return []
         if n_max == 1:
             return [1]
 
-        norm_comp = normalize_complexity_expression(complexity_type)
+        norm_comp = normalize_complexity_expression(complexity_type, dominant_var=dominant_var)
 
-        if norm_comp in ("O(2^n)", "O(n!)") or n_max <= 30:
+        if scale_mode == "log":
+            if n_max <= 30:
+                count = min(5, n_max)
+                start = max(1, n_max - count + 1)
+                return sorted(set(range(start, n_max + 1)))
+            # Geometric progression across [2, n_max] so log2(n) is evenly spaced
+            log_min = max(1.0, math.log2(max(2, min(16, n_max))))
+            log_max = math.log2(n_max)
+            if log_max <= log_min + 1e-6:
+                return sorted({max(1, n_max // 2), n_max})
+            pts = [
+                max(2, min(n_max, int(round(2.0 ** (log_min + (log_max - log_min) * k / 4.0)))))
+                for k in range(5)
+            ]
+            pts[-1] = n_max
+            return sorted(set(pts))
+
+        if scale_mode == "exponential":
+            if n_max <= 8:
+                count = min(5, n_max)
+                start = max(1, n_max - count + 1)
+                return sorted(set(range(start, n_max + 1)))
+            step = max(1, min(2, n_max // 8))
+            pts = [max(1, n_max - step * (4 - k)) for k in range(5)]
+            pts[-1] = n_max
+            return sorted(set(pts))
+
+        if scale_mode == "linear":
+            if n_max <= 5:
+                return list(range(1, n_max + 1))
+            ratios = [0.20, 0.40, 0.60, 0.80, 1.00]
+            raw_points = [max(1, int(math.floor(n_max * r))) for r in ratios]
+            raw_points[-1] = n_max
+            return sorted(set(raw_points))
+
+        if norm_comp in cls._EXPONENTIAL_COMPLEXITIES or n_max <= 30:
             count = min(5, n_max)
             start = max(1, n_max - count + 1)
             points = list(range(start, n_max + 1))
@@ -41,9 +91,11 @@ class MultiScaleSampler:
         seed: int,
         template: str | None = None,
         extra_vars: dict[str, Any] | None = None,
+        dominant_var: str = "n",
     ) -> list[str]:
         vars_map: dict[str, Any] = {
             "n": n,
+            "value": n,
             "seed": seed,
             "type": "2",
             "n_min": n,
@@ -51,12 +103,38 @@ class MultiScaleSampler:
             "t_min": 1,
             "t_max": 1,
         }
+        dom = (dominant_var or "n").strip() or "n"
+        if dom.lower() in ("t", "t_max"):
+            vars_map["t_min"] = n
+            vars_map["t_max"] = n
+        vars_map[dom] = n
+        if dom.lower() not in ("seed", "type"):
+            vars_map[dom.lower()] = n
+
         if extra_vars:
             vars_map.update(extra_vars)
+            # Keep the scaled value bound to the active dominant variable & value placeholder
+            vars_map["value"] = n
+            vars_map[dom] = n
+            if dom.lower() not in ("seed", "type"):
+                vars_map[dom.lower()] = n
 
         if template:
-            formatted = template.format(**vars_map)
-            parts = formatted.strip().split()
+            if "\n" in template or "\r" in template or "\x00" in template:
+                raise ValueError("generator_args_template must be a single-line string without NUL/newlines")
+
+            def _replace(match: re.Match[str]) -> str:
+                key = match.group(1)
+                if key not in vars_map:
+                    raise ValueError(f"Unknown template placeholder {{{key}}}")
+                return str(vars_map[key])
+
+            formatted = _SIMPLE_PLACEHOLDER_RE.sub(_replace, template)
+            if "{" in formatted or "}" in formatted:
+                raise ValueError(
+                    "generator_args_template only allows simple {identifier} placeholders without format specs or attribute access"
+                )
+            parts = shlex.split(formatted.strip(), posix=(os.name != "nt"))
             return [generator_exe] + parts
 
         # 默认匹配既有 testlib 生成器标准格式: gen <seed> <type> <n_min> <n_max> <t_min> <t_max>

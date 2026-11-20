@@ -618,7 +618,6 @@ async def test_enforcement_fail_closed_oracle_mode_custom_protocol_and_sparse_cr
     assert st["interactor_ready"] is False
     assert st["interaction_scenarios"] == {}
 
-
 @pytest.mark.asyncio
 async def test_solution_build_wrong_reference_preserves_stress_validation_and_generated_tests(
     tmp_path, monkeypatch
@@ -674,5 +673,162 @@ async def test_solution_build_wrong_reference_preserves_stress_validation_and_ge
     assert after["packaged"] is False
 
 
+@pytest.mark.asyncio
+async def test_sol_rebuild_preserves_brute_audit_gate_by_file_hash(tmp_path):
+    """仅修改/重编 sol.cpp 时，仅失效 sol 侧门禁，不应连带重置未改动 brute.cpp 的 solution_audit_brute。"""
+    from autocode_mcp.workflow.enforcement import apply_result, preflight
 
+    problem_dir = managed_problem(tmp_path)
+    p = tmp_path / "problem"
+    sol_cpp = p / "solutions" / "sol.cpp"
+    brute_cpp = p / "solutions" / "brute.cpp"
+    sol_cpp.write_text("int main() { return 0; }\n", encoding="utf-8")
+    brute_cpp.write_text("int main() { return 0; }\n", encoding="utf-8")
 
+    # 1. 完成初始构建与审计
+    update_state(problem_dir, created=True)
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {})
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "brute"}, True, {})
+    apply_result(problem_dir, "solution_analyze", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {"estimated_complexity": "O(n)"})
+    apply_result(problem_dir, "solution_audit_std", {"problem_dir": problem_dir}, True, {})
+    apply_result(problem_dir, "solution_audit_brute", {"problem_dir": problem_dir}, True, {})
+
+    st = load_workflow_state(problem_dir)
+    assert st["std_audited"] is True
+    assert st["brute_audited"] is True
+    assert st["std_audited_hash"]
+    assert st["brute_audited_hash"]
+
+    # 2. 仅修改并重编 sol.cpp（不改动 brute.cpp）
+    sol_cpp.write_text("int main() { int x = 1; return x - 1; }\n", encoding="utf-8")
+    apply_result(problem_dir, "file_save", {"problem_dir": problem_dir, "path": "solutions/sol.cpp"}, True, {})
+    st_saved = load_workflow_state(problem_dir)
+    assert st_saved["sol_built"] is False
+    assert st_saved["std_audited"] is False
+    assert st_saved["brute_built"] is True
+    assert st_saved["brute_audited"] is True
+
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {})
+    apply_result(problem_dir, "solution_analyze", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {"estimated_complexity": "O(n)"})
+    apply_result(problem_dir, "solution_audit_std", {"problem_dir": problem_dir}, True, {})
+
+    st_after = load_workflow_state(problem_dir)
+    assert st_after["std_audited"] is True
+    assert st_after["brute_audited"] is True
+    # 无需重跑 solution_audit_brute，validator_build 直接放行
+    assert preflight("validator_build", problem_dir, {"problem_dir": problem_dir}) == []
+
+    # 3. 外部改动 brute.cpp 后（文件 hash 漂移），自动失效 brute_audited 并阻断 validator_build
+    brute_cpp.write_text("int main() { return 42; }\n", encoding="utf-8")
+    st_drift = load_workflow_state(problem_dir)
+    assert st_drift["brute_audited"] is False
+    violations = preflight("validator_build", problem_dir, {"problem_dir": problem_dir})
+    assert any(v.gate == "audits" for v in violations)
+def test_enforcement_hash_drift_failed_audit_inline_spoof_and_build_all_granularity(tmp_path):
+    """回归：外部改动 sol.cpp 失效构建与下游、audit(passed=False)/异源 code 不可放行、build_all 失败清门禁且仅辅助解保留对拍。"""
+    from autocode_mcp.workflow.enforcement import apply_result, preflight
+
+    problem_dir = managed_problem(tmp_path)
+    p = tmp_path / "problem"
+    sol_cpp = p / "solutions" / "sol.cpp"
+    brute_cpp = p / "solutions" / "brute.cpp"
+    other_cpp = p / "solutions" / "other.cpp"
+    sol_cpp.write_text("int main() { return 0; }\n", encoding="utf-8")
+    brute_cpp.write_text("int main() { return 0; }\n", encoding="utf-8")
+    other_cpp.write_text("int main() { return 1; }\n", encoding="utf-8")
+
+    update_state(problem_dir, created=True)
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {})
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "brute"}, True, {})
+    apply_result(problem_dir, "solution_analyze", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {"estimated_complexity": "O(n)"})
+
+    # 1. solution_audit_std returning passed=False (despite ToolResult.ok) must NOT mark std_audited=True
+    st_fail_audit = apply_result(
+        problem_dir,
+        "solution_audit_std",
+        {"problem_dir": problem_dir},
+        True,
+        {"passed": False},
+    )
+    assert st_fail_audit["std_audited"] is False
+    assert st_fail_audit["std_audited_hash"] is None
+
+    # 2. Inline mismatched code or non-canonical source_path must NOT mark std_audited=True
+    st_spoof_code = apply_result(
+        problem_dir,
+        "solution_audit_std",
+        {"problem_dir": problem_dir, "code": "int main() { return 999; }\n"},
+        True,
+        {"passed": True},
+    )
+    assert st_spoof_code["std_audited"] is False
+
+    st_spoof_path = apply_result(
+        problem_dir,
+        "solution_audit_std",
+        {"problem_dir": problem_dir, "source_path": "solutions/other.cpp"},
+        True,
+        {"passed": True},
+    )
+    assert st_spoof_path["std_audited"] is False
+
+    # Canonical audit passes
+    st_ok = apply_result(
+        problem_dir,
+        "solution_audit_std",
+        {"problem_dir": problem_dir},
+        True,
+        {"passed": True},
+    )
+    assert st_ok["std_audited"] is True
+    assert st_ok["std_audited_hash"] is not None
+
+    # Mark downstream passed (stress + tests_verified)
+    update_state(
+        problem_dir,
+        stress_passed=True,
+        tests_generated=True,
+        generated_test_count=4,
+        tests_verified=True,
+        verify_signals={
+            "limit_semantics": {"executed": True, "passed": True},
+            "validator_check": {"executed": True, "passed": True},
+        },
+    )
+    assert preflight("problem_pack_polygon", problem_dir, {"problem_dir": problem_dir}) == []
+
+    # 3. problem_build_all compiling ONLY an auxiliary wrong solution preserves stress_passed, invalidates tests_verified
+    st_aux = apply_result(
+        problem_dir,
+        "problem_build_all",
+        {"problem_dir": problem_dir},
+        True,
+        {"compiled": {"solutions/wrong_tle.cpp": "/bin/wrong_tle"}, "failures": {}},
+    )
+    assert st_aux["stress_passed"] is True
+    assert st_aux["tests_verified"] is False
+    assert st_aux["sol_built"] is True
+
+    # Restore tests_verified then test external sol.cpp edit drift
+    update_state(problem_dir, tests_verified=True, verify_signals={"limit_semantics": {"executed": True, "passed": True}, "validator_check": {"executed": True, "passed": True}})
+    sol_cpp.write_text("int main() { return 7; }\n", encoding="utf-8")
+    st_drifted = load_workflow_state(problem_dir)
+    assert st_drifted["sol_built"] is False
+    assert st_drifted["std_audited"] is False
+    assert st_drifted["tests_verified"] is False
+    assert st_drifted["stress_passed"] is False
+    pack_blocks = preflight("problem_pack_polygon", problem_dir, {"problem_dir": problem_dir})
+    assert any(v.gate == "tests_verified" for v in pack_blocks)
+
+    # 4. problem_build_all failure on solutions/sol.cpp resets sol_built=False
+    apply_result(problem_dir, "solution_build", {"problem_dir": problem_dir, "solution_type": "sol"}, True, {})
+    assert load_workflow_state(problem_dir)["sol_built"] is True
+    st_b_fail = apply_result(
+        problem_dir,
+        "problem_build_all",
+        {"problem_dir": problem_dir},
+        False,
+        {"compiled": {}, "failures": {"solutions/sol.cpp": "compile error"}},
+    )
+    assert st_b_fail["sol_built"] is False
+    assert st_b_fail["sol_source_hash"] is None

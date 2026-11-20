@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import platform
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -181,7 +183,11 @@ class ProblemAuditTool(Tool):
             if empirical_signal.get("executed") and not empirical_signal.get("passed"):
                 evidence = empirical_signal.get("evidence")
                 failure_reason = (
-                    str(evidence.get("failure_reason", "empirical complexity verification failed"))
+                    str(
+                        evidence.get("failure_reason")
+                        or evidence.get("message")
+                        or "empirical complexity verification failed"
+                    )
                     if isinstance(evidence, dict)
                     else "empirical complexity verification failed"
                 )
@@ -263,6 +269,8 @@ class ProblemAuditTool(Tool):
                     ),
                 }
             )
+
+        warnings.extend(self._host_performance_bias_warnings(manifest, quality_signals))
 
         decision = "go" if not blocking else "no_go"
         report = {
@@ -538,6 +546,66 @@ class ProblemAuditTool(Tool):
         return signals
 
     @staticmethod
+    def _host_performance_bias_warnings(
+        manifest: AutoCodeManifest,
+        quality_signals: dict[str, dict],
+    ) -> list[dict[str, str]]:
+        """Warn when local CPU speed may mask TLE wrong solutions on target OJ hardware."""
+        out: list[dict[str, str]] = []
+        wrong_sig = quality_signals.get("wrong_solution_kill", {})
+        wrong_ev = wrong_sig.get("evidence", {}) if isinstance(wrong_sig, dict) else {}
+        details = wrong_ev.get("details", []) if isinstance(wrong_ev, dict) else []
+        if not isinstance(details, list):
+            return out
+
+        tl_ms = float(manifest.time_limit_ms) if manifest.time_limit_ms > 0 else 2000.0
+        host_tag = f"{sys.platform}/{platform.machine()}"
+
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "unknown"))
+            if item.get("host_speed_warning"):
+                out.append(
+                    {
+                        "gate": "host_performance_bias",
+                        "reason": f"[{host_tag}] {item['host_speed_warning']}",
+                    }
+                )
+                continue
+            killed = bool(item.get("killed", False))
+            exp = str(item.get("expected") or "fail")
+            max_ms = item.get("max_time_ms")
+            max_ratio = item.get("max_ratio_to_std")
+            has_max_ms = isinstance(max_ms, int | float) and not isinstance(max_ms, bool)
+            has_max_ratio = isinstance(max_ratio, int | float) and not isinstance(max_ratio, bool)
+            if (
+                exp == "fail"
+                and not killed
+                and has_max_ms
+                and (
+                    float(max_ms) >= 0.25 * tl_ms
+                    or (
+                        has_max_ratio
+                        and float(max_ratio) >= 3.0
+                        and float(max_ms) >= 50.0
+                    )
+                )
+            ):
+                ratio_part = f", wrong/std={max_ratio}x" if has_max_ratio else ""
+                out.append(
+                    {
+                        "gate": "host_performance_bias",
+                        "reason": (
+                            f"[{host_tag}] wrong solution '{name}' survived locally at "
+                            f"max_time_ms={max_ms}ms (TL={tl_ms:.0f}ms{ratio_part}); "
+                            "fast local CPU may mask TLE on typical OJ hardware."
+                        ),
+                    }
+                )
+        return out
+
+    @staticmethod
     def _communication_metrics(
         manifest: AutoCodeManifest,
         quality_signals: dict[str, dict],
@@ -694,6 +762,7 @@ class ProblemAuditTool(Tool):
             return
 
         verifier = ProblemVerifyTestsTool()
+        is_interactive = manifest_is_interactive(manifest)
         answer_ext = verifier._resolve_answer_ext(str(tests_dir), None, tests_manifest or None)
         if not (isinstance(tests_manifest, dict) and tests_manifest.get("answer_ext")):
             has_ans = any(tests_dir.glob("*.ans"))
@@ -701,7 +770,9 @@ class ProblemAuditTool(Tool):
             if has_out and not has_ans:
                 answer_ext = ".out"
 
-        file_count = verifier._check_file_count(str(tests_dir), answer_ext)
+        file_count = verifier._check_file_count(
+            str(tests_dir), answer_ext, is_interactive=is_interactive
+        )
         quality_signals["file_count"] = self._wrap_verify_signal(file_count)
         if not file_count.get("passed"):
             blocking.append(
@@ -711,7 +782,9 @@ class ProblemAuditTool(Tool):
                 }
             )
 
-        no_empty = verifier._check_no_empty(str(tests_dir))
+        no_empty = verifier._check_no_empty(
+            str(tests_dir), is_interactive=is_interactive, answer_ext=answer_ext
+        )
         quality_signals["no_empty"] = self._wrap_verify_signal(no_empty)
         if not no_empty.get("passed"):
             blocking.append(
@@ -737,7 +810,6 @@ class ProblemAuditTool(Tool):
                     }
                 )
 
-        is_interactive = manifest_is_interactive(manifest)
         is_comm = manifest_is_communication(manifest)
         spj_checker = manifest_uses_testlib_checker(manifest)
 
@@ -772,6 +844,7 @@ class ProblemAuditTool(Tool):
             parts = resolve_participant_binaries(str(problem_path), manifest, None, exe_ext)
             sol_ready = bool(parts) and all(Path(p).is_file() for p in parts)
 
+        std_timings_live: dict[str, float] | None = None
         if sol_ready and judge_ready:
             ans_res = await verifier._check_answer_consistency(
                 str(problem_path),
@@ -784,6 +857,14 @@ class ProblemAuditTool(Tool):
                 use_system_temp=True,
             )
             quality_signals["answer_consistency"] = self._wrap_verify_signal(ans_res)
+            if isinstance(ans_res.get("per_test_timings"), list):
+                std_timings_live = {
+                    str(item["file"]): float(item["time_ms"])
+                    for item in ans_res["per_test_timings"]
+                    if isinstance(item, dict)
+                    and isinstance(item.get("file"), str)
+                    and isinstance(item.get("time_ms"), int | float)
+                }
             if not ans_res.get("passed"):
                 blocking.append(
                     {
@@ -819,6 +900,7 @@ class ProblemAuditTool(Tool):
                 verify_with_checker=spj_checker,
                 manifest=manifest,
                 use_system_temp=True,
+                std_timings=std_timings_live,
             )
             quality_signals["wrong_solution_kill"] = self._wrap_verify_signal(wrong_res)
             if not wrong_res.get("passed"):

@@ -670,3 +670,250 @@ async def test_pack_hydro_only_with_out_ext_and_root_interactor(tmp_path):
     assert (h_dir / "testdata" / "01.out").is_file()
     assert "testdata/interactor.cpp" in res.data["exports"]["hydro"]["files"]
 
+
+@pytest.mark.asyncio
+async def test_export_data_modes_hardlink_copy_zip_and_interactive_empty_ans_cleanup(tmp_path):
+    """验证 hardlink 去重、zip 压缩归档、交互题清理空 .ans 文件以及平台交互配置校验。"""
+    import zipfile
+
+    # 1. Standard problem: hardlink (default) shares inode, copy creates independent inode, zip creates .zip archive
+    pdir, manifest, in_files, tm = _setup_problem(tmp_path / "std", problem_type="standard", test_count=2)
+    h_link = export_hydro(
+        str(pdir),
+        manifest,
+        time_limit_ms=1000,
+        memory_limit_mb=256,
+        in_files=in_files,
+        answer_ext=".ans",
+        tests_manifest=tm,
+        data_mode="hardlink",
+    )
+    assert h_link["data_mode"] == "hardlink"
+    if os.name != "nt":
+        assert h_link["effective_data_mode"] == "hardlink"
+        src_ino = os.stat(pdir / "tests" / "01.in").st_ino
+        dst_ino = os.stat(Path(h_link["output_dir"]) / "testdata" / "01.in").st_ino
+        assert src_ino == dst_ino
+
+    h_copy = export_hydro(
+        str(pdir),
+        manifest,
+        time_limit_ms=1000,
+        memory_limit_mb=256,
+        in_files=in_files,
+        answer_ext=".ans",
+        tests_manifest=tm,
+        data_mode="copy",
+    )
+    assert h_copy["effective_data_mode"] == "copy"
+    if os.name != "nt":
+        assert os.stat(pdir / "tests" / "01.in").st_ino != os.stat(
+            Path(h_copy["output_dir"]) / "testdata" / "01.in"
+        ).st_ino
+
+    # Zip mode creates compressed archive without unpacked duplicate testdata
+    pdir_zip, manifest_zip, in_zip, tm_zip = _setup_problem(
+        tmp_path / "zip_prob", problem_type="standard", test_count=4
+    )
+    manifest_zip.quality_gates.require_tests_verified = False
+    manifest_zip.quality_gates.require_limit_semantics = False
+    manifest_zip.quality_gates.require_validator_check = False
+    save_manifest(str(pdir_zip), manifest_zip)
+
+    pack_zip = await ProblemPackPolygonTool().execute(
+        problem_dir=str(pdir_zip),
+        export_formats=["hydro", "qoj"],
+        export_data_mode="zip",
+    )
+    assert pack_zip.success, pack_zip.error
+    assert pack_zip.data["export_data_mode"] == "zip"
+    h_zip = Path(pack_zip.data["exports"]["hydro"]["archive_path"])
+    q_zip = Path(pack_zip.data["exports"]["qoj"]["archive_path"])
+    assert h_zip.is_file() and h_zip.suffix == ".zip"
+    assert q_zip.is_file() and q_zip.suffix == ".zip"
+    assert not (pdir_zip / "exports" / "hydro").exists()
+    assert not (pdir_zip / "exports" / "qoj").exists()
+    with zipfile.ZipFile(h_zip) as zf:
+        names = set(zf.namelist())
+        assert {"problem.yaml", "testdata/config.yaml", "testdata/01.in", "testdata/01.ans"}.issubset(names)
+    with zipfile.ZipFile(q_zip) as zf:
+        names = set(zf.namelist())
+        assert {"problem.conf", "data/1.in", "data/1.ans"}.issubset(names)
+
+    # 2. Interactive problem with empty .ans files: omit empty .ans & validate interactive config
+    ipdir, imanifest, iin, itm = _setup_problem(
+        tmp_path / "inter_empty_ans", problem_type="interactive", test_count=3
+    )
+    for i in range(1, 4):
+        (ipdir / "tests" / f"{i:02d}.ans").write_text("" if i != 2 else "   \n", encoding="utf-8")
+
+    ih = export_hydro(
+        str(ipdir),
+        imanifest,
+        time_limit_ms=2000,
+        memory_limit_mb=256,
+        in_files=iin,
+        answer_ext=".ans",
+        tests_manifest=itm,
+    )
+    assert ih["omitted_empty_answers"] == ["01.ans", "02.ans", "03.ans"]
+    assert ih["config_validation"]["passed"] is True
+    ih_td = Path(ih["output_dir"]) / "testdata"
+    assert not list(ih_td.glob("*.ans"))
+    icfg = yaml.safe_load((ih_td / "config.yaml").read_text(encoding="utf-8"))
+    assert icfg["type"] == "interactive"
+    assert icfg["interactor"] == "interactor.cpp"
+    assert icfg["subtasks"][0]["cases"] == [{"input": "01.in"}, {"input": "02.in"}, {"input": "03.in"}]
+
+    iq = export_qoj(
+        str(ipdir),
+        imanifest,
+        time_limit_ms=2000,
+        memory_limit_mb=256,
+        in_files=iin,
+        answer_ext=".ans",
+        tests_manifest=itm,
+    )
+    assert iq["omitted_empty_answers"] == ["01.ans", "02.ans", "03.ans"]
+    assert iq["config_validation"]["passed"] is True
+    assert not list((Path(iq["output_dir"]) / "data").glob("*.ans"))
+    iconf = _parse_qoj_conf(Path(iq["output_dir"]) / "problem.conf")
+    assert iconf["use_builtin_judger"] == "on"
+    assert iconf["interaction_mode"] == "on"
+    assert iconf["interactor"] == "interactor.cpp"
+    assert "use_builtin_checker" not in iconf
+
+    # 2b. Interactive problem with NO .ans files at all packs cleanly via ProblemPackPolygonTool
+    for f in (ipdir / "tests").glob("*.ans"):
+        f.unlink()
+    imanifest.quality_gates.require_tests_verified = False
+    imanifest.quality_gates.require_limit_semantics = False
+    imanifest.quality_gates.min_limit_case_ratio = 0.0
+    save_manifest(str(ipdir), imanifest)
+    pack_no_ans = await ProblemPackPolygonTool().execute(
+        problem_dir=str(ipdir),
+        export_formats=["polygon", "hydro", "qoj"],
+        export_data_mode="hardlink",
+    )
+    assert pack_no_ans.success, pack_no_ans.error
+    assert not list((ipdir / "exports" / "hydro" / "testdata").glob("*.ans"))
+    assert not list((ipdir / "exports" / "qoj" / "data").glob("*.ans"))
+
+    # 3. Interactive problem missing interactor.cpp must fail platform config validation
+    (ipdir / "files" / "interactor.cpp").unlink()
+    with pytest.raises(ValueError, match="interactor"):
+        export_hydro(
+            str(ipdir),
+            imanifest,
+            time_limit_ms=2000,
+            memory_limit_mb=256,
+            in_files=iin,
+            answer_ext=".ans",
+        )
+    with pytest.raises(ValueError, match="interactor"):
+        export_qoj(
+            str(ipdir),
+            imanifest,
+            time_limit_ms=2000,
+            memory_limit_mb=256,
+            in_files=iin,
+            answer_ext=".ans",
+        )
+
+
+@pytest.mark.asyncio
+async def test_exporter_reserved_dirs_atomic_staging_sibling_cleanup_and_file_save_hardlink_isolation(
+    tmp_path,
+):
+    """回归：拒绝保留目录覆盖、校验失败无残留目录、模式切换清理陈旧兄弟产物、file_save 原子替换不污染 hardlink 源文件。"""
+    import zipfile
+
+    from autocode_mcp.tools.file_ops import FileSaveTool
+
+    pdir, manifest, in_files, tm = _setup_problem(tmp_path / "safe_exp", problem_type="standard", test_count=2)
+
+    # 1. Reserved top-level problem directories must be rejected
+    for reserved in ("tests", "files", "solutions", "statements", ".autocode", "scripts"):
+        with pytest.raises(ValueError, match="reserved"):
+            export_hydro(
+                str(pdir),
+                manifest,
+                time_limit_ms=1000,
+                memory_limit_mb=256,
+                in_files=in_files,
+                answer_ext=".ans",
+                output_rel_dir=reserved,
+            )
+
+    # 2. Hardlink export + FileSaveTool edit on exported file must NOT corrupt tests/01.in
+    orig_content = (pdir / "tests" / "01.in").read_text(encoding="utf-8")
+    h_link = export_hydro(
+        str(pdir),
+        manifest,
+        time_limit_ms=1000,
+        memory_limit_mb=256,
+        in_files=in_files,
+        answer_ext=".ans",
+        tests_manifest=tm,
+        data_mode="hardlink",
+    )
+    save_res = await FileSaveTool().execute(
+        problem_dir=str(pdir),
+        path="exports/hydro/testdata/01.in",
+        content="MODIFIED EXPORT ONLY\n",
+    )
+    assert save_res.success, save_res.error
+    assert (pdir / "tests" / "01.in").read_text(encoding="utf-8") == orig_content
+    assert (Path(h_link["output_dir"]) / "testdata" / "01.in").read_text(encoding="utf-8") == "MODIFIED EXPORT ONLY\n"
+
+    # 3. Switching hardlink -> zip removes stale exports/hydro dir; zip has deterministic ZipInfo date_time
+    h_zip = export_hydro(
+        str(pdir),
+        manifest,
+        time_limit_ms=1000,
+        memory_limit_mb=256,
+        in_files=in_files,
+        answer_ext=".ans",
+        tests_manifest=tm,
+        data_mode="zip",
+    )
+    assert Path(h_zip["archive_path"]).is_file()
+    assert not (pdir / "exports" / "hydro").exists()
+    with zipfile.ZipFile(h_zip["archive_path"]) as zf:
+        for info in zf.infolist():
+            assert info.date_time == (2020, 1, 1, 0, 0, 0)
+
+    # Switching zip -> hardlink removes stale exports/hydro.zip
+    export_hydro(
+        str(pdir),
+        manifest,
+        time_limit_ms=1000,
+        memory_limit_mb=256,
+        in_files=in_files,
+        answer_ext=".ans",
+        tests_manifest=tm,
+        data_mode="hardlink",
+    )
+    assert (pdir / "exports" / "hydro").is_dir()
+    assert not (pdir / "exports" / "hydro.zip").exists()
+
+    # 4. Failed interactive export (missing interactor) leaves ZERO partial exports/hydro or exports/qoj dir
+    ipdir, imanifest, iin, _ = _setup_problem(
+        tmp_path / "fail_atomic", problem_type="interactive", test_count=2
+    )
+    (ipdir / "files" / "interactor.cpp").unlink()
+    with pytest.raises(ValueError, match="interactor"):
+        export_hydro(
+            str(ipdir),
+            imanifest,
+            time_limit_ms=1000,
+            memory_limit_mb=256,
+            in_files=iin,
+            answer_ext=".ans",
+            data_mode="copy",
+        )
+    assert not (ipdir / "exports" / "hydro").exists()
+    # Ensure no leftover .tmp_export_* dirs
+    if (ipdir / "exports").exists():
+        assert not list((ipdir / "exports").glob(".tmp_export_*"))
+

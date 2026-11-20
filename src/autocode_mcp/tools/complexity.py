@@ -90,6 +90,52 @@ def extract_constraint_numbers(constraints: dict[str, Any] | None) -> list[int]:
     return values
 
 
+def extract_dominant_var_max(
+    constraints: dict[str, Any] | None,
+    dominant_var: str = "n",
+) -> int | None:
+    """按指定主导变量名（如 n / T / k / m）从 constraints 中提取对应上限。"""
+    if not isinstance(constraints, dict):
+        return None
+    var = (dominant_var or "n").strip() or "n"
+    if var.lower() in ("n", "n_max"):
+        return extract_n_max_from_constraints(constraints)
+
+    var_forms = [var]
+    if var.lower().endswith("_max") and len(var) > 4:
+        var_forms.append(var[:-4])
+
+    candidates: list[str] = []
+    for v in var_forms:
+        for cand in (
+            f"{v}_max",
+            f"{v.lower()}_max",
+            f"{v.upper()}_max",
+            f"sum_{v}_max",
+            f"sum_{v.lower()}_max",
+            f"sum_{v.upper()}_max",
+            v,
+            v.lower(),
+            v.upper(),
+        ):
+            if cand not in candidates:
+                candidates.append(cand)
+    found: list[int] = []
+    for key in candidates:
+        raw = constraints.get(key)
+        parsed = _positive_int(raw)
+        if parsed is not None:
+            found.append(parsed)
+        elif isinstance(raw, dict):
+            for subkey in ("max", "maximum", "max_value", "n_max", "sum_max"):
+                nested = _positive_int(raw.get(subkey))
+                if nested is not None:
+                    found.append(nested)
+    if found:
+        return max(found)
+    return None
+
+
 def extract_n_max_from_constraints(constraints: dict[str, Any] | None) -> int | None:
     """优先按显式规模字段（n_max/sum_n_max/n，其次 m/q/k）提取主输入规模，避免被值域上限（如 a_i<=1e9）污染。"""
     if not isinstance(constraints, dict):
@@ -696,31 +742,80 @@ async def run_empirical_verification(
             "passed": True,
             "message": "claimed_complexity not provided; skipping empirical verification to avoid false assumptions",
         }
+    emp_cfg = manifest_model.empirical_complexity if manifest_model is not None else None
+    dominant_var = emp_cfg.dominant_var if emp_cfg is not None else "n"
+    scale_mode = emp_cfg.scale_mode if emp_cfg is not None else "auto"
+    metric_mode = emp_cfg.metric if emp_cfg is not None else "auto"
+    args_template = emp_cfg.generator_args_template if emp_cfg is not None else None
+    extra_vars: dict[str, Any] = dict(emp_cfg.extra_vars) if emp_cfg is not None else {}
+
     if manifest_model is not None:
         manifest_tl = _positive_float(manifest_model.time_limit_ms)
         if manifest_tl is not None:
             time_limit_ms = manifest_tl
-        manifest_n = extract_n_max_from_constraints(manifest_model.constraints)
-        if manifest_n is not None:
-            actual_n_max = manifest_n
+        if emp_cfg is not None and emp_cfg.max_value is not None:
+            actual_n_max = emp_cfg.max_value
+        else:
+            dom_max = extract_dominant_var_max(manifest_model.constraints, dominant_var)
+            if dom_max is not None:
+                actual_n_max = dom_max
+            else:
+                manifest_n = extract_n_max_from_constraints(manifest_model.constraints)
+                if manifest_n is not None:
+                    actual_n_max = manifest_n
     if constraints:
-        explicit_n = _positive_int(constraints.get("n_max"))
-        if explicit_n is not None:
-            actual_n_max = explicit_n
+        if emp_cfg is None or (emp_cfg.max_value is None and dominant_var.lower() == "n"):
+            explicit_n = _positive_int(constraints.get("n_max"))
+            if explicit_n is not None:
+                actual_n_max = explicit_n
         explicit_tl = _positive_float(constraints.get("time_limit_ms"))
         if explicit_tl is not None:
             time_limit_ms = explicit_tl
 
+    # 若以 T 作为主导变量且未提供自定义模板，默认保持 n 为合理固定值而非随 T 一起变动
+    if (
+        dominant_var.lower() in ("t", "t_max")
+        and args_template is None
+        and "n_min" not in extra_vars
+        and "n_max" not in extra_vars
+        and manifest_model is not None
+    ):
+        fixed_n = extract_n_max_from_constraints(manifest_model.constraints)
+        if fixed_n is not None:
+            extra_vars["n_min"] = fixed_n
+            extra_vars["n_max"] = fixed_n
+
+    is_interactive = manifest_is_interactive(manifest_model)
+    is_communication = manifest_is_communication(manifest_model)
+
     effective_complexity = claimed_complexity
-    scale_points = MultiScaleSampler.compute_scale_points(actual_n_max, effective_complexity)
+    norm_claimed = normalize_complexity_expression(
+        effective_complexity, dominant_var=dominant_var
+    )
+    effective_scale_mode = scale_mode
+    if (
+        effective_scale_mode == "auto"
+        and is_interactive
+        and norm_claimed == "O(log n)"
+        and actual_n_max >= 100
+    ):
+        effective_scale_mode = "log"
+
+    if emp_cfg is not None and emp_cfg.scale_points:
+        scale_points = list(emp_cfg.scale_points)
+    else:
+        scale_points = MultiScaleSampler.compute_scale_points(
+            actual_n_max,
+            effective_complexity,
+            scale_mode=effective_scale_mode,
+            dominant_var=dominant_var,
+        )
 
     empirical_dir = os.path.join(problem_dir, ".autocode", "empirical_tests")
     os.makedirs(empirical_dir, exist_ok=True)
 
     baseline_overhead = await DynamicExecutionMonitor.measure_baseline_overhead(cwd=problem_dir)
 
-    is_interactive = manifest_is_interactive(manifest_model)
-    is_communication = manifest_is_communication(manifest_model)
     interactor_path = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
     if is_interactive and not os.path.isfile(interactor_path):
         fallback_int = os.path.join(problem_dir, f"interactor{exe_ext}")
@@ -749,8 +844,15 @@ async def run_empirical_verification(
     samples: list[dict[str, Any]] = []
     for idx, pt in enumerate(scale_points):
         in_file = os.path.join(empirical_dir, f"scale_{pt}.in")
-        gen_cmd = MultiScaleSampler.format_generator_command(gen_path, pt, 42 + idx)
         try:
+            gen_cmd = MultiScaleSampler.format_generator_command(
+                gen_path,
+                pt,
+                42 + idx,
+                template=args_template,
+                extra_vars=extra_vars or None,
+                dominant_var=dominant_var,
+            )
             await asyncio.to_thread(
                 MultiScaleSampler.generate_scale_input_file,
                 gen_cmd,
@@ -818,15 +920,23 @@ async def run_empirical_verification(
                             proto_mem_runs.append(float(proto_rep.memory_mb or 0.0))
                     adjusted_cpu = round(statistics.median(proto_cpu_runs), 2)
                     proto_mem = round(max(proto_mem_runs), 2)
-            samples.append(
-                {
-                    "n": pt,
-                    "cpu_time_ms": adjusted_cpu,
-                    "memory_mb": proto_mem,
-                    "status": sample_status,
-                    "verdict": jres.verdict,
-                }
-            )
+            sample_entry: dict[str, Any] = {
+                "n": pt,
+                "cpu_time_ms": adjusted_cpu,
+                "memory_mb": proto_mem,
+                "status": sample_status,
+                "verdict": jres.verdict,
+            }
+            if is_interactive:
+                explicit_q = jres.metrics.get("queries")
+                fallback_q = jres.metrics.get("contestant_messages")
+                if isinstance(explicit_q, int) and not isinstance(explicit_q, bool) and explicit_q > 0:
+                    sample_entry["queries"] = explicit_q
+                    sample_entry["queries_source"] = "judge_metrics"
+                elif isinstance(fallback_q, int) and not isinstance(fallback_q, bool) and fallback_q > 0:
+                    sample_entry["queries"] = fallback_q
+                    sample_entry["queries_source"] = "contestant_messages"
+            samples.append(sample_entry)
             if sample_status in ("timeout", "mle"):
                 break
         else:
@@ -884,11 +994,57 @@ async def run_empirical_verification(
             if chosen_status in ("timeout", "mle"):
                 break
 
-    return EmpiricalRatioAnalyzer.verify_complexity(
-        effective_complexity,
-        samples,
-        time_limit_ms=time_limit_ms,
+    ok_query_samples = [
+        s
+        for s in samples
+        if s.get("status") == "ok"
+        and isinstance(s.get("queries"), int)
+        and not isinstance(s.get("queries"), bool)
+        and int(s["queries"]) > 0
+    ]
+
+    use_query_metric = metric_mode == "queries" or (
+        metric_mode == "auto"
+        and is_interactive
+        and len(ok_query_samples) >= 2
+        and norm_claimed in ("O(log n)", "O(1)")
     )
+
+    if use_query_metric:
+        max_q_limit = (
+            manifest_model.protocol.max_queries
+            if (manifest_model is not None and manifest_model.protocol is not None)
+            else None
+        )
+        verdict_dict = EmpiricalRatioAnalyzer.verify_query_complexity(
+            effective_complexity,
+            samples,
+            max_queries=max_q_limit,
+            time_limit_ms=time_limit_ms,
+            dominant_var=dominant_var,
+        )
+    else:
+        verdict_dict = EmpiricalRatioAnalyzer.verify_complexity(
+            effective_complexity,
+            samples,
+            time_limit_ms=time_limit_ms,
+            dominant_var=dominant_var,
+        )
+
+    verdict_dict["dominant_var"] = dominant_var
+    verdict_dict["scale_mode"] = effective_scale_mode
+    if (
+        emp_cfg is None
+        and manifest_model is not None
+        and len(manifest_model.constraints) >= 2
+        and verdict_dict.get("verdict") in ("ratio_mismatch", "verified_within_noise_floor")
+    ):
+        verdict_dict["multi_param_hint"] = (
+            "Problem declares multiple constraints; if runtime is dominated by a variable other than "
+            "`n` (e.g. T or k) or requires custom gen flags, configure `empirical_complexity` "
+            "(dominant_var, scale_points, generator_args_template) in .autocode/manifest.json."
+        )
+    return verdict_dict
 
 
 class SolutionAnalyzeTool(Tool):

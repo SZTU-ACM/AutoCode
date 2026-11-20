@@ -123,6 +123,10 @@ Do not infer that a problem is ready from file presence alone. Prefer structured
 
 Build `sol` before `brute`.
 
+On macOS, default `g++` is Apple Clang and does not support `<bits/stdc++.h>`. Prefer standard C++20 headers (`<iostream>`, `<vector>`, `<algorithm>`, etc.) or set `"compiler": "g++-14"` in `.autocode/manifest.json` (`problem_create` and `solution_build` detect Apple Clang and surface warnings automatically).
+
+Modifying/rebuilding `sol.cpp` uses SHA-256 hash-based gate invalidation: it invalidates `solution_analyze` / `solution_audit_std` without unnecessarily resetting `solution_audit_brute` when `brute.cpp` is unchanged.
+
 For non-trivial problems, `brute` must be independent enough to serve as an oracle. If it is the same algorithm as `sol`, mark this as a risk and run `solution_audit_brute`.
 
 Before writing brute, perform a quick counterexample check on paper:
@@ -166,7 +170,8 @@ Interactive interactor implementation requirements:
 - write to the contestant via `std::cout` and flush with `std::flush` / `std::endl` (use `tout` only for optional diagnostic logs written to `argv[2]`);
 - read contestant output via `ouf`;
 - end every branch with `quitf(_ok/_wa/_pe/_fail, ...)`;
-- include scripted `interaction_scenarios` in `interactor_build` that cover AC, wrong final answer, malformed command, out-of-range query, query-limit boundary, exceeding query limit, and premature EOF.
+- include scripted `interaction_scenarios` in `interactor_build` that cover AC, wrong final answer, malformed command, out-of-range query, query-limit boundary, exceeding query limit, and premature EOF;
+- `reference_solution_path` should point to a compiled executable (e.g. `solutions/sol`), though passing a `.cpp` path automatically maps to or compiles its binary, and omitting `reference_solution_path` while providing `test_inputs` auto-resolves a built `solutions/sol`.
 
 Communication implementation requirements:
 
@@ -226,7 +231,7 @@ Must pass before packaging. Default checks include:
 
 With `special_judge: true` and `stress_comparison: "checker"` (and a built `files/checker`), `answer_consistency` and `wrong_solution_kill` use the testlib checker against jury answers; with `stress_comparison: "exact"` they still compare strings to the answer files.
 
-Use `wrong_solution_kill` when wrong solutions are available. Wrong entries honor manifest `expected`: default `fail` means at least one test must reject the binary; `pass` means all tests must accept it (checker AC or exact match to `.ans`).
+Use `wrong_solution_kill` when wrong solutions are available. Wrong entries honor manifest `expected`: default `fail` means at least one test must reject the binary; `pass` means all tests must accept it (checker AC or exact match to `.ans`). The report includes per-test timing breakdowns, `wrong_ms / std_ms` ratios, configurable TLE policies (`quality_gates.wrong_tle_kill_factor`, default `1.0`, and optional `wrong_slowdown_kill_ratio`), and `host_performance_bias` warnings in `problem_audit` when a fast local CPU may mask TLE on typical OJ hardware.
 
 Run `autocode-verify <problem_dir>` for quick manifest/path checks; under the checker workflow it also surfaces `spj_warnings` if `checker.cpp` or the compiled checker is missing.
 
@@ -234,11 +239,11 @@ Run `autocode-verify <problem_dir>` for quick manifest/path checks; under the ch
 
 Only package after `problem_verify_tests(passed=true)` (and `problem_audit(mode="full")` when `audit_gates.require_full_audit=true`).
 
-Pass `export_formats` to export one or more judge formats in a single call (default `["polygon"]`):
+Pass `export_formats` to export one or more judge formats in a single call (default `["polygon"]`), and optional `export_data_mode` (`"hardlink"` default to avoid 3x workspace disk duplication with automatic copy fallback, `"copy"`, or `"zip"` for compressed uploadable archives under `exports/<fmt>.zip`):
 
 - `polygon`: standard Polygon layout + `problem.xml` (including `<groups>`/`<dependencies>`/`<tests>` when `subtasks` are defined, and `<communication>` for communication problems).
-- `hydro`: exports under `exports/hydro/` (`problem.yaml`, `problem_zh.md`, `testdata/config.yaml` with subtasks and judge sources).
-- `qoj`: exports under `exports/qoj/` (`problem.conf`, `statement.md`, 1-based contiguous `data/1.in..N.in`, `two_stage`/`with_implementer`/`interaction_mode`, and subtask dependencies).
+- `hydro`: exports under `exports/hydro/` (or `exports/hydro.zip` in `zip` mode): `problem.yaml`, `problem_zh.md`, `testdata/config.yaml` with subtasks and judge sources; interactive exports omit empty `.ans` files and validate `type: interactive` & `interactor`.
+- `qoj`: exports under `exports/qoj/` (or `exports/qoj.zip` in `zip` mode): `problem.conf`, `statement.md`, 1-based contiguous `data/1.in..N.in`, `two_stage`/`with_implementer`/`interaction_mode`, and subtask dependencies; interactive exports omit empty `.ans` files and validate `use_builtin_judger on` & `interaction_mode on`.
 
 ## Manifest
 
@@ -249,7 +254,9 @@ Each problem should maintain `manifest.json` as a readable contract. It should d
 - `protocol` (for interactive/communication: `mode`, `passes`, `pass_headers`, `max_bits`, `max_bytes`, `max_rounds`, `max_queries`, `communicator_file`, `grader_file`, `header_file`, `participant_solutions`);
 - `subtasks` (id, name, score, constraints, dependencies, `test_indices` / `groups`);
 - statement/tutorial paths;
-- time and memory limits;
+- time and memory limits, and optional `compiler` override (e.g. `"g++-14"` on macOS);
+- optional `empirical_complexity` config (`dominant_var`, `scale_points`, `generator_args_template`, `extra_vars`, `scale_mode`, `metric`) for multi-parameter, exponential, or interactive problems;
+- `quality_gates` including `wrong_tle_kill_factor` and optional `wrong_slowdown_kill_ratio`;
 - solution roles (including `wrong` solutions and optional per-entry `expected`: `fail` | `pass` for `wrong_solution_kill`);
 - case plan;
 - optional SPJ fields: `special_judge`, `stress_comparison` (`exact` | `checker`), and optional `stress_checker_bidirectional` (only meaningful with `special_judge` + `stress_comparison=checker`).

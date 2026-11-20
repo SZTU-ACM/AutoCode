@@ -13,6 +13,11 @@ from ..utils.communication_runner import (
     resolve_participant_binaries,
     safe_resolve_under_root,
 )
+from ..utils.compiler import (
+    detect_compiler_info_async,
+    has_bits_stdcpp_include,
+    resolve_effective_compiler,
+)
 from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_is_communication, manifest_is_interactive
@@ -63,7 +68,7 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         name: str | None = None,
         code: str | None = None,
         source_path: str | None = None,
-        compiler: str = "g++",
+        compiler: str | None = None,
     ) -> ToolResult:
         """执行解法构建。"""
         if solution_type not in {"sol", "brute", "wrong", "reference"}:
@@ -86,6 +91,16 @@ class SolutionBuildTool(Tool, BuildToolMixin):
                 return ToolResult.fail(
                     f"name or source_path is required when solution_type='{solution_type}'"
                 )
+
+        try:
+            manifest = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+
+        try:
+            effective_compiler = resolve_effective_compiler(compiler, manifest)
+        except ValueError as exc:
+            return ToolResult.fail(f"invalid compiler: {exc}")
 
         default_rel = (
             os.path.join("solutions", f"{solution_type}.cpp")
@@ -142,11 +157,6 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             include_dirs_list.append(resolved.include_dir)
         extra_sources: list[str] | None = None
 
-        try:
-            manifest = load_manifest(problem_dir)
-        except (ValidationError, OSError, ValueError) as exc:
-            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
-
         if (
             manifest is not None
             and manifest_is_communication(manifest)
@@ -176,12 +186,19 @@ class SolutionBuildTool(Tool, BuildToolMixin):
                 if hdr_dir and os.path.isdir(hdr_dir) and hdr_dir not in include_dirs_list:
                     include_dirs_list.append(hdr_dir)
 
+        compiler_info = await detect_compiler_info_async(effective_compiler)
+        compiler_warning = (
+            str(compiler_info["warning"])
+            if compiler_info.get("is_apple_clang") and compiler_info.get("warning")
+            else None
+        )
+
         include_dirs = include_dirs_list or None
         if extra_sources:
             result = await self.build(
                 compile_source,
                 binary_path,
-                compiler=compiler,
+                compiler=effective_compiler,
                 include_dirs=include_dirs,
                 extra_sources=extra_sources,
             )
@@ -189,16 +206,26 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             result = await self.build(
                 compile_source,
                 binary_path,
-                compiler=compiler,
+                compiler=effective_compiler,
                 include_dirs=include_dirs,
             )
 
         if not result.success:
+            fail_kwargs: dict[str, object] = {
+                "source_path": compile_source,
+                "canonical_path": canonical_path,
+                "compile_log": result.stderr,
+                "compiler": effective_compiler,
+            }
+            if result.hint:
+                fail_kwargs["compiler_hint"] = result.hint
+            elif compiler_warning and has_bits_stdcpp_include(resolved.code):
+                fail_kwargs["compiler_hint"] = compiler_warning
+            if compiler_warning:
+                fail_kwargs["compiler_warning"] = compiler_warning
             return ToolResult.fail(
                 f"Compilation failed: {result.error}",
-                source_path=compile_source,
-                canonical_path=canonical_path,
-                compile_log=result.stderr,
+                **fail_kwargs,
             )
 
         binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
@@ -208,17 +235,21 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             except Exception as e:
                 return ToolResult.fail(f"Failed to save standard binary: {str(e)}")
 
-        return ToolResult.ok(
-            source_path=compile_source,
-            canonical_path=canonical_path,
-            standard_source_path=standard_source_path,
-            binary_path=binary_path,
-            standard_binary_path=standard_binary_path,
-            binary_size=binary_size,
-            compile_log=result.stderr,
-            effective_name=effective_name,
-            message=f"Successfully built {effective_name}",
-        )
+        ok_kwargs: dict[str, object] = {
+            "source_path": compile_source,
+            "canonical_path": canonical_path,
+            "standard_source_path": standard_source_path,
+            "binary_path": binary_path,
+            "standard_binary_path": standard_binary_path,
+            "binary_size": binary_size,
+            "compile_log": result.stderr,
+            "compiler": effective_compiler,
+            "effective_name": effective_name,
+            "message": f"Successfully built {effective_name}",
+        }
+        if compiler_warning:
+            ok_kwargs["compiler_warning"] = compiler_warning
+        return ToolResult.ok(**ok_kwargs)
 
 
 class SolutionRunTool(Tool, RunToolMixin):

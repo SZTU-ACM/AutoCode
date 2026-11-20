@@ -603,3 +603,198 @@ async def test_linux_fallback_when_prlimit_unavailable(monkeypatch):
         res = await run_binary(dummy, "", timeout=1.5, memory_mb=256)
         assert res.success, res.error
         assert seen_cmds and os.path.abspath(dummy) == seen_cmds[0][0]
+
+
+def test_detect_compiler_info_apple_clang_vs_gcc_and_resolve_manifest(monkeypatch):
+    """应准确识别 Apple Clang（不支持 <bits/stdc++.h>）与 GNU GCC，并尊重 manifest.compiler 优先级。"""
+    import subprocess
+    from types import SimpleNamespace
+
+    from autocode_mcp.utils.compiler import (
+        detect_compiler_info,
+        has_bits_stdcpp_include,
+        resolve_effective_compiler,
+    )
+    from autocode_mcp.workflow.models import AutoCodeManifest
+
+    assert has_bits_stdcpp_include("#include <bits/stdc++.h>\nint main(){}\n") is True
+    assert has_bits_stdcpp_include("#include <iostream>\nint main(){}\n") is False
+
+    m_custom = AutoCodeManifest(problem_name="P", compiler="g++-14")
+    m_default = AutoCodeManifest(problem_name="P")
+    assert resolve_effective_compiler(None, m_custom) == "g++-14"
+    assert resolve_effective_compiler("clang++", m_custom) == "clang++"
+    assert resolve_effective_compiler(None, m_default) == "g++"
+
+    def fake_run_apple(*_a, **_kw):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Apple clang version 16.0.0 (clang-1600.0.26.4)\nTarget: arm64-apple-darwin\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run_apple)
+    monkeypatch.setattr(compiler_module, "_find_suggested_gcc_compilers", lambda: ["/opt/homebrew/bin/g++-14"])
+    apple_info = detect_compiler_info("g++", use_cache=False)
+    assert apple_info["available"] is True
+    assert apple_info["is_apple_clang"] is True
+    assert apple_info["supports_bits_stdcpp"] is False
+    assert apple_info["suggested_gcc_compilers"] == ["/opt/homebrew/bin/g++-14"]
+    assert "bits/stdc++.h" in (apple_info["warning"] or "")
+    assert "g++-14" in (apple_info["warning"] or "")
+
+    def fake_run_gcc(*_a, **_kw):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="g++-14 (Homebrew GCC 14.2.0) 14.2.0\nCopyright (C) Free Software Foundation\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run_gcc)
+    gcc_info = detect_compiler_info("g++-14", use_cache=False)
+    assert gcc_info["available"] is True
+    assert gcc_info["is_apple_clang"] is False
+    assert gcc_info["is_gcc"] is True
+    assert gcc_info["supports_bits_stdcpp"] is True
+    assert gcc_info["warning"] is None
+
+
+@pytest.mark.asyncio
+async def test_problem_create_and_solution_build_surface_apple_clang_and_manifest_compiler(
+    monkeypatch, tmp_path
+):
+    """problem_create 应提前暴露 Apple Clang 提示；solution_build 应读取 manifest.compiler。"""
+    import autocode_mcp.tools.problem as problem_mod
+    import autocode_mcp.tools.solution as solution_mod
+    from autocode_mcp.tools.problem import ProblemCreateTool
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.workflow import load_manifest, save_manifest
+
+    fake_apple = {
+        "compiler": "g++",
+        "resolved_path": "/usr/bin/g++",
+        "available": True,
+        "is_apple_clang": True,
+        "is_clang": True,
+        "is_gcc": False,
+        "version_line": "Apple clang version 16.0.0",
+        "supports_bits_stdcpp": False,
+        "suggested_gcc_compilers": [],
+        "warning": "Compiler 'g++' is Apple Clang, which does not support <bits/stdc++.h>.",
+    }
+
+    async def fake_detect(*_a, **_kw):
+        return dict(fake_apple)
+
+    monkeypatch.setattr(problem_mod, "detect_compiler_info_async", fake_detect)
+    monkeypatch.setattr(solution_mod, "detect_compiler_info_async", fake_detect)
+
+    pdir = tmp_path / "mac_prob"
+    create_res = await ProblemCreateTool().execute(problem_dir=str(pdir), problem_name="MacProb")
+    assert create_res.success
+    assert create_res.data["compiler_info"]["is_apple_clang"] is True
+    assert "bits/stdc++.h" in create_res.data["compiler_warning"]
+
+    # Configure custom compiler in manifest.json and verify SolutionBuildTool forwards it
+    m = load_manifest(str(pdir))
+    assert m is not None
+    m.compiler = "/opt/homebrew/bin/g++-14"
+    save_manifest(str(pdir), m)
+
+    captured: dict[str, str] = {}
+
+    async def fake_build(self, source_path, binary_path, compiler="g++", include_dirs=None, extra_sources=None):
+        captured["compiler"] = compiler
+        with open(binary_path, "wb") as bf:
+            bf.write(b"fakebin")
+        return CompileResult(success=True, binary_path=binary_path)
+
+    monkeypatch.setattr(SolutionBuildTool, "build", fake_build)
+    sol_res = await SolutionBuildTool().execute(
+        problem_dir=str(pdir),
+        solution_type="sol",
+        code="#include <iostream>\nint main(){return 0;}\n",
+    )
+    assert sol_res.success
+    assert captured["compiler"] == "/opt/homebrew/bin/g++-14"
+    assert sol_res.data["compiler"] == "/opt/homebrew/bin/g++-14"
+
+
+@pytest.mark.asyncio
+async def test_compiler_allowlist_negative_cache_and_win_job_float_timeout(monkeypatch, tmp_path):
+    """回归：compiler 严格白名单阻断任意可执行文件、unavailable 不写入缓存、WinJobObject 支持浮点超时且返回整数。"""
+    import subprocess
+    from types import SimpleNamespace
+
+    from pydantic import ValidationError
+
+    import autocode_mcp.utils.compiler as compiler_module
+    from autocode_mcp.tools.solution import SolutionBuildTool
+    from autocode_mcp.utils.compiler import detect_compiler_info, validate_compiler_spec
+    from autocode_mcp.utils.platform import get_exe_extension
+    from autocode_mcp.utils.win_job import WinJobObject
+    from autocode_mcp.workflow.models import AutoCodeManifest
+
+    # 1. Valid C++ compilers pass allowlist
+    for ok_comp in ("g++", "g++-14", "clang++", "/opt/homebrew/bin/g++-14", "x86_64-w64-mingw32-g++", "g++.exe"):
+        assert validate_compiler_spec(ok_comp) == ok_comp
+
+    # 2. Arbitrary executables / relative traversal / control chars rejected
+    for bad_comp in ("./evil.sh", "../g++", "/bin/sh", "python3", "g++\x00", "g++\n"):
+        with pytest.raises(ValueError):
+            validate_compiler_spec(bad_comp)
+        with pytest.raises(ValidationError):
+            AutoCodeManifest(problem_name="P", compiler=bad_comp)
+    with pytest.raises(ValueError):
+        validate_compiler_spec("")
+    assert AutoCodeManifest(problem_name="P", compiler="").compiler is None
+
+    # 3. Invalid compiler fails BEFORE clobbering existing sol.cpp or sol binary
+    sol_dir = tmp_path / "prob" / "solutions"
+    sol_dir.mkdir(parents=True)
+    sol_cpp = sol_dir / "sol.cpp"
+    sol_bin = sol_dir / f"sol{get_exe_extension()}"
+    sol_cpp.write_text("// original\n", encoding="utf-8")
+    sol_bin.write_bytes(b"original-binary")
+
+    bad_res = await SolutionBuildTool().execute(
+        problem_dir=str(tmp_path / "prob"),
+        solution_type="sol",
+        code="// new\n",
+        compiler="/bin/sh",
+    )
+    assert not bad_res.success
+    assert "invalid compiler" in (bad_res.error or "").lower()
+    assert sol_cpp.read_text(encoding="utf-8") == "// original\n"
+    assert sol_bin.read_bytes() == b"original-binary"
+
+    # 4. detect_compiler_info must NOT cache available=False
+    compiler_module._COMPILER_INFO_CACHE.clear()
+    calls = {"n": 0}
+
+    def flaky_run(*_a, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError("transiently missing")
+        return SimpleNamespace(returncode=0, stdout="g++-14 (GCC) 14.2.0\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", flaky_run)
+    monkeypatch.setattr(compiler_module.shutil, "which", lambda _c: "/opt/homebrew/bin/g++-14")
+    first = detect_compiler_info("g++-14", use_cache=True)
+    assert first["available"] is False
+    assert first["supports_bits_stdcpp"] is False
+    second = detect_compiler_info("g++-14", use_cache=True)
+    assert second["available"] is True
+    assert calls["n"] == 2
+    compiler_module._COMPILER_INFO_CACHE.clear()
+
+    # 5. WinJobObject._set_time_limit converts float timeout_sec to integer 100ns units
+    fake_job = WinJobObject.__new__(WinJobObject)
+    fake_job.job_handle = None
+    fake_job.timeout_sec = 1.5
+    fake_job.memory_mb = 256
+    t_100ns = fake_job._set_time_limit()
+    assert isinstance(t_100ns, int)
+    assert t_100ns == 15_000_000
+    assert isinstance(fake_job._set_memory_limit(), int)
+    assert fake_job._set_memory_limit() == 256 * 1024 * 1024

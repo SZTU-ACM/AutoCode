@@ -9,8 +9,11 @@ from __future__ import annotations
 import json
 import os
 
-from ..utils.compiler import run_binary
+from pydantic import ValidationError
+
+from ..utils.compiler import resolve_effective_compiler, run_binary
 from ..utils.platform import get_exe_extension
+from ..workflow import load_manifest
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, resolve_source
 from .schemas import ValidatorBuildInput, ValidatorSelectInput
@@ -57,9 +60,18 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
         code: str | None = None,
         source_path: str | None = None,
         test_cases: list[dict] | None = None,
-        compiler: str = "g++",
+        compiler: str | None = None,
     ) -> ToolResult:
         """执行 Validator 构建。"""
+        try:
+            manifest = load_manifest(problem_dir)
+        except (ValidationError, OSError, ValueError) as exc:
+            return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+        try:
+            effective_compiler = resolve_effective_compiler(compiler, manifest)
+        except ValueError as exc:
+            return ToolResult.fail(f"invalid compiler: {exc}")
+
         resolved, err = resolve_source(
             problem_dir,
             code,
@@ -86,7 +98,7 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
 
         compile_source = resolved.original_source_path or canonical_path
         include_dirs = [resolved.include_dir] if resolved.include_dir else None
-        compile_result = await self.build(compile_source, binary_path, compiler=compiler, include_dirs=include_dirs)
+        compile_result = await self.build(compile_source, binary_path, compiler=effective_compiler, include_dirs=include_dirs)
 
         if not compile_result.success:
             return ToolResult.fail(

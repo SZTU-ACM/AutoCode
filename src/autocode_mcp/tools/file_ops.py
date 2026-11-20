@@ -215,9 +215,26 @@ class FileSaveTool(Tool):
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
+        tmp_path: str | None = None
         try:
-            with open(full_path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(content)
+            import tempfile
+
+            # Atomic temp-file + os.replace write: breaks hardlinks (preventing export edits
+            # from silently mutating shared inodes in tests/) and avoids partial writes.
+            target_dir = dir_path or "."
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                newline="\n",
+                dir=target_dir,
+                prefix=".autocode_save_",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_f:
+                tmp_path = tmp_f.name
+                tmp_f.write(content)
+            os.replace(tmp_path, full_path)
+            tmp_path = None
 
             return ToolResult.ok(
                 path=full_path,
@@ -225,4 +242,9 @@ class FileSaveTool(Tool):
                 message=f"Saved {len(content)} bytes to {path}",
             )
         except Exception as e:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             return ToolResult.fail(f"Failed to save file: {str(e)}")
