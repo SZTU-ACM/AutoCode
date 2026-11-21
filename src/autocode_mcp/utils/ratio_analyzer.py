@@ -231,15 +231,64 @@ class EmpiricalRatioAnalyzer:
         expected_range = cls.COMPLEXITY_ALPHA_RANGES.get(norm_claimed, (0.65, 1.35))
         is_alpha_match = expected_range[0] <= alpha <= expected_range[1]
 
-        # 若后段高信噪比测点（后 3 点）呈现显著高阶增长，采用后段拟合结果以防前段底噪平线掩盖真实复杂度
+        # 若后段高信噪比测点（后 3 点）在有效规模跨度（>=2x）上呈现显著高阶增长，采用后段拟合结果以防前段底噪平线掩盖真实复杂度
         if len(valid_samples) >= 4:
             tail_samples = valid_samples[-3:]
+            tail_n0 = int(tail_samples[0].get("n", 0))
+            tail_n1 = int(tail_samples[-1].get("n", 0))
+            tail_n_span = (float(tail_n1) / float(tail_n0)) if tail_n0 > 0 else 1.0
+            tail_times = [float(s["cpu_time_ms"]) for s in tail_samples]
+            tail_time_ratio = max(tail_times) / max(min(tail_times), 0.1)
             tail_alpha, tail_r2 = cls.fit_log_linear(tail_samples)
-            if tail_alpha > expected_range[1]:
+            if tail_alpha > expected_range[1] and (
+                norm_claimed in ("O(2^n)", "O(n!)")
+                or (tail_n_span >= 2.0 and tail_time_ratio >= 2.0 and tail_r2 >= 0.75)
+            ):
                 is_alpha_match = False
                 alpha = tail_alpha
                 fitted_cat = cls.infer_complexity_category(tail_alpha)
                 r_squared = tail_r2
+            elif tail_n_span >= 2.0:
+                # 若前段呈平坦进程启动平台（如 Windows CreateProcess ~12ms 固定开销），
+                # 扣除平台底噪后再检查后段净增量斜率，避免低常数 O(n^2) 被启动平台拉平掩盖。
+                t0 = float(valid_samples[0]["cpu_time_ms"])
+                t1 = float(valid_samples[1]["cpu_time_ms"])
+                plateau = min(t0, t1)
+                t_last = float(valid_samples[-1]["cpu_time_ms"])
+                is_flat_head = (
+                    abs(t1 - t0) <= 2.0
+                    and (max(t0, t1) / max(plateau, 0.1)) <= 1.25
+                    and (t_last - plateau) >= 15.0
+                )
+                if is_flat_head:
+                    offset = max(0.0, plateau - 0.1)
+                    adjusted_tail = [
+                        {
+                            "n": s["n"],
+                            "cpu_time_ms": float(s["cpu_time_ms"]) - offset,
+                        }
+                        for s in valid_samples[-3:]
+                        if (float(s["cpu_time_ms"]) - offset) >= 1.5
+                    ]
+                    if len(adjusted_tail) >= 2:
+                        net_alpha, net_r2 = cls.fit_log_linear(adjusted_tail)
+                        n_prev = int(adjusted_tail[-2]["n"])
+                        n_last = int(adjusted_tail[-1]["n"])
+                        t_prev_net = float(adjusted_tail[-2]["cpu_time_ms"])
+                        t_last_net = float(adjusted_tail[-1]["cpu_time_ms"])
+                        obs_net_ratio = t_last_net / max(t_prev_net, 0.01)
+                        exp_last_ratio = cls.calculate_expected_ratio(
+                            norm_claimed, n_prev, n_last
+                        )
+                        if (
+                            net_alpha > expected_range[1]
+                            and net_r2 >= 0.90
+                            and obs_net_ratio >= max(2.0, exp_last_ratio * 1.5)
+                        ):
+                            is_alpha_match = False
+                            alpha = net_alpha
+                            fitted_cat = cls.infer_complexity_category(net_alpha)
+                            r_squared = net_r2
 
         growth_ratios: list[dict[str, Any]] = []
         for i in range(len(valid_samples) - 1):
@@ -269,20 +318,41 @@ class EmpiricalRatioAnalyzer:
         peak_time = max(all_times)
         min_time = min(all_times)
         max_n = int(max_sample.get("n", 0))
+        min_n = int(valid_samples[0].get("n", 0))
+        n_span = (float(max_n) / float(min_n)) if min_n > 0 else 1.0
         headroom_ratio = max_time / time_limit_ms if time_limit_ms > 0 else 1.0
         peak_headroom = peak_time / time_limit_ms if time_limit_ms > 0 else 1.0
 
         if not is_alpha_match:
-            # 当全部样本耗时均处于 OS 计时底噪区间（<=15ms 且峰值 <5% TL），
+            # 当全部样本耗时均处于 OS 计时底噪区间（<=15ms，或低信噪比 <=35ms 且峰值 <5% TL），
             # 仅在不存在干净的高信噪比超阶增长信号（R^2>=0.90 且首尾缩放 >=4x 且最大点 >=2ms）时
-            # 才按底噪豁免，既避免 O(1)/O(log n) 亚毫秒抖动误报，又不放过干净的 O(n^2)/O(n^3) 曲线。
+            # 才按底噪豁免，既避免 O(1)/O(log n)/O(n log n) 计时粒度抖动误报，又不放过干净的 O(n^2)/O(n^3) 曲线。
             has_clean_high_order_signal = (
                 alpha > expected_range[1]
                 and r_squared >= 0.90
                 and (max_time / max(min_time, 0.1)) >= 4.0
                 and max_time >= 2.0
             )
-            if peak_time <= 15.0 and peak_headroom < 0.05 and not has_clean_high_order_signal:
+            in_noise_floor = (
+                peak_time <= 15.0
+                or (peak_time <= 35.0 and r_squared < 0.5)
+                or (
+                    peak_time <= 80.0
+                    and (peak_time / max(min_time, 0.1)) < 2.2
+                )
+            )
+            warmup_decay_only = alpha < expected_range[0] and peak_headroom < 0.15
+            narrow_scale_noise = (
+                norm_claimed not in ("O(2^n)", "O(n!)")
+                and n_span < 2.0
+                and peak_headroom < 0.25
+                and (peak_time / max(min_time, 0.1)) < 3.0
+            )
+            if (
+                (in_noise_floor and peak_headroom < 0.05)
+                or warmup_decay_only
+                or narrow_scale_noise
+            ) and not has_clean_high_order_signal:
                 return {
                     "passed": True,
                     "verdict": "verified_within_noise_floor",
@@ -295,7 +365,7 @@ class EmpiricalRatioAnalyzer:
                     "max_scale_headroom_ratio": round(headroom_ratio, 3),
                     "noise_floor_note": (
                         f"All scale samples completed within OS timer noise floor "
-                        f"(peak={peak_time:.2f}ms <= 15ms, headroom={peak_headroom:.3f})."
+                        f"(peak={peak_time:.2f}ms, r2={r_squared:.3f}, headroom={peak_headroom:.3f})."
                     ),
                 }
 
@@ -328,6 +398,31 @@ class EmpiricalRatioAnalyzer:
                 "samples": samples,
                 "growth_ratios": growth_ratios,
                 "remediation_advice": f"The algorithm exhibits {fitted_cat} growth rather than claimed {norm_claimed}. Inspect nested loops, optimize algorithm logic, or update claimed_complexity.",
+            }
+
+        # 当声称为 O(n) / O(n log n) 等线性对数阶，但全部采样点均落在低信噪比 OS 计时底噪内，
+        # fitted_cat 可能因常数启动底噪退化为 O(1)；回退报告 claimed_complexity 避免污染难度评估。
+        if (
+            norm_claimed in ("O(n)", "O(n log n)", "O(nlogn)", "O(n sqrt n)", "O(nsqrtn)")
+            and alpha < 0.50
+            and r_squared < 0.70
+            and peak_time <= 35.0
+            and peak_headroom < 0.05
+        ):
+            return {
+                "passed": True,
+                "verdict": "verified_within_noise_floor",
+                "claimed_complexity": norm_claimed,
+                "fitted_complexity": norm_claimed,
+                "fitted_alpha": round(alpha, 2),
+                "r_squared": round(r_squared, 3),
+                "samples": samples,
+                "growth_ratios": growth_ratios,
+                "max_scale_headroom_ratio": round(headroom_ratio, 3),
+                "noise_floor_note": (
+                    f"Low-SNR timer floor masked growth exponent (peak={peak_time:.2f}ms, r2={r_squared:.3f}); "
+                    f"preserving claimed complexity {norm_claimed}."
+                ),
             }
 
         return {

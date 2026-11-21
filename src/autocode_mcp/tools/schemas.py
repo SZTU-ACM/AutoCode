@@ -52,6 +52,10 @@ class ProblemValidateInput(BaseModel):
     problem_dir: str
     validate_types: list[Literal["statement_samples", "sample_files", "all"]] = ["all"]
     statement_samples: list[StatementSample] | None = None
+    samples_dir: str | None = Field(
+        default=None,
+        description="Optional directory containing sample .in/.ans files (defaults to tests/samples if present, else tests/).",
+    )
     tolerance: float = 1e-9
     timeout: int = 30
 
@@ -66,6 +70,7 @@ class CheckerScenario(BaseModel):
     contestant_output: str
     reference_output: str
     expected_verdict: Literal["AC", "WA", "PE", "PC", "FAIL"] = "AC"
+    category: str | None = None
 
 
 class CheckerBuildInput(BaseModel):
@@ -99,6 +104,7 @@ class InteractionScenario(BaseModel):
     contestant_output: str
     expected_verdict: Literal["AC", "WA", "PE", "PC", "FAIL", "TLE"] = "AC"
     stage: int | None = Field(default=None, ge=1)
+    category: str | None = None
 
 
 class InteractorBuildInput(BaseModel):
@@ -195,7 +201,7 @@ class SolutionAnalyzeInput(BaseModel):
 
 class SolutionBuildInput(BaseModel):
     problem_dir: str
-    solution_type: Literal["sol", "brute"]
+    solution_type: Literal["sol", "brute", "wrong", "reference"]
     name: str | None = None
     code: str | None = None
     source_path: str | None = None
@@ -204,7 +210,7 @@ class SolutionBuildInput(BaseModel):
 
 class SolutionRunInput(BaseModel):
     problem_dir: str
-    solution_type: Literal["sol", "brute"]
+    solution_type: Literal["sol", "brute", "wrong", "reference"]
     input_data: str
     name: str | None = None
     timeout: int = 30
@@ -353,6 +359,19 @@ class ProblemCleanupProcessesInput(BaseModel):
 
 class ProblemPackPolygonInput(BaseModel):
     problem_dir: str
-    time_limit: int | None = Field(default=None, ge=1)
-    memory_limit: int | None = Field(default=None, ge=1)
+    time_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Time limit in SECONDS (e.g., 1 or 2). Do NOT pass milliseconds; use time_limit_ms instead.",
+    )
+    time_limit_ms: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional time limit in MILLISECONDS (e.g., 1000 or 2000). Overrides manifest.time_limit_ms.",
+    )
+    memory_limit: int | None = Field(
+        default=None,
+        ge=1,
+        description="Memory limit in MB (e.g., 256 or 512).",
+    )
     export_formats: list[Literal["polygon", "hydro", "qoj"]] = ["polygon"]

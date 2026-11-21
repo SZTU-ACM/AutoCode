@@ -238,7 +238,11 @@ class StressTestRunTool(Tool):
                 global_round=global_round,
                 input_data=input_data,
                 sol_output=sol_result.stdout,
-                gen_detail={"stderr": sol_result.stderr},
+                gen_detail={
+                    "stderr": sol_result.stderr or sol_result.error or "",
+                    **({"error": sol_result.error} if sol_result.error else {}),
+                    **({"timed_out": True} if sol_result.timed_out else {}),
+                },
             )
         sol_output = sol_result.stdout
 
@@ -249,7 +253,10 @@ class StressTestRunTool(Tool):
                 global_round=global_round,
                 input_data=input_data,
                 sol_output=sol_output,
-                gen_detail={"timed_out": True},
+                gen_detail={
+                    "timed_out": True,
+                    **({"error": brute_result.error} if brute_result.error else {}),
+                },
             )
         if not brute_result.success:
             return _StressRoundResult(
@@ -257,7 +264,10 @@ class StressTestRunTool(Tool):
                 global_round=global_round,
                 input_data=input_data,
                 sol_output=sol_output,
-                gen_detail={"stderr": brute_result.stderr},
+                gen_detail={
+                    "stderr": brute_result.stderr or brute_result.error or "",
+                    **({"error": brute_result.error} if brute_result.error else {}),
+                },
             )
         brute_output = brute_result.stdout
 
@@ -347,21 +357,21 @@ class StressTestRunTool(Tool):
             verdict = gd.get("verdict")
             msg = f"{sol_name} failed at round {gr}" + (f" ({verdict})" if verdict else "")
             extra: dict[str, object] = {}
-            for k in ("verdict", "detail", "judge_stderr", "transcript"):
+            for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
                 if k in gd:
                     extra[k] = gd[k]
             return ToolResult.fail(
                 msg,
                 round=gr,
                 input_data=res.input_data,
-                stderr=gd.get("stderr", ""),
+                stderr=gd.get("stderr") or gd.get("error") or "",
                 statistics=statistics,
                 **extra,
             )
         if (res.gen_detail or {}).get("timed_out"):
             gd = res.gen_detail or {}
             extra_bt: dict[str, object] = {}
-            for k in ("verdict", "detail", "judge_stderr", "transcript"):
+            for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
                 if k in gd:
                     extra_bt[k] = gd[k]
             return ToolResult.fail(
@@ -376,7 +386,7 @@ class StressTestRunTool(Tool):
             )
         gd = res.gen_detail or {}
         extra_bf: dict[str, object] = {}
-        for k in ("verdict", "detail", "judge_stderr", "transcript"):
+        for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
             if k in gd:
                 extra_bf[k] = gd[k]
         if gd.get("deadlock"):
@@ -384,7 +394,7 @@ class StressTestRunTool(Tool):
                 f"{brute_name} deadlocked at round {gr} (possible missing flush or protocol mismatch)",
                 round=gr,
                 input_data=res.input_data,
-                stderr=gd.get("stderr", ""),
+                stderr=gd.get("stderr") or gd.get("error") or "",
                 statistics=statistics,
                 **extra_bf,
             )
@@ -392,7 +402,7 @@ class StressTestRunTool(Tool):
             f"{brute_name} failed at round {gr}",
             round=gr,
             input_data=res.input_data,
-            stderr=gd.get("stderr", ""),
+            stderr=gd.get("stderr") or gd.get("error") or "",
             statistics=statistics,
             **extra_bf,
         )
@@ -516,9 +526,21 @@ class StressTestRunTool(Tool):
         profiles = stress_profiles or [
             {"name": "default", "trials": trials, "types": types, "generator_args": generator_args}
         ]
-        total_rounds = sum(max(1, int(p.get("trials", trials))) for p in profiles)
-        first_profile_args = profiles[0].get("generator_args") or generator_args
-        effective_n_max = first_profile_args.get("n_max", n_max) if first_profile_args else n_max
+        total_rounds = sum(
+            max(1, int(trials if p.get("trials") is None else p["trials"]))
+            for p in profiles
+        )
+        profile_n_values: list[int] = []
+        for p in profiles:
+            p_args = p.get("generator_args")
+            if not isinstance(p_args, dict):
+                p_args = generator_args
+            if isinstance(p_args, dict) and p_args.get("n_max") is not None:
+                try:
+                    profile_n_values.append(int(p_args["n_max"]))
+                except (TypeError, ValueError):
+                    pass
+        effective_n_max = max(profile_n_values) if profile_n_values else n_max
         complexity_context = self._load_complexity_context(problem_dir)
 
         concurrency_limit = max(1, int(concurrency_limit))
@@ -538,10 +560,13 @@ class StressTestRunTool(Tool):
         with tempfile.TemporaryDirectory(dir=problem_dir) as temp_dir:
             global_round = 0
             for profile in profiles:
-                profile_name = str(profile.get("name", f"profile-{len(profile_reports) + 1}"))
-                profile_trials = max(1, int(profile.get("trials", trials)))
-                profile_types = profile.get("types", types)
-                profile_generator_args = profile.get("generator_args", generator_args)
+                profile_name = str(profile.get("name") or f"profile-{len(profile_reports) + 1}")
+                raw_trials = profile.get("trials")
+                profile_trials = max(1, int(trials if raw_trials is None else raw_trials))
+                raw_types = profile.get("types")
+                profile_types = types if raw_types is None else raw_types
+                raw_gen_args = profile.get("generator_args")
+                profile_generator_args = generator_args if raw_gen_args is None else raw_gen_args
                 start_count = len(round_stats)
                 profile_failed_round = None
 

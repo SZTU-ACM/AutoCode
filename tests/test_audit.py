@@ -196,7 +196,7 @@ async def test_problem_audit_statement_consistency_next_action_json_serializable
     assert result.success
     assert result.data["decision"] == "no_go"
     serialized = json.dumps(result.to_dict(), ensure_ascii=False)
-    assert str(problem_dir) in serialized
+    assert json.dumps(str(problem_dir)) in serialized
     assert (problem_dir / "audit_report.json").is_file()
 
 
@@ -410,14 +410,21 @@ async def test_problem_audit_standalone_blocks_symlink_escapes_and_handles_reado
     outside.write_text("secret\n", encoding="utf-8")
     esc_dir = tmp_path / "esc_pkg"
     (esc_dir / "tests").mkdir(parents=True)
-    os.symlink(str(outside), str(esc_dir / "tests" / "01.in"))
-    (esc_dir / "tests" / "01.ans").write_text("1\n", encoding="utf-8")
-    esc_res = await ProblemAuditTool().execute(
-        problem_dir=str(esc_dir), mode="full", standalone=True
-    )
-    assert esc_res.success
-    assert esc_res.data["decision"] == "no_go"
-    assert any(i["gate"] == "path_containment" for i in esc_res.data["blocking_issues"])
+    symlink_created = False
+    try:
+        os.symlink(str(outside), str(esc_dir / "tests" / "01.in"))
+        symlink_created = True
+    except OSError as exc:
+        if not (sys.platform == "win32" and getattr(exc, "winerror", None) == 1314):
+            raise
+    if symlink_created:
+        (esc_dir / "tests" / "01.ans").write_text("1\n", encoding="utf-8")
+        esc_res = await ProblemAuditTool().execute(
+            problem_dir=str(esc_dir), mode="full", standalone=True
+        )
+        assert esc_res.success
+        assert esc_res.data["decision"] == "no_go"
+        assert any(i["gate"] == "path_containment" for i in esc_res.data["blocking_issues"])
 
     # 3. Read-only directory live SPJ checker execution uses system temp dir cleanly
     if sys.platform != "win32" and os.geteuid() != 0:
@@ -486,4 +493,113 @@ async def test_problem_audit_standalone_qoj_layout_and_corrupt_manifest(tmp_path
         problem_dir=str(tmp_path / "does_not_exist"), standalone=True
     )
     assert not missing.success
+
+
+@pytest.mark.asyncio
+async def test_difficulty_signals_ignores_noisy_empirical_o1_and_separates_value_bounds(tmp_path):
+    """低信噪比实证 O(1) 不得覆盖静态复杂度；largest_numeric_constraint 应聚焦输入规模。"""
+    from autocode_mcp.workflow import default_manifest, save_manifest
+
+    pdir = tmp_path / "diff_sig"
+    (pdir / "solutions").mkdir(parents=True)
+    (pdir / "statements").mkdir(parents=True)
+    manifest = default_manifest("Dijkstra Scale")
+    manifest.constraints = {"n": {"min": 1, "max": 200000}, "a_i": {"min": 1, "max": 10**12}}
+    save_manifest(str(pdir), manifest)
+    (pdir / "solutions" / "sol.cpp").write_text(
+        """
+#include <queue>
+#include <vector>
+using namespace std;
+int main() {
+    int n = 10;
+    vector<vector<pair<int, int>>> adj(n);
+    priority_queue<pair<int, int>> pq;
+    pq.push({0, 0});
+    while (!pq.empty()) {
+        auto cur = pq.top();
+        pq.pop();
+        for (auto &e : adj[cur.second]) {
+            pq.push(e);
+        }
+    }
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+
+    tool = ProblemAuditTool()
+    noisy_signals = {
+        "empirical_complexity": {
+            "executed": True,
+            "passed": True,
+            "evidence": {
+                "verdict": "verified_within_noise_floor",
+                "fitted_complexity": "O(1)",
+                "r_squared": 0.12,
+            },
+        },
+        "answer_consistency": {"executed": True, "passed": True},
+        "limit_semantics": {"executed": True, "passed": True},
+    }
+    res = tool._difficulty_signals(pdir, manifest, noisy_signals)
+    assert res["estimated_complexity"] == "O(n log n)"
+    assert "heap" in res["algorithm_tags"]
+    assert "graph_traversal" not in res["algorithm_tags"]
+    assert res["constraint_scale"]["largest_numeric_constraint"] == 200000
+    assert res["constraint_scale"]["largest_value_bound"] == 10**12
+
+
+@pytest.mark.asyncio
+async def test_verify_tests_surfaces_infra_error_and_marks_wrong_kill_fail_not_re(monkeypatch, tmp_path):
+    """底层运行异常时 _check_answer_consistency 应透出 result.error，wrong_solution_kill 应判定为 FAIL 而非 RE。"""
+    import autocode_mcp.tools.test_verify as tv
+    from autocode_mcp.utils.compiler import RunResult
+    from autocode_mcp.utils.platform import get_exe_extension
+
+    pdir = tmp_path / "infra_err_pkg"
+    (pdir / "solutions").mkdir(parents=True)
+    (pdir / "tests").mkdir(parents=True)
+    exe_ext = get_exe_extension()
+    (pdir / "solutions" / f"sol{exe_ext}").write_text("x", encoding="utf-8")
+    (pdir / "solutions" / f"wa_bad{exe_ext}").write_text("x", encoding="utf-8")
+    (pdir / "tests" / "01.in").write_text("1\n", encoding="utf-8")
+    (pdir / "tests" / "01.ans").write_text("1\n", encoding="utf-8")
+
+    async def fake_run_binary(*_args, **_kwargs):
+        return RunResult(
+            success=False,
+            return_code=-1,
+            stdout="",
+            stderr="",
+            error="Execution error: simulated WinJobObject TypeError",
+        )
+
+    monkeypatch.setattr(tv, "run_binary", fake_run_binary)
+    verifier = ProblemVerifyTestsTool()
+
+    ans_res = await verifier._check_answer_consistency(
+        str(pdir), str(pdir / "tests"), "sol", ".ans", 5, use_system_temp=True
+    )
+    assert ans_res["passed"] is False
+    assert ans_res["errors"]
+    assert "simulated WinJobObject TypeError" in ans_res["errors"][0]["error"]
+
+    val_bin = pdir / "files" / f"val{exe_ext}"
+    val_bin.parent.mkdir(parents=True, exist_ok=True)
+    val_bin.write_text("x", encoding="utf-8")
+    val_res = await verifier._check_validator(str(pdir), str(pdir / "tests"), 5)
+    assert val_res["passed"] is False
+    assert "simulated WinJobObject TypeError" in val_res["invalid"][0]["error"]
+
+    kill_res = await verifier._check_wrong_solution_kill(
+        str(pdir), str(pdir / "tests"), ["wa_bad"], ".ans", 5, use_system_temp=True
+    )
+    assert kill_res["passed"] is False
+    detail = kill_res["details"][0]
+    assert detail["killed"] is False
+    assert detail["judge_failed"] is True
+    assert "simulated WinJobObject TypeError" in detail["reason"]
+    assert detail.get("killing_verdict") != "RE"
 

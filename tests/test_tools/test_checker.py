@@ -107,3 +107,24 @@ async def test_checker_build_invalid_code():
 
         assert not result.success
         assert "compilation" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_checker_build_persists_scenarios_for_verify_tests():
+    """checker_build 传入的 test_scenarios 应持久化到 .autocode/checker_scenarios.json 并被自检读取。"""
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+
+    tool = CheckerBuildTool()
+    verifier = ProblemVerifyTestsTool()
+    scenarios = [
+        {"input": "1\n", "contestant_output": "5\n", "reference_output": "5\n", "expected_verdict": "AC", "category": "ac"},
+        {"input": "1\n", "contestant_output": "4\n", "reference_output": "5\n", "expected_verdict": "WA", "category": "wrong_answer"},
+        {"input": "1\n", "contestant_output": "abc\n", "reference_output": "5\n", "expected_verdict": "PE", "category": "format_error"},
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res = await tool.execute(problem_dir=tmpdir, code=CHECKER_CODE, test_scenarios=scenarios)
+        assert res.success, res.error
+        assert os.path.isfile(os.path.join(tmpdir, ".autocode", "checker_scenarios.json"))
+        self_test = await verifier._check_checker_self_test(tmpdir, 10)
+        assert self_test["passed"] is True
+        assert self_test["total"] == 3

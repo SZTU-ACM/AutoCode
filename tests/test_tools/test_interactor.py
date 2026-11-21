@@ -273,3 +273,28 @@ int main(int argc, char* argv[]) {
         assert res.data["mutant_results"][0]["killed"] is False
         assert res.data["mutant_results"][0]["verdict"] == "FAIL"
         assert res.data["mutant_results"][0]["judge_failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_interactor_build_persists_scenarios_for_verify_tests():
+    """interactor_build 传入并验证通过的 interaction_scenarios 应持久化到 .autocode/ 并被自检复用。"""
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+
+    tool = InteractorBuildTool()
+    verifier = ProblemVerifyTestsTool()
+    scenarios = [
+        {"input": "5\n", "contestant_output": "10\n", "expected_verdict": "AC", "category": "ac"},
+        {"input": "5\n", "contestant_output": "9\n", "expected_verdict": "WA", "category": "wrong_answer"},
+        {"input": "5\n", "contestant_output": "abc\n", "expected_verdict": "PE", "category": "malformed_command"},
+        {"input": "5\n", "contestant_output": "999\n", "expected_verdict": "WA", "category": "out_of_range"},
+        {"input": "5\n", "contestant_output": "1\n", "expected_verdict": "WA", "category": "query_limit"},
+        {"input": "5\n", "contestant_output": "", "expected_verdict": "PE", "category": "premature_eof"},
+        {"input": "5\n", "contestant_output": "bad", "expected_verdict": "PE", "category": "extra_output"},
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res = await tool.execute(problem_dir=tmpdir, code=INTERACTOR_CODE, interaction_scenarios=scenarios)
+        assert res.success, res.error
+        assert os.path.isfile(os.path.join(tmpdir, ".autocode", "interactor_scenarios.json"))
+        self_test = await verifier._check_interactor_self_test(tmpdir, 10)
+        assert self_test["passed"] is True
+        assert self_test["total"] == 7

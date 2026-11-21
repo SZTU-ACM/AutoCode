@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 
 import pytest
 
@@ -562,7 +563,12 @@ async def test_safe_resolve_and_manifest_path_traversal_blocked(tmp_path):
 
     # Symlink escape rejected
     link = prob / "files" / "grader.cpp"
-    link.symlink_to(outside)
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege not enabled")
+        raise
     assert safe_resolve_under_root(str(prob), "files/grader.cpp") is None
 
     # Model-level rejection of unsafe paths and stems

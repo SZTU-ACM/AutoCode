@@ -113,7 +113,7 @@ int main() {
 
 def _compile_cpp(source_code: str, output_path: str) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    src_file = output_path + ".cpp"
+    src_file = os.path.splitext(output_path)[0] + ".cpp"
     with open(src_file, "w", encoding="utf-8") as f:
         f.write(source_code)
     cmd = ["g++", "-O2", "-std=c++17", src_file, "-o", output_path]

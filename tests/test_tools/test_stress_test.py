@@ -603,3 +603,38 @@ async def test_stress_test_reference_solutions_requires_oracle_and_compares():
         assert not res_mismatch.success
         assert res_mismatch.data.get("round") == 1
         assert "mismatch" in (res_mismatch.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_stress_test_effective_n_max_uses_maximum_across_all_profiles():
+    """stress_profiles 中多个档位时 effective_n_max 应取所有 profile n_max 最大值，并容忍 None 字段。"""
+    tool = StressTestRunTool()
+    gen_tool = GeneratorBuildTool()
+    build_tool = SolutionBuildTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        assert (await gen_tool.execute(problem_dir=tmpdir, code=GENERATOR_CODE)).success
+        sol_code = """
+#include <iostream>
+int main() {
+    int n; std::cin >> n;
+    for (int i = 0; i < n; i++) { long long x; std::cin >> x; }
+    std::cout << n << "\\n";
+    return 0;
+}
+"""
+        assert (await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=sol_code)).success
+        assert (await build_tool.execute(problem_dir=tmpdir, solution_type="brute", code=sol_code)).success
+
+        res = await tool.execute(
+            problem_dir=tmpdir,
+            trials=3,
+            n_max=50,
+            stress_profiles=[
+                {"name": "tiny", "trials": 2, "generator_args": {"type": "1", "n_min": 1, "n_max": 5, "t_min": 1, "t_max": 1}},
+                {"name": "peak", "trials": None, "types": None, "generator_args": {"type": "2", "n_min": 10, "n_max": 300, "t_min": 1, "t_max": 1}},
+            ],
+        )
+        assert res.success, res.error
+        assert res.data["total_rounds"] == 5
+        assert res.data["effective_n_max"] == 300

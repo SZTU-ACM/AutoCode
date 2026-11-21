@@ -490,7 +490,9 @@ class ProblemVerifyTestsTool(Tool):
                 }
 
         in_files = sorted(
-            f for f in os.listdir(tests_dir) if f.endswith(".in")
+            f
+            for f in os.listdir(tests_dir)
+            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
         )
 
         mismatches = []
@@ -622,12 +624,25 @@ class ProblemVerifyTestsTool(Tool):
             with open(ans_path, encoding="utf-8") as f:
                 expected = f.read()
 
-            result = await run_binary(sol_exe, input_data, timeout=test_timeout)
+            result = await run_binary(
+                sol_exe,
+                input_data,
+                timeout=test_timeout,
+                memory_mb=mem_mb,
+            )
 
             if result.timed_out:
                 return ("timed_out", in_file)
             if not result.success:
-                return ("error", {"file": in_file, "stderr": result.stderr})
+                return (
+                    "error",
+                    {
+                        "file": in_file,
+                        "return_code": result.return_code,
+                        "error": result.error or "",
+                        "stderr": result.stderr or "",
+                    },
+                )
             if verify_with_checker:
                 tmp_parent = None if use_system_temp else problem_dir
                 with tempfile.TemporaryDirectory(dir=tmp_parent) as tmp:
@@ -651,7 +666,7 @@ class ProblemVerifyTestsTool(Tool):
                             },
                         )
                 return None
-            if result.stdout.strip() != expected.strip():
+            if result.stdout.replace("\r\n", "\n").strip() != expected.replace("\r\n", "\n").strip():
                 return (
                     "mismatch",
                     {
@@ -717,7 +732,9 @@ class ProblemVerifyTestsTool(Tool):
             }
 
         in_files = sorted(
-            f for f in os.listdir(tests_dir) if f.endswith(".in")
+            f
+            for f in os.listdir(tests_dir)
+            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
         )
 
         async def _validate_one(in_file: str) -> dict | None:
@@ -728,10 +745,13 @@ class ProblemVerifyTestsTool(Tool):
 
             result = await run_binary(val_exe, input_data, timeout=timeout)
 
-            if result.return_code != 0:
+            if result.return_code != 0 or not result.success:
+                err_detail = result.stderr or result.error or ""
                 return {
                     "file": in_file,
-                    "stderr": result.stderr[:200] if result.stderr else "",
+                    "return_code": result.return_code,
+                    "error": result.error or "",
+                    "stderr": err_detail[:200],
                 }
             return None
 
@@ -772,7 +792,11 @@ class ProblemVerifyTestsTool(Tool):
                 "error": "invalid manifest format: tests must be a list",
             }
 
-        in_files = sorted(f for f in os.listdir(tests_dir) if f.endswith(".in"))
+        in_files = sorted(
+            f
+            for f in os.listdir(tests_dir)
+            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+        )
         in_file_set = set(in_files)
         type_by_in_file: dict[str, str] = {}
         for item in tests:
@@ -1212,6 +1236,7 @@ class ProblemVerifyTestsTool(Tool):
 
     def _collect_invalid_fixtures(self, problem_dir: str, tests_dir: str) -> list[dict]:
         fixtures: list[dict] = []
+        seen_inputs: set[str] = set()
         invalid_dir = Path(tests_dir) / "invalid"
         if invalid_dir.is_dir():
             for path in sorted(p for p in invalid_dir.iterdir() if p.is_file()):
@@ -1225,17 +1250,35 @@ class ProblemVerifyTestsTool(Tool):
                         continue
                     if isinstance(item.get("input"), str):
                         fixtures.append({"name": item.get("name", "inline"), "input": item["input"]})
+                        seen_inputs.add(item["input"])
                     elif isinstance(item.get("path"), str):
                         path = Path(item["path"])
                         if not path.is_absolute():
                             path = Path(problem_dir) / path
                         fixtures.append({"name": item.get("name", path.name), "path": str(path)})
+        persisted = Path(problem_dir) / ".autocode" / "validator_invalid_fixtures.json"
+        if persisted.is_file():
+            try:
+                data = json.loads(persisted.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = []
+            if isinstance(data, list):
+                for idx, item in enumerate(data, 1):
+                    if isinstance(item, dict) and isinstance(item.get("input"), str):
+                        inp = item["input"]
+                        if inp in seen_inputs:
+                            continue
+                        seen_inputs.add(inp)
+                        fixtures.append(
+                            {"name": str(item.get("name") or f"validator_tc_{idx}"), "input": inp}
+                        )
         return fixtures
 
     def _load_scenarios(self, problem_dir: str, filename: str) -> list[dict]:
         candidates = [
             Path(problem_dir) / "tests" / filename,
             Path(problem_dir) / "files" / filename,
+            Path(problem_dir) / ".autocode" / filename,
         ]
         for path in candidates:
             if not path.is_file():
@@ -1372,7 +1415,9 @@ class ProblemVerifyTestsTool(Tool):
             exp = self._wrong_expected(wrong_name, manifest)
             # 与 checker / interactor / communicator 一致：每测 "AC" / 非 AC；expected=fail 须至少一测非 AC；expected=pass 须全部 AC
 
-            async def _run_wrong_check(in_file: Path, _binary_path: Path = binary_path) -> str:
+            async def _run_wrong_check(
+                in_file: Path, _binary_path: Path = binary_path
+            ) -> tuple[str, str | None]:
                 ans_file = in_file.with_suffix(answer_ext)
                 if is_communication and manifest is not None:
                     input_data = in_file.read_text(encoding="utf-8")
@@ -1387,7 +1432,8 @@ class ProblemVerifyTestsTool(Tool):
                         memory_limit_mb=mem_mb,
                         use_system_temp=use_system_temp,
                     )
-                    return jres.verdict
+                    detail = (jres.detail or jres.judge_stderr[:200]) if jres.verdict == "FAIL" else None
+                    return (jres.verdict, detail or None)
                 if is_interactive:
                     input_data = in_file.read_text(encoding="utf-8")
                     answer_data = ans_file.read_text(encoding="utf-8") if ans_file.exists() else ""
@@ -1400,16 +1446,26 @@ class ProblemVerifyTestsTool(Tool):
                         memory_limit_mb=mem_mb,
                         cwd=None if use_system_temp else problem_dir,
                     )
-                    return jres.verdict
+                    detail = (jres.detail or jres.judge_stderr[:200]) if jres.verdict == "FAIL" else None
+                    return (jres.verdict, detail or None)
 
                 if not ans_file.exists():
-                    return "SKIP"
+                    return ("SKIP", None)
                 input_data = in_file.read_text(encoding="utf-8")
-                run = await run_binary(str(_binary_path), input_data, timeout=test_timeout)
+                run = await run_binary(
+                    str(_binary_path),
+                    input_data,
+                    timeout=test_timeout,
+                    memory_mb=mem_mb,
+                )
                 if run.timed_out:
-                    return "TLE"
+                    return ("TLE", None)
+                if run.memory_limit_exceeded:
+                    return ("MLE", None)
+                if run.error and run.return_code == -1:
+                    return ("FAIL", run.error)
                 if not run.success:
-                    return "RE"
+                    return ("RE", None)
                 if verify_with_checker:
                     in_path = str(in_file)
                     ans_path = str(ans_file)
@@ -1418,31 +1474,38 @@ class ProblemVerifyTestsTool(Tool):
                         out_path = os.path.join(tmp, "output.txt")
                         with open(out_path, "w", encoding="utf-8", newline="\n") as out_f:
                             out_f.write(run.stdout)
-                        verdict, _ = await run_testlib_checker(
+                        verdict, chk_run = await run_testlib_checker(
                             checker_bin,
                             in_path,
                             out_path,
                             ans_path,
                             timeout=timeout,
                         )
-                    return verdict
-                expected = ans_file.read_text(encoding="utf-8").strip()
-                return "AC" if run.stdout.strip() == expected else "WA"
+                    detail = (
+                        (chk_run.error or chk_run.stderr[:200]) if verdict == "FAIL" else None
+                    )
+                    return (verdict, detail or None)
+                expected = ans_file.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+                actual = run.stdout.replace("\r\n", "\n").strip()
+                return ("AC" if actual == expected else "WA", None)
 
             per_test: list[str] = []
             killing_verdict: str | None = None
             judge_failed = False
+            fail_detail: str | None = None
             for start in range(0, len(in_files), _VERIFY_CONCURRENCY):
                 chunk = in_files[start : start + _VERIFY_CONCURRENCY]
                 chunk_verdicts = await run_batch(
                     chunk, _run_wrong_check, limit=_VERIFY_CONCURRENCY
                 )
-                for v in chunk_verdicts:
+                for v, detail in chunk_verdicts:
                     if v == "SKIP":
                         continue
                     per_test.append(v)
                     if v == "FAIL":
                         judge_failed = True
+                        if detail and fail_detail is None:
+                            fail_detail = detail
                     elif v != "AC" and killing_verdict is None:
                         killing_verdict = v
                 if judge_failed:
@@ -1470,7 +1533,11 @@ class ProblemVerifyTestsTool(Tool):
             }
             if judge_failed:
                 entry["judge_failed"] = True
-                entry["reason"] = "judge returned FAIL (checker/interactor error)"
+                entry["reason"] = (
+                    f"judge returned FAIL: {fail_detail}"
+                    if fail_detail
+                    else "judge returned FAIL (checker/interactor/execution error)"
+                )
             elif killing_verdict is not None:
                 entry["killing_verdict"] = killing_verdict
             details.append(entry)

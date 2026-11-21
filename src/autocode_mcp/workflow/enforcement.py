@@ -8,6 +8,7 @@ preflight checks and workflow state transitions in this module.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -283,7 +284,11 @@ def _saved_relative_path(problem_dir: str, raw_path: Any) -> str | None:
     try:
         return candidate.relative_to(root).as_posix()
     except ValueError:
-        return None
+        try:
+            Path(os.path.normcase(str(candidate))).relative_to(Path(os.path.normcase(str(root))))
+        except ValueError:
+            return None
+        return Path(*candidate.parts[len(root.parts) :]).as_posix()
 
 
 def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_input: dict[str, Any]) -> None:
@@ -702,8 +707,22 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
     state = load_workflow_state(problem_dir)
     if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
         return state
-    if tool_name in _DOWNSTREAM_INVALIDATING_TOOLS:
+    is_auxiliary_solution_build = (
+        tool_name == "solution_build"
+        and tool_input.get("solution_type") in ("wrong", "reference")
+    )
+    if tool_name in _DOWNSTREAM_INVALIDATING_TOOLS and not is_auxiliary_solution_build:
         _invalidate_downstream(problem_dir, state)
+    elif is_auxiliary_solution_build and success:
+        state.update(
+            {
+                "tests_verified": False,
+                "limit_case_ratio": None,
+                "verify_signals": {},
+                "packaged": False,
+            }
+        )
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
     elif tool_name == "file_save" and success:
         _invalidate_for_file_save(problem_dir, state, tool_input)
     if tool_name == "problem_generate_tests":

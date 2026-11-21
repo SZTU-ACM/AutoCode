@@ -18,6 +18,7 @@ from ..utils.communication_runner import (
     CommunicationRunner,
     resolve_communicator_binary,
     resolve_participant_binaries,
+    safe_resolve_under_root,
 )
 from ..utils.compiler import run_binary
 from ..utils.judge_runner import InteractiveRunner
@@ -66,6 +67,7 @@ class ProblemValidateTool(Tool):
         problem_dir: str,
         validate_types: list[Literal["statement_samples", "sample_files", "all"]] | None = None,
         statement_samples: list[dict] | None = None,
+        samples_dir: str | None = None,
         tolerance: float = 1e-9,
         timeout: int = 30,
     ) -> ToolResult:
@@ -82,6 +84,7 @@ class ProblemValidateTool(Tool):
                 problem_dir=problem_dir,
                 validate_types=validate_types,
                 statement_samples=statement_samples,
+                samples_dir=samples_dir,
                 timeout=timeout,
                 manifest=manifest_model,
             )
@@ -90,6 +93,7 @@ class ProblemValidateTool(Tool):
                 problem_dir=problem_dir,
                 validate_types=validate_types,
                 statement_samples=statement_samples,
+                samples_dir=samples_dir,
                 timeout=timeout,
                 manifest=manifest_model,
             )
@@ -142,8 +146,14 @@ class ProblemValidateTool(Tool):
 
         # 验证样例文件
         if "sample_files" in validate_types:
-            tests_dir = os.path.join(problem_dir, "tests")
-            if os.path.exists(tests_dir):
+            tests_dir, dir_err = self._resolve_samples_dir(problem_dir, samples_dir)
+            if dir_err:
+                results["sample_files"] = {
+                    "validated": False,
+                    "message": dir_err,
+                }
+                all_passed = False
+            elif tests_dir and os.path.exists(tests_dir):
                 result = await self._validate_sample_files(
                     sol_exe,
                     tests_dir,
@@ -173,6 +183,41 @@ class ProblemValidateTool(Tool):
                 **results,
             )
 
+    def _resolve_samples_dir(
+        self, problem_dir: str, samples_dir: str | None
+    ) -> tuple[str | None, str | None]:
+        """解析样例文件目录：显式指定优先，其次非空 tests/samples/，最后回退 tests/。"""
+        if samples_dir is not None:
+            raw = samples_dir.strip()
+            if not raw:
+                return None, "samples_dir must be non-empty when provided"
+            if os.path.isabs(raw):
+                resolved = os.path.abspath(raw)
+            else:
+                maybe_resolved = safe_resolve_under_root(problem_dir, raw)
+                if maybe_resolved is None:
+                    return None, f"samples_dir escapes problem_dir: {samples_dir}"
+                resolved = maybe_resolved
+            if not os.path.isdir(resolved):
+                return None, f"samples_dir directory not found: {samples_dir}"
+            return resolved, None
+
+        samples_sub = os.path.join(problem_dir, "tests", "samples")
+        if os.path.isdir(samples_sub):
+            try:
+                if any(
+                    f.endswith(".in") and os.path.isfile(os.path.join(samples_sub, f))
+                    for f in os.listdir(samples_sub)
+                ):
+                    return samples_sub, None
+            except OSError:
+                pass
+
+        tests_dir = os.path.join(problem_dir, "tests")
+        if os.path.isdir(tests_dir):
+            return tests_dir, None
+        return None, None
+
     async def _validate_interactive_problem(
         self,
         problem_dir: str,
@@ -180,6 +225,7 @@ class ProblemValidateTool(Tool):
         statement_samples: list[dict] | None,
         timeout: int,
         *,
+        samples_dir: str | None = None,
         manifest: AutoCodeManifest | None = None,
     ) -> ToolResult:
         """验证交互题协议骨架；若已有编译好的 interactor 与 sol 且有样例输入，额外执行真实双向交互验证。"""
@@ -244,8 +290,8 @@ class ProblemValidateTool(Tool):
                         )
                     )
         else:
-            tests_dir = os.path.join(problem_dir, "tests")
-            if os.path.isdir(tests_dir):
+            tests_dir, _ = self._resolve_samples_dir(problem_dir, samples_dir)
+            if tests_dir and os.path.isdir(tests_dir):
                 tests_manifest = get_section(problem_dir, TEST_MANIFEST)
                 raw_ext = (
                     tests_manifest.get("answer_ext")
@@ -253,10 +299,18 @@ class ProblemValidateTool(Tool):
                     else None
                 )
                 ans_ext = normalize_answer_ext(raw_ext) or ".ans"
-                in_files = sorted(f for f in os.listdir(tests_dir) if f.endswith(".in"))[:5]
+                in_files = sorted(
+                    f
+                    for f in os.listdir(tests_dir)
+                    if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+                )[:5]
                 for in_file in in_files:
                     in_path = os.path.join(tests_dir, in_file)
                     ans_path = os.path.join(tests_dir, in_file[:-3] + ans_ext)
+                    if not os.path.isfile(ans_path) and ans_ext != ".out":
+                        alt_ans = os.path.join(tests_dir, in_file[:-3] + ".out")
+                        if os.path.isfile(alt_ans):
+                            ans_path = alt_ans
                     try:
                         with open(in_path, encoding="utf-8") as f:
                             inp = f.read()
@@ -377,6 +431,7 @@ class ProblemValidateTool(Tool):
         statement_samples: list[dict] | None,
         timeout: int,
         *,
+        samples_dir: str | None = None,
         manifest: AutoCodeManifest,
     ) -> ToolResult:
         """验证通信题协议文本，并在已有二进制与测试输入时执行真实通信判题。"""
@@ -469,8 +524,8 @@ class ProblemValidateTool(Tool):
                         )
                     )
         else:
-            tests_dir = os.path.join(problem_dir, "tests")
-            if os.path.isdir(tests_dir):
+            tests_dir, _ = self._resolve_samples_dir(problem_dir, samples_dir)
+            if tests_dir and os.path.isdir(tests_dir):
                 tests_manifest = get_section(problem_dir, TEST_MANIFEST)
                 raw_ext = (
                     tests_manifest.get("answer_ext")
@@ -478,10 +533,18 @@ class ProblemValidateTool(Tool):
                     else None
                 )
                 ans_ext = normalize_answer_ext(raw_ext) or ".ans"
-                in_files = sorted(f for f in os.listdir(tests_dir) if f.endswith(".in"))[:5]
+                in_files = sorted(
+                    f
+                    for f in os.listdir(tests_dir)
+                    if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+                )[:5]
                 for in_file in in_files:
                     in_path = os.path.join(tests_dir, in_file)
                     ans_path = os.path.join(tests_dir, in_file[:-3] + ans_ext)
+                    if not os.path.isfile(ans_path) and ans_ext != ".out":
+                        alt_ans = os.path.join(tests_dir, in_file[:-3] + ".out")
+                        if os.path.isfile(alt_ans):
+                            ans_path = alt_ans
                     try:
                         with open(in_path, encoding="utf-8") as f:
                             inp = f.read()
@@ -679,8 +742,12 @@ class ProblemValidateTool(Tool):
         checker_exe: str | None = None,
     ) -> dict:
         """验证样例文件。"""
-        # 找到所有 .in 文件
-        in_files = sorted([f for f in os.listdir(tests_dir) if f.endswith(".in")])
+        # 找到所有 .in 文件（排除子目录）
+        in_files = sorted(
+            f
+            for f in os.listdir(tests_dir)
+            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+        )
         if not in_files:
             return {
                 "validated": False,
@@ -693,10 +760,15 @@ class ProblemValidateTool(Tool):
 
         for in_file in in_files:
             in_path = os.path.join(tests_dir, in_file)
-            # 对应的 .ans 文件
+            # 对应的 .ans 文件（回退 .out）
             base = in_file[:-3]  # 去掉 ".in"
             ans_file = base + ".ans"
             ans_path = os.path.join(tests_dir, ans_file)
+            if not os.path.exists(ans_path):
+                alt_file = base + ".out"
+                alt_path = os.path.join(tests_dir, alt_file)
+                if os.path.exists(alt_path):
+                    ans_file, ans_path = alt_file, alt_path
 
             # 读取输入
             with open(in_path, encoding="utf-8") as f:
@@ -714,9 +786,9 @@ class ProblemValidateTool(Tool):
                 failed += 1
                 continue
 
-            actual = result.stdout.strip()
+            actual = result.stdout.replace("\r\n", "\n").strip()
 
-            # 检查 .ans 文件是否存在
+            # 检查 .ans / .out 文件是否存在
             if not os.path.exists(ans_path):
                 details.append({
                     "file": in_file,
@@ -730,7 +802,7 @@ class ProblemValidateTool(Tool):
 
             # 读取期望输出
             with open(ans_path, encoding="utf-8") as f:
-                expected = f.read().strip()
+                expected = f.read().replace("\r\n", "\n").strip()
 
             if checker_exe and problem_dir:
                 with tempfile.TemporaryDirectory(dir=problem_dir) as tmp:
@@ -764,7 +836,9 @@ class ProblemValidateTool(Tool):
         }
 
     def _compare_output(self, actual: str, expected: str, tolerance: float) -> bool:
-        """比较输出。"""
+        """比较输出（规范化 CRLF）。"""
+        actual = actual.replace("\r\n", "\n")
+        expected = expected.replace("\r\n", "\n")
         # 精确比较
         if actual == expected:
             return True

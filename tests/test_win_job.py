@@ -87,3 +87,20 @@ def test_win_job_assign_invalid_process():
         job.assign_process(999999)
 
     job.terminate()
+
+
+def test_win_job_float_limits_and_already_exited_process():
+    """浮点 timeout_sec/memory_mb 应四舍五入为整数限值；已退出短命进程不应抛错。"""
+    import subprocess
+    import time
+
+    from autocode_mcp.utils.win_job import WinJobObject
+
+    with WinJobObject(memory_mb=256.5, timeout_sec=1.5) as job:
+        assert job._set_time_limit() == 15_000_000
+        assert job._set_memory_limit() == round(256.5 * 1024 * 1024)
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait(timeout=5)
+        time.sleep(0.05)
+        job.assign_process(proc.pid)

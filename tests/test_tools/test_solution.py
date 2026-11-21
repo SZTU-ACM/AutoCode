@@ -530,3 +530,51 @@ int main() {
         assert not run_result.success
         assert "MLE" in run_result.error
         assert run_result.data.get("memory_limit_exceeded") is True
+
+
+@pytest.mark.asyncio
+async def test_solution_build_and_run_wrong_reference_do_not_overwrite_primary(monkeypatch):
+    """solution_build/run 支持 wrong/reference 且不得覆盖 solutions/sol.cpp 或 solutions/brute.cpp。"""
+    build_tool = SolutionBuildTool()
+    run_tool = SolutionRunTool()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sol_res = await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=SIMPLE_CPP)
+        assert sol_res.success
+        with open(os.path.join(tmpdir, "solutions", "sol.cpp"), encoding="utf-8") as sf:
+            primary_code_before = sf.read()
+
+        wrong_cpp = """
+#include <iostream>
+int main() {
+    int a, b;
+    std::cin >> a >> b;
+    std::cout << (a + b + 1) << "\\n";
+    return 0;
+}
+"""
+        w_res = await build_tool.execute(
+            problem_dir=tmpdir,
+            solution_type="wrong",
+            name="wa_off1",
+            code=wrong_cpp,
+        )
+        assert w_res.success, w_res.error
+        assert w_res.data["effective_name"] == "wa_off1"
+        assert os.path.exists(os.path.join(tmpdir, "solutions", "wa_off1.cpp"))
+        with open(os.path.join(tmpdir, "solutions", "sol.cpp"), encoding="utf-8") as sf:
+            assert sf.read() == primary_code_before
+
+        r_res = await run_tool.execute(
+            problem_dir=tmpdir,
+            solution_type="wrong",
+            name="wa_off1",
+            input_data="3 4\n",
+        )
+        assert r_res.success, r_res.error
+        assert r_res.data["stdout"].strip() == "8"
+
+        missing_name = await build_tool.execute(
+            problem_dir=tmpdir, solution_type="wrong", code=wrong_cpp
+        )
+        assert not missing_name.success

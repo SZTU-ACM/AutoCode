@@ -170,3 +170,30 @@ async def test_validator_select_tiebreaker_with_source_path():
 
         assert result.success
         assert result.data["best_candidate"]["id"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_validator_build_persists_invalid_fixtures_for_verify_tests():
+    """validator_build 传入的反例应持久化到 .autocode/ 并被 problem_verify_tests 复用。"""
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+
+    tool = ValidatorBuildTool()
+    verifier = ProblemVerifyTestsTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res = await tool.execute(
+            problem_dir=tmpdir,
+            code=VALIDATOR_CODE,
+            test_cases=[
+                {"input": "3\n1 2 3\n", "expected_valid": True},
+                {"input": "0\n", "expected_valid": False},
+            ],
+        )
+        assert res.success, res.error
+        tests_dir = os.path.join(tmpdir, "tests")
+        os.makedirs(tests_dir, exist_ok=True)
+        with open(os.path.join(tests_dir, "01.in"), "w", encoding="utf-8") as f:
+            f.write("3\n1 2 3\n")
+        self_test = await verifier._check_validator_self_test(tmpdir, tests_dir, 10)
+        assert self_test["passed"] is True
+        assert self_test["invalid_total"] == 1
+        assert self_test["invalid_rejected"] == ["validator_tc_2"]

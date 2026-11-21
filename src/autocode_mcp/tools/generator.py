@@ -6,6 +6,7 @@ Generator 工具组 - 数据生成器。
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import os
 import re
@@ -118,8 +119,9 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
         )
 
     def _check_type34_semantics(self, code: str) -> dict:
-        type3_blocks = self._extract_type_branch_snippets(code, 3)
-        type4_blocks = self._extract_type_branch_snippets(code, 4)
+        stripped = self._strip_cpp_comments_and_strings(code)
+        type3_blocks = self._extract_type_branch_snippets(stripped, 3)
+        type4_blocks = self._extract_type_branch_snippets(stripped, 4)
         has_type3 = bool(type3_blocks)
         has_type4 = bool(type4_blocks)
         if not has_type3 or not has_type4:
@@ -131,22 +133,27 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
                 "hint": "请人工确认 type=3/type=4 分支存在且有实质差异",
             }
 
-        norm3 = " ".join(type3_blocks).replace(" ", "")
-        norm4 = " ".join(type4_blocks).replace(" ", "")
-        output_lines = [line.strip() for line in code.splitlines() if "cout" in line or "printf" in line]
-        duplicate_outputs = len(set(output_lines)) <= 1 and len(output_lines) > 0
-        type3_signals = self._extract_branch_signals(" ".join(type3_blocks))
-        type4_signals = self._extract_branch_signals(" ".join(type4_blocks))
+        joined3 = " ".join(type3_blocks)
+        joined4 = " ".join(type4_blocks)
+        norm3 = re.sub(r"\s+", "", joined3)
+        norm4 = re.sub(r"\s+", "", joined4)
+        tokens3 = re.findall(r"[a-zA-Z_]\w*|\d+|[^\s\w]", joined3)
+        tokens4 = re.findall(r"[a-zA-Z_]\w*|\d+|[^\s\w]", joined4)
+        body_similarity = (
+            difflib.SequenceMatcher(None, tokens3, tokens4).ratio()
+            if (tokens3 and tokens4)
+            else 0.0
+        )
+        type3_signals = self._extract_branch_signals(joined3)
+        type4_signals = self._extract_branch_signals(joined4)
         shared_signals = type3_signals.intersection(type4_signals)
         signal_overlap = (
             len(shared_signals) / max(len(type3_signals.union(type4_signals)), 1)
             if (type3_signals or type4_signals)
             else 1.0
         )
-        similar_core = (
-            norm3 == norm4
-            or (norm3 and norm4 and abs(len(norm3) - len(norm4)) < 10)
-            or duplicate_outputs
+        similar_core = (bool(norm3) and norm3 == norm4) or (
+            body_similarity >= 0.96 and signal_overlap >= 0.95
         )
         overlap_advisory = signal_overlap > 0.9 and not similar_core
         return {
@@ -156,20 +163,159 @@ class GeneratorBuildTool(Tool, BuildToolMixin):
             "hint": "为 type=4 增加针对性卡法，而不仅是 n_max/t_max 取最大值",
             "signal_overlap": round(signal_overlap, 3),
             "signal_overlap_advisory": overlap_advisory,
+            "body_similarity": round(body_similarity, 3),
             "type3_signals": sorted(type3_signals)[:20],
             "type4_signals": sorted(type4_signals)[:20],
         }
 
+    @staticmethod
+    def _strip_cpp_comments_and_strings(code: str) -> str:
+        """移除 C++ 注释并清空字符串字面量内容，保留代码结构以供花括号配对。"""
+        out: list[str] = []
+        i = 0
+        n = len(code)
+        while i < n:
+            ch = code[i]
+            nxt = code[i + 1] if i + 1 < n else ""
+            if ch == "/" and nxt == "/":
+                out.append("  ")
+                i += 2
+                while i < n and code[i] != "\n":
+                    out.append(" ")
+                    i += 1
+            elif ch == "/" and nxt == "*":
+                out.append("  ")
+                i += 2
+                while i + 1 < n and not (code[i] == "*" and code[i + 1] == "/"):
+                    out.append("\n" if code[i] == "\n" else " ")
+                    i += 1
+                if i + 1 < n:
+                    out.append("  ")
+                    i += 2
+            elif ch == '"' or ch == "'":
+                quote = ch
+                out.append(quote)
+                i += 1
+                while i < n:
+                    if code[i] == "\\":
+                        i += 2
+                        continue
+                    if code[i] == quote:
+                        i += 1
+                        break
+                    i += 1
+                out.append(quote)
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _find_matching_delimiter(code: str, open_idx: int, open_ch: str, close_ch: str) -> int:
+        depth = 0
+        n = len(code)
+        for i in range(open_idx, n):
+            if code[i] == open_ch:
+                depth += 1
+            elif code[i] == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return i
+        return n - 1
+
+    def _extract_statement_or_block(self, code: str, start_idx: int) -> str:
+        n = len(code)
+        i = start_idx
+        while i < n and code[i].isspace():
+            i += 1
+        if i >= n:
+            return ""
+        if code[i] == "{":
+            end_idx = self._find_matching_delimiter(code, i, "{", "}")
+            return code[i : end_idx + 1]
+        # 单语句分支（无大括号），截断到顶层分号或块结尾。
+        paren_depth = 0
+        brace_depth = 0
+        for j in range(i, n):
+            ch = code[j]
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth -= 1
+            elif ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                if brace_depth == 0:
+                    return code[i:j]
+                brace_depth -= 1
+            elif ch == ";" and paren_depth == 0 and brace_depth == 0:
+                return code[i : j + 1]
+        return code[i:]
+
+    def _extract_case_body(self, code: str, colon_after_idx: int) -> str:
+        n = len(code)
+        i = colon_after_idx
+        while i < n and code[i].isspace():
+            i += 1
+        if i >= n:
+            return ""
+        # 显式 `case k: { ... }` 块
+        if code[i] == "{":
+            end_idx = self._find_matching_delimiter(code, i, "{", "}")
+            return code[i : end_idx + 1]
+        # fallthrough `case 3:\n case 4: body`: 若紧接着另一个 case/default，继续向后找主体以便识别共用实现。
+        while True:
+            fallthrough = re.match(r"(?:case\s+\d+|default)\s*:\s*", code[i:])
+            if not fallthrough:
+                break
+            i += fallthrough.end()
+            if i < n and code[i] == "{":
+                end_idx = self._find_matching_delimiter(code, i, "{", "}")
+                return code[i : end_idx + 1]
+        brace_depth = 0
+        j = i
+        while j < n:
+            ch = code[j]
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                if brace_depth == 0:
+                    return code[i:j]
+                brace_depth -= 1
+            elif brace_depth == 0 and re.match(r"\b(?:case\s+\d+|default)\s*:", code[j:]):
+                return code[i:j]
+            j += 1
+        return code[i:]
+
     def _extract_type_branch_snippets(self, code: str, type_value: int) -> list[str]:
-        patterns = [
-            rf"type\s*==\s*{type_value}\b",
-            rf"\b{type_value}\s*==\s*type\b",
-            rf"case\s+{type_value}\s*:",
-        ]
+        """用平衡括号与花括号配对提取指定 `type` 分支的函数体/语句。"""
         snippets: list[str] = []
-        for pattern in patterns:
-            for match in re.finditer(pattern, code):
-                snippets.append(code[match.start(): match.start() + 240])
+        if_pattern = rf"\b(?:type\s*==\s*{type_value}|{type_value}\s*==\s*type)\b"
+        for match in re.finditer(if_pattern, code):
+            # 向上追溯包含该条件的 if(...) 头部并跳过整段条件括号。
+            search_window_start = max(0, match.start() - 160)
+            if_matches = list(re.finditer(r"\bif\s*\(", code[search_window_start : match.start() + 1]))
+            body = ""
+            for if_m in reversed(if_matches):
+                open_paren = search_window_start + if_m.end() - 1
+                close_paren = self._find_matching_delimiter(code, open_paren, "(", ")")
+                if open_paren <= match.start() <= close_paren:
+                    body = self._extract_statement_or_block(code, close_paren + 1)
+                    break
+            if not body:
+                # 兜底：若形如三目或特殊写法，提取条件表达式之后紧跟的一条块/语句（跳过当前圆括号）
+                close_idx = code.find(")", match.end())
+                start = close_idx + 1 if close_idx != -1 and close_idx - match.end() < 40 else match.end()
+                body = self._extract_statement_or_block(code, start)
+            if body:
+                snippets.append(body)
+
+        case_pattern = rf"\bcase\s+{type_value}\s*:"
+        for match in re.finditer(case_pattern, code):
+            body = self._extract_case_body(code, match.end())
+            if body:
+                snippets.append(body)
+
         return snippets
 
     def _extract_branch_signals(self, snippet: str) -> set[str]:

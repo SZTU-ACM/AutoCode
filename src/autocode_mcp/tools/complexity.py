@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import re
+import statistics
 from typing import Any
 
 from ..utils.communication_runner import (
@@ -12,7 +13,7 @@ from ..utils.communication_runner import (
     resolve_participant_binaries,
 )
 from ..utils.execution_monitor import DynamicExecutionMonitor
-from ..utils.judge_runner import InteractiveRunner
+from ..utils.judge_runner import InteractiveRunner, JudgeResult
 from ..utils.platform import get_exe_extension
 from ..utils.ratio_analyzer import EmpiricalRatioAnalyzer, normalize_complexity_expression
 from ..utils.scale_sampler import MultiScaleSampler
@@ -90,26 +91,32 @@ def extract_constraint_numbers(constraints: dict[str, Any] | None) -> list[int]:
 
 
 def extract_n_max_from_constraints(constraints: dict[str, Any] | None) -> int | None:
-    """优先按显式规模字段（n_max/sum_n_max/n）提取主输入规模，避免被值域上限（如 a_i<=1e9）污染。"""
+    """优先按显式规模字段（n_max/sum_n_max/n，其次 m/q/k）提取主输入规模，避免被值域上限（如 a_i<=1e9）污染。"""
     if not isinstance(constraints, dict):
         return None
-    priority_values: list[int] = []
-    for key in ("n_max", "N_max", "sum_n_max", "sum_N_max"):
-        parsed = _positive_int(constraints.get(key))
-        if parsed is not None:
-            priority_values.append(parsed)
-    for key in ("n", "N"):
-        raw = constraints.get(key)
-        parsed = _positive_int(raw)
-        if parsed is not None:
-            priority_values.append(parsed)
-        elif isinstance(raw, dict):
-            for subkey in ("max", "maximum", "max_value", "n_max", "sum_max"):
-                nested = _positive_int(raw.get(subkey))
-                if nested is not None:
-                    priority_values.append(nested)
-    if priority_values:
-        return max(priority_values)
+
+    def _collect(keys: tuple[str, ...]) -> list[int]:
+        found: list[int] = []
+        for key in keys:
+            raw = constraints.get(key)
+            parsed = _positive_int(raw)
+            if parsed is not None:
+                found.append(parsed)
+            elif isinstance(raw, dict):
+                for subkey in ("max", "maximum", "max_value", "n_max", "sum_max"):
+                    nested = _positive_int(raw.get(subkey))
+                    if nested is not None:
+                        found.append(nested)
+        return found
+
+    primary_values = _collect(("n_max", "N_max", "sum_n_max", "sum_N_max", "n", "N"))
+    if primary_values:
+        return max(primary_values)
+    secondary_values = _collect(
+        ("m_max", "M_max", "q_max", "Q_max", "m", "M", "q", "Q", "k_max", "K_max", "k", "K")
+    )
+    if secondary_values:
+        return max(secondary_values)
     fallback = extract_constraint_numbers(constraints)
     return max(fallback) if fallback else None
 
@@ -376,7 +383,18 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         patterns.append("tree_data_structure")
         complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
 
-    if re.search(r"\bbfs\b|\bdfs\b|queue<|stack<", cleaned):
+    if re.search(r"\b(?:std::)?priority_queue\s*<|\bmake_heap\b|\bpush_heap\b", cleaned):
+        patterns.append("heap")
+        complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
+
+    if re.search(r"\bnext_permutation\b|\bprev_permutation\b", cleaned):
+        patterns.append("permutation_enumeration")
+        complexity = _higher_complexity(complexity, ComplexityLevel.FACTORIAL)
+
+    if re.search(
+        r"\bbfs\b|\bdfs\b|(?<![a-zA-Z0-9_])(?:std::)?(?:queue|stack)\s*<",
+        cleaned,
+    ):
         patterns.append("graph_traversal")
         complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
 
@@ -400,6 +418,144 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         patterns.append("bitset")
 
     return complexity, patterns
+
+
+def _has_nested_for_loops(cleaned: str) -> bool:
+    """判断是否存在真正的两层及以上 `for` 嵌套循环（排除 amortized `for+while(pop)` 或 `while+adj_for`）。"""
+    tokens = _TOKEN_RE.findall(cleaned)
+    total = len(tokens)
+    frames: list[str] = []
+    expecting_do_while = False
+
+    def _active_for_depth() -> int:
+        return sum(1 for f in frames if f in ("for_brace", "for_single"))
+
+    def _unwind(next_tok: str | None) -> None:
+        nonlocal expecting_do_while
+        if next_tok == "else":
+            return
+        while frames:
+            top = frames[-1]
+            if top in ("for_single", "other_single"):
+                frames.pop()
+            elif top == "do_single":
+                frames.pop()
+                expecting_do_while = True
+                break
+            else:
+                break
+
+    i = 0
+    while i < total:
+        tok = tokens[i]
+        if tok in ("for", "while"):
+            if tok == "while" and expecting_do_while:
+                expecting_do_while = False
+                i += 1
+                if i < total and tokens[i] == "(":
+                    i = _skip_balanced_parens(tokens, i)
+                if i < total and tokens[i] == ";":
+                    i += 1
+                _unwind(tokens[i] if i < total else None)
+                continue
+            if i + 1 < total and tokens[i + 1] == "(":
+                is_for = tok == "for"
+                if is_for and _active_for_depth() >= 1:
+                    return True
+                i = _skip_balanced_parens(tokens, i + 1)
+                if i < total and tokens[i] == ";":
+                    i += 1
+                    _unwind(tokens[i] if i < total else None)
+                elif i < total and tokens[i] == "{":
+                    frames.append("for_brace" if is_for else "other_brace")
+                    i += 1
+                else:
+                    frames.append("for_single" if is_for else "other_single")
+                continue
+        elif tok == "do" and i + 1 < total and tokens[i + 1] != "(":
+            i += 1
+            if i < total and tokens[i] == "{":
+                frames.append("do_brace")
+                i += 1
+            else:
+                frames.append("do_single")
+            continue
+        elif tok in ("if", "switch") and i + 1 < total and tokens[i + 1] == "(":
+            i = _skip_balanced_parens(tokens, i + 1)
+            continue
+        elif tok == "{":
+            frames.append("brace_other")
+            i += 1
+            continue
+        elif tok == "}":
+            popped = None
+            while frames:
+                top = frames.pop()
+                if top in ("for_brace", "other_brace", "do_brace", "brace_other"):
+                    popped = top
+                    break
+            i += 1
+            if popped == "do_brace":
+                expecting_do_while = True
+            else:
+                _unwind(tokens[i] if i < total else None)
+            continue
+        elif tok == ";":
+            i += 1
+            _unwind(tokens[i] if i < total else None)
+            continue
+        i += 1
+    return False
+
+
+def estimate_static_complexity(code: str) -> tuple[str, list[str]]:
+    """综合循环结构与算法模式识别静态复杂度，识别 Dijkstra/单调队列等均摊模式。"""
+    cleaned = _strip_cpp_comments_and_strings(code)
+    loop_complexity = analyze_loop_complexity(code)
+    pattern_complexity, patterns = detect_algorithm_patterns(code)
+
+    effective_loop = loop_complexity
+    if loop_complexity == ComplexityLevel.QUADRATIC and not _has_nested_for_loops(cleaned):
+        has_container_pop = bool(
+            re.search(r"\.(?:pop|pop_front|pop_back)\s*\(", cleaned)
+        )
+        if "heap" in patterns and has_container_pop:
+            effective_loop = ComplexityLevel.N_LOG_N
+        elif (has_container_pop or "graph_traversal" in patterns) and "dynamic_programming" not in patterns:
+            effective_loop = ComplexityLevel.LINEAR
+
+    final = (
+        _higher_complexity(effective_loop, pattern_complexity)
+        if pattern_complexity is not None
+        else effective_loop
+    )
+    return final, patterns
+
+
+def recommend_time_limit_ms(
+    complexity: str, constraints: dict[str, Any] | None = None
+) -> int:
+    """结合算法复杂度与 n_max 规模给出更贴合竞赛惯例的时间限制推荐值（毫秒）。"""
+    n_max = extract_n_max_from_constraints(constraints)
+    if complexity in {ComplexityLevel.CONSTANT, ComplexityLevel.LOG_N}:
+        return 1000
+    if complexity == ComplexityLevel.LINEAR:
+        if n_max is not None and n_max >= 5_000_000:
+            return 2000
+        if n_max is not None and n_max >= 1_000_000:
+            return 1500
+        return 1000
+    if complexity == ComplexityLevel.N_LOG_N:
+        if n_max is not None:
+            if n_max <= 100_000:
+                return 1000
+            if n_max <= 300_000:
+                return 1500
+            if n_max <= 1_000_000:
+                return 2000
+            return 2500
+        return COMPLEXITY_TO_TIME_LIMIT.get(complexity, 2000)
+    return COMPLEXITY_TO_TIME_LIMIT.get(complexity, 1000)
 
 
 def extract_claimed_complexity(code: str) -> str | None:
@@ -428,15 +584,16 @@ def build_risk_notes(
 
 
 def estimate_memory_usage(code: str) -> tuple[str, int]:
+    cleaned = _strip_cpp_comments_and_strings(code)
     array_patterns = [
         r"(\w+)\s*\[(\d+)\]",
-        r"vector<\w+>\s+(\w+)\s*\((\d+)\)",
-        r"array<\w+,\s*(\d+)>",
+        r"vector\s*<\s*[^>]+\s*>\s+(\w+)\s*\((\d+)\)",
+        r"array\s*<\s*[^,>]+,\s*(\d+)\s*>",
     ]
 
     total_elements = 0
     for pattern in array_patterns:
-        matches = re.findall(pattern, code)
+        matches = re.findall(pattern, cleaned)
         for match in matches:
             try:
                 if isinstance(match, tuple):
@@ -450,13 +607,47 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
     memory_bytes = total_elements * 4
     memory_mb = max(1, memory_bytes // (1024 * 1024))
 
-    if total_elements == 0:
-        return "O(1)", 64
-    elif total_elements < 10000:
-        return "O(n)", memory_mb
-    elif total_elements < 1000000:
-        return "O(n)", memory_mb
-    return "O(n) - large", memory_mb
+    # 识别动态尺寸二维容器（如 vector<vector<int>> dp(n, vector<int>(m)) 或符号二维数组 dp[N][M]）
+    has_2d_dynamic = bool(
+        re.search(
+            r"vector\s*<\s*vector\s*<[^>]+>\s*>\s+\w+\s*\([^,)]+,\s*vector\s*<",
+            cleaned,
+        )
+        or re.search(
+            r"\[\s*[a-zA-Z_]\w*(?:\s*[+\-]\s*\d+)?\s*\]\s*\[\s*[a-zA-Z_]\w*(?:\s*[+\-]\s*\d+)?\s*\]",
+            cleaned,
+        )
+    )
+    if has_2d_dynamic:
+        return "O(n^2)", max(memory_mb, 128) if total_elements == 0 else memory_mb
+
+    if total_elements > 0:
+        if total_elements < 1_000_000:
+            return "O(n)", memory_mb
+        return "O(n) - large", memory_mb
+
+    # 识别动态尺寸一维 STL 容器 / 变长数组 / 读入或动态增长的 string
+    has_dynamic_linear = bool(
+        re.search(
+            r"\bvector\s*<"
+            r"|\b(?:unordered_)?(?:set|multiset|map|multimap)\s*<"
+            r"|\b(?:deque|queue|priority_queue|stack|list)\s*<"
+            r"|\bnew\s+\w+(?:\s*<[^>]*>)?\s*\["
+            r"|(?:int|long\s+long|double|char|bool|unsigned)\s+\w+\s*\[[^0-9\]\n]+\]",
+            cleaned,
+        )
+        or (
+            re.search(r"\bstring\s+\w+", cleaned)
+            and re.search(
+                r"\bcin\s*>>|\bgetline\b|\.(?:resize|reserve|push_back|append)\s*\(|\+=",
+                cleaned,
+            )
+        )
+    )
+    if has_dynamic_linear:
+        return "O(n)", 64
+
+    return "O(1)", 64
 
 
 async def run_empirical_verification(
@@ -575,24 +766,30 @@ async def run_empirical_verification(
         if is_interactive or (is_communication and manifest_model is not None):
             with open(in_file, encoding="utf-8", errors="replace") as inf:
                 scale_input = inf.read()
-            if is_communication and manifest_model is not None:
-                jres = await CommunicationRunner.run_from_manifest(
-                    problem_dir=problem_dir,
-                    manifest=manifest_model,
-                    solution_exe=sol_path,
-                    input_data=scale_input,
-                    time_limit_ms=time_limit_ms,
-                    memory_limit_mb=memory_limit_mb,
-                )
-            else:
-                jres = await InteractiveRunner.run(
+
+            async def _run_protocol_once(_input_data: str = scale_input) -> JudgeResult:
+                if is_communication and manifest_model is not None:
+                    return await CommunicationRunner.run_from_manifest(
+                        problem_dir=problem_dir,
+                        manifest=manifest_model,
+                        solution_exe=sol_path,
+                        input_data=_input_data,
+                        time_limit_ms=time_limit_ms,
+                        memory_limit_mb=memory_limit_mb,
+                    )
+                return await InteractiveRunner.run(
                     interactor_exe=interactor_path,
                     solution_exe=sol_path,
-                    input_data=scale_input,
+                    input_data=_input_data,
                     time_limit_ms=time_limit_ms,
                     memory_limit_mb=memory_limit_mb,
                     cwd=problem_dir,
                 )
+
+            if idx == 0:
+                await _run_protocol_once()
+
+            jres = await _run_protocol_once()
             status_map = {
                 "AC": "ok",
                 "PC": "ok",
@@ -602,14 +799,30 @@ async def run_empirical_verification(
             }
             sample_status = status_map.get(jres.verdict, "runtime_error")
             adjusted_cpu = None
+            proto_mem = jres.memory_mb
             if sample_status == "ok":
                 raw_cpu = jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms
                 adjusted_cpu = round(max(0.1, float(raw_cpu) - baseline_overhead), 2)
+                if float(jres.wall_time_ms or 0.0) < 80.0:
+                    proto_cpu_runs = [float(adjusted_cpu)]
+                    proto_mem_runs = [float(jres.memory_mb or 0.0)]
+                    for _ in range(2):
+                        proto_rep = await _run_protocol_once()
+                        if status_map.get(proto_rep.verdict) == "ok":
+                            rep_raw = (
+                                proto_rep.cpu_time_ms
+                                if proto_rep.cpu_time_ms is not None
+                                else proto_rep.wall_time_ms
+                            )
+                            proto_cpu_runs.append(round(max(0.1, float(rep_raw) - baseline_overhead), 2))
+                            proto_mem_runs.append(float(proto_rep.memory_mb or 0.0))
+                    adjusted_cpu = round(statistics.median(proto_cpu_runs), 2)
+                    proto_mem = round(max(proto_mem_runs), 2)
             samples.append(
                 {
                     "n": pt,
                     "cpu_time_ms": adjusted_cpu,
-                    "memory_mb": jres.memory_mb,
+                    "memory_mb": proto_mem,
                     "status": sample_status,
                     "verdict": jres.verdict,
                 }
@@ -617,6 +830,16 @@ async def run_empirical_verification(
             if sample_status in ("timeout", "mle"):
                 break
         else:
+            if idx == 0:
+                # 首次冷启动预热：消除二进制冷加载/杀软扫描对最小规模采样的歪斜。
+                await DynamicExecutionMonitor.run_monitored_process(
+                    [sol_path],
+                    in_file,
+                    time_limit_ms=time_limit_ms,
+                    memory_limit_mb=memory_limit_mb,
+                    cwd=problem_dir,
+                    baseline_overhead_ms=baseline_overhead,
+                )
             res = await DynamicExecutionMonitor.run_monitored_process(
                 [sol_path],
                 in_file,
@@ -625,15 +848,40 @@ async def run_empirical_verification(
                 cwd=problem_dir,
                 baseline_overhead_ms=baseline_overhead,
             )
+            chosen_cpu = res.get("cpu_time_ms")
+            chosen_mem = res.get("memory_mb")
+            chosen_status = res.get("status")
+            if (
+                chosen_status == "ok"
+                and chosen_cpu is not None
+                and float(res.get("wall_time_ms") or 0.0) < 50.0
+            ):
+                # 对超短耗时的尺度点额外复测 2 次取中位耗时与峰值内存，平抑抖动。
+                cpu_runs: list[float] = [float(chosen_cpu)]
+                mem_runs: list[float] = [float(chosen_mem or 0.0)]
+                for _ in range(2):
+                    rep = await DynamicExecutionMonitor.run_monitored_process(
+                        [sol_path],
+                        in_file,
+                        time_limit_ms=time_limit_ms,
+                        memory_limit_mb=memory_limit_mb,
+                        cwd=problem_dir,
+                        baseline_overhead_ms=baseline_overhead,
+                    )
+                    if rep.get("status") == "ok" and rep.get("cpu_time_ms") is not None:
+                        cpu_runs.append(float(rep["cpu_time_ms"]))
+                        mem_runs.append(float(rep.get("memory_mb") or 0.0))
+                chosen_cpu = round(statistics.median(cpu_runs), 2)
+                chosen_mem = round(max(mem_runs), 2)
             samples.append(
                 {
                     "n": pt,
-                    "cpu_time_ms": res.get("cpu_time_ms"),
-                    "memory_mb": res.get("memory_mb"),
-                    "status": res.get("status"),
+                    "cpu_time_ms": chosen_cpu,
+                    "memory_mb": chosen_mem,
+                    "status": chosen_status,
                 }
             )
-            if res.get("status") in ("timeout", "mle"):
+            if chosen_status in ("timeout", "mle"):
                 break
 
     return EmpiricalRatioAnalyzer.verify_complexity(
@@ -681,14 +929,7 @@ class SolutionAnalyzeTool(Tool):
         assert resolved is not None
         code = resolved.code
 
-        loop_complexity = analyze_loop_complexity(code)
-        pattern_complexity, patterns = detect_algorithm_patterns(code)
-
-        final_complexity = (
-            _higher_complexity(loop_complexity, pattern_complexity)
-            if pattern_complexity is not None
-            else loop_complexity
-        )
+        final_complexity, patterns = estimate_static_complexity(code)
 
         if claimed_complexity:
             norm_claimed = normalize_complexity_expression(claimed_complexity)
@@ -697,17 +938,17 @@ class SolutionAnalyzeTool(Tool):
         space_complexity, memory_mb = estimate_memory_usage(code)
 
         recommended_n_max = COMPLEXITY_TO_N_MAX.get(final_complexity, 10000)
-        recommended_time_ms = COMPLEXITY_TO_TIME_LIMIT.get(final_complexity, 1000)
+        recommended_time_ms = recommend_time_limit_ms(final_complexity, constraints)
         detected_claimed = extract_claimed_complexity(code)
 
         warnings: list[str] = []
+        constraint_n_max = extract_n_max_from_constraints(constraints)
         if constraints:
-            if constraints.get("n_max"):
-                if constraints["n_max"] > recommended_n_max:
-                    warnings.append(
-                        f"Warning: n_max={constraints['n_max']} may cause TLE "
-                        f"for {final_complexity} algorithm. Recommended: {recommended_n_max}"
-                    )
+            if constraint_n_max is not None and constraint_n_max > recommended_n_max:
+                warnings.append(
+                    f"Warning: n_max={constraint_n_max} may cause TLE "
+                    f"for {final_complexity} algorithm. Recommended: {recommended_n_max}"
+                )
             if constraints.get("time_limit_ms"):
                 if constraints["time_limit_ms"] < recommended_time_ms:
                     warnings.append(
@@ -715,12 +956,15 @@ class SolutionAnalyzeTool(Tool):
                         f"for {final_complexity} algorithm. Recommended: {recommended_time_ms}ms"
                     )
 
-        risk_notes = build_risk_notes(final_complexity, constraints, warnings)
+        effective_constraints = dict(constraints) if isinstance(constraints, dict) else None
+        if effective_constraints is not None and constraint_n_max is not None and "n_max" not in effective_constraints:
+            effective_constraints["n_max"] = constraint_n_max
+        risk_notes = build_risk_notes(final_complexity, effective_constraints, warnings)
         suggested_test_configs = self._generate_test_configs(recommended_n_max, constraints)
         stress_profiles = self._recommended_stress_profiles(
             final_complexity=final_complexity,
             recommended_n_max=recommended_n_max,
-            constraints=constraints,
+            constraints=effective_constraints,
         )
 
         empirical_verification: dict[str, Any] = {"status": "skipped"}
@@ -755,14 +999,17 @@ class SolutionAnalyzeTool(Tool):
     def _generate_test_configs(
         self, n_max: int, constraints: dict | None
     ) -> list[dict]:
-        actual_n_max = constraints.get("n_max", n_max) if constraints else n_max
+        raw_n = extract_n_max_from_constraints(constraints) if constraints else None
+        actual_n_max = max(1, raw_n if raw_n is not None else n_max)
+        mid_small = max(1, min(actual_n_max, max(10, actual_n_max // 10)))
+        mid_half = max(1, min(actual_n_max, actual_n_max // 2))
         return [
             {"type": "1", "n_min": 1, "n_max": 1, "t_min": 1, "t_max": 1},
-            {"type": "1", "n_min": 1, "n_max": 10, "t_min": 1, "t_max": 1},
-            {"type": "2", "n_min": 10, "n_max": actual_n_max // 10, "t_min": 1, "t_max": 1},
-            {"type": "2", "n_min": actual_n_max // 10, "n_max": actual_n_max // 2, "t_min": 1, "t_max": 1},
-            {"type": "3", "n_min": actual_n_max // 2, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
-            {"type": "3", "n_min": actual_n_max, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
+            {"type": "1", "n_min": 1, "n_max": min(10, actual_n_max), "t_min": 1, "t_max": 1},
+            {"type": "2", "n_min": 1, "n_max": mid_small, "t_min": 1, "t_max": 1},
+            {"type": "3", "n_min": min(mid_small, mid_half), "n_max": mid_half, "t_min": 1, "t_max": 1},
+            {"type": "3", "n_min": mid_half, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
+            {"type": "4", "n_min": actual_n_max, "n_max": actual_n_max, "t_min": 1, "t_max": 1},
         ]
 
     def _recommended_stress_profiles(

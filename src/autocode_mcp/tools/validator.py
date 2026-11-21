@@ -6,6 +6,7 @@ Validator 工具组 - 数据校验器。
 
 from __future__ import annotations
 
+import json
 import os
 
 from ..utils.compiler import run_binary
@@ -143,6 +144,18 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
 
         score = correct_count
         total = len(test_cases)
+
+        invalid_fixtures = [
+            {"name": f"validator_tc_{idx}", "input": tc["input"]}
+            for idx, tc in enumerate(test_cases, 1)
+            if tc.get("expected_valid") is False and isinstance(tc.get("input"), str)
+        ]
+        if invalid_fixtures:
+            autocode_dir = os.path.join(problem_dir, ".autocode")
+            os.makedirs(autocode_dir, exist_ok=True)
+            fixtures_path = os.path.join(autocode_dir, "validator_invalid_fixtures.json")
+            with open(fixtures_path, "w", encoding="utf-8", newline="\n") as ff:
+                json.dump(invalid_fixtures, ff, ensure_ascii=False, indent=2)
 
         return ToolResult.ok(
             source_path=compile_source,

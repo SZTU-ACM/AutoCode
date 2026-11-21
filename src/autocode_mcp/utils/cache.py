@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -38,7 +39,19 @@ class CompileCache:
             cache_dir: 缓存目录路径
         """
         self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._disabled = False
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            if cache_dir == ".cache/compile":
+                fallback = Path(tempfile.gettempdir()) / "autocode_mcp_compile_cache"
+                try:
+                    fallback.mkdir(parents=True, exist_ok=True)
+                    self.cache_dir = fallback
+                except OSError:
+                    self._disabled = True
+            else:
+                self._disabled = True
 
     def _bucket(self, source_path: str) -> str:
         """按源文件绝对路径生成分桶目录名。"""
@@ -123,10 +136,15 @@ class CompileCache:
         Returns:
             str | None: 缓存的二进制文件路径，不存在则返回 None
         """
-        key = self._resolve_key(source_path, compiler, std, opt)
-        cached_binary = self._bucket_dir(source_path) / key
-        if cached_binary.exists():
-            return str(cached_binary)
+        if self._disabled:
+            return None
+        try:
+            key = self._resolve_key(source_path, compiler, std, opt)
+            cached_binary = self._bucket_dir(source_path) / key
+            if cached_binary.exists():
+                return str(cached_binary)
+        except OSError:
+            return None
         return None
 
     def set(self, source_path: str, binary_path: str, compiler: str, std: str, opt: str) -> str:
@@ -142,7 +160,12 @@ class CompileCache:
         Returns:
             str: 缓存后的二进制文件路径
         """
-        key = self._resolve_key(source_path, compiler, std, opt)
-        cached_binary = self._bucket_dir(source_path) / key
-        shutil.copy2(binary_path, cached_binary)
-        return str(cached_binary)
+        if self._disabled:
+            return binary_path
+        try:
+            key = self._resolve_key(source_path, compiler, std, opt)
+            cached_binary = self._bucket_dir(source_path) / key
+            shutil.copy2(binary_path, cached_binary)
+            return str(cached_binary)
+        except OSError:
+            return binary_path

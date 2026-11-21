@@ -159,3 +159,58 @@ def test_verify_complexity_noisy_o1_within_noise_floor_accepted() -> None:
     res = EmpiricalRatioAnalyzer.verify_complexity("O(1)", samples, time_limit_ms=1000.0)
     assert res["passed"] is True
     assert res["verdict"] == "verified_within_noise_floor"
+
+
+def test_verify_complexity_noisy_windows_nlogn_preserves_claimed_complexity() -> None:
+    """Windows 计时底噪下的低信噪比 O(n log n) 采样不得退化覆盖为 O(1)。"""
+    samples = [
+        {"n": 1000, "cpu_time_ms": 15.6, "status": "ok"},
+        {"n": 5000, "cpu_time_ms": 31.2, "status": "ok"},
+        {"n": 20000, "cpu_time_ms": 15.6, "status": "ok"},
+        {"n": 100000, "cpu_time_ms": 31.2, "status": "ok"},
+    ]
+    res = EmpiricalRatioAnalyzer.verify_complexity("O(n log n)", samples, time_limit_ms=2000.0)
+    assert res["passed"] is True
+    assert res["verdict"] == "verified_within_noise_floor"
+    assert res["fitted_complexity"] == "O(n log n)"
+
+
+def test_verify_complexity_flat_startup_plateau_still_falsifies_quadratic() -> None:
+    """即使存在 ~12ms 进程启动固定开销平台，低常数 O(n^2) 伪装 O(n) 仍须被识别并阻断。"""
+    samples = [
+        {"n": 200, "cpu_time_ms": 12.38, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 12.20, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 12.26, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 16.82, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 62.57, "status": "ok"},
+    ]
+    res = EmpiricalRatioAnalyzer.verify_complexity("O(n)", samples, time_limit_ms=2000.0)
+    assert res["passed"] is False
+    assert res["verdict"] == "ratio_mismatch"
+    assert res["fitted_complexity"] == "O(n^2)"
+
+
+def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> None:
+    """极窄 N 跨度（<2x，如 n=[11..15]）的温和进程启动抖动应豁免，但真正指数爆炸（16x）仍必须拦截。"""
+    jitter_samples = [
+        {"n": 11, "cpu_time_ms": 52.0, "status": "ok"},
+        {"n": 12, "cpu_time_ms": 48.0, "status": "ok"},
+        {"n": 13, "cpu_time_ms": 50.0, "status": "ok"},
+        {"n": 14, "cpu_time_ms": 56.0, "status": "ok"},
+        {"n": 15, "cpu_time_ms": 64.0, "status": "ok"},
+    ]
+    res_jitter = EmpiricalRatioAnalyzer.verify_complexity("O(1)", jitter_samples, time_limit_ms=1000.0)
+    assert res_jitter["passed"] is True
+    assert res_jitter["verdict"] == "verified_within_noise_floor"
+    assert res_jitter["fitted_complexity"] == "O(1)"
+
+    exp_samples = [
+        {"n": 11, "cpu_time_ms": 1.0, "status": "ok"},
+        {"n": 12, "cpu_time_ms": 2.0, "status": "ok"},
+        {"n": 13, "cpu_time_ms": 4.0, "status": "ok"},
+        {"n": 14, "cpu_time_ms": 8.0, "status": "ok"},
+        {"n": 15, "cpu_time_ms": 16.0, "status": "ok"},
+    ]
+    res_exp = EmpiricalRatioAnalyzer.verify_complexity("O(1)", exp_samples, time_limit_ms=1000.0)
+    assert res_exp["passed"] is False
+    assert res_exp["verdict"] == "ratio_mismatch"

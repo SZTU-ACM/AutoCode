@@ -73,7 +73,7 @@ async def terminate_pid_tree(pid: int) -> tuple[bool, str]:
         except OSError as exc:
             return False, str(exc)
     # POSIX：优先按进程组整树回收（要求子进程以 start_new_session=True 启动）。
-    current_pgid = os.getpgid(0)
+    current_pgid = cast(Any, os).getpgid(0)
     current_pid = os.getpid()
     parent_pid = os.getppid()
 

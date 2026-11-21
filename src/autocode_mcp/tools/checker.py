@@ -6,6 +6,7 @@ Checker 工具组 - 输出检查器。
 
 from __future__ import annotations
 
+import json
 import os
 
 from ..utils.checker_judge import verdict_from_run
@@ -157,6 +158,13 @@ class CheckerBuildTool(Tool, BuildToolMixin):
 
         total = len(test_scenarios)
         accuracy = correct_count / total if total > 0 else 0
+
+        if test_scenarios:
+            autocode_dir = os.path.join(problem_dir, ".autocode")
+            os.makedirs(autocode_dir, exist_ok=True)
+            scenarios_path = os.path.join(autocode_dir, "checker_scenarios.json")
+            with open(scenarios_path, "w", encoding="utf-8", newline="\n") as sf:
+                json.dump(test_scenarios, sf, ensure_ascii=False, indent=2)
 
         return ToolResult.ok(
             source_path=compile_source,

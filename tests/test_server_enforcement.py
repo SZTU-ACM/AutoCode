@@ -619,5 +619,60 @@ async def test_enforcement_fail_closed_oracle_mode_custom_protocol_and_sparse_cr
     assert st["interaction_scenarios"] == {}
 
 
+@pytest.mark.asyncio
+async def test_solution_build_wrong_reference_preserves_stress_validation_and_generated_tests(
+    tmp_path, monkeypatch
+):
+    """构建 wrong/reference 解不得清空 stress_passed/validation_passed/tests_generated。"""
+    import autocode_mcp.server as server
+
+    server.register_all_tools()
+    problem_dir = managed_problem(tmp_path)
+    update_state(
+        problem_dir,
+        created=True,
+        sol_built=True,
+        solution_analyzed=True,
+        std_audited=True,
+        brute_built=True,
+        brute_audited=True,
+        validator_ready=True,
+        validator_accuracy=1.0,
+        generator_built=True,
+        stress_passed=True,
+        stress_completed_rounds=100,
+        stress_total_rounds=100,
+        validation_passed=True,
+        statement_validated=True,
+        sample_files_validated=True,
+        tests_generated=True,
+        generated_test_count=20,
+        tests_verified=True,
+        packaged=True,
+    )
+
+    async def fake_build(**kwargs: Any) -> ToolResult:
+        return ToolResult.ok(effective_name=kwargs.get("name", "wa1"))
+
+    monkeypatch.setitem(server.TOOLS, "solution_build", SimpleNamespace(execute=fake_build))
+    res = await server.call_tool(
+        "solution_build",
+        {
+            "problem_dir": problem_dir,
+            "solution_type": "wrong",
+            "name": "wa1",
+            "code": "int main(){return 0;}",
+        },
+    )
+    assert res.isError is False
+    after = load_workflow_state(problem_dir)
+    assert after["stress_passed"] is True
+    assert after["validation_passed"] is True
+    assert after["tests_generated"] is True
+    assert after["generated_test_count"] == 20
+    assert after["tests_verified"] is False
+    assert after["packaged"] is False
+
+
 
 

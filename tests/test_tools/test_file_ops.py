@@ -283,3 +283,22 @@ async def test_file_read_symlink_escape_denied():
         )
         assert not result.success
         assert "Access denied" in result.error
+
+
+@pytest.mark.asyncio
+async def test_file_ops_case_insensitive_root_containment(tmp_path):
+    """Windows/macOS 大小写不敏感路径（例如不同大小写 problem_dir）不应误触 Access denied。"""
+    save_tool = FileSaveTool()
+    read_tool = FileReadTool()
+    pdir = str(tmp_path)
+    target_path = os.path.join(pdir, "notes.txt")
+    swapped_root = os.path.join(os.path.dirname(pdir), os.path.basename(pdir).swapcase())
+
+    if os.path.realpath(swapped_root) != os.path.realpath(pdir) and os.path.normcase(swapped_root) != os.path.normcase(pdir):
+        pytest.skip("Case-sensitive filesystem (Linux)")
+
+    save_res = await save_tool.execute(path=target_path, content="ok\n", problem_dir=swapped_root)
+    assert save_res.success, save_res.error
+    read_res = await read_tool.execute(path=target_path, problem_dir=swapped_root)
+    assert read_res.success, read_res.error
+    assert read_res.data["content"] == "ok\n"

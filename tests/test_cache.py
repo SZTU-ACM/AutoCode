@@ -182,3 +182,28 @@ def test_cache_mtime_fast_path_builds_index():
         # 再次解析应命中快速路径，键保持一致。
         key2 = cache._resolve_key(source_path, "g++", "c++2c", "-O2")
         assert key2 == key1
+
+
+def test_compile_cache_falls_back_on_readonly_cwd(monkeypatch, tmp_path):
+    """只读默认缓存目录（如 macOS '/'）应降级到临时目录而不崩溃。"""
+    from pathlib import Path
+
+    orig_mkdir = Path.mkdir
+
+    def guarded_mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        if str(self) == ".cache/compile" or str(self).endswith(f".cache{os.sep}compile"):
+            raise PermissionError("read-only root")
+        return orig_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
+    cache = CompileCache()
+    assert not cache._disabled
+    assert "autocode_mcp_compile_cache" in str(cache.cache_dir)
+
+    src = tmp_path / "a.cpp"
+    src.write_text("int main(){return 0;}", encoding="utf-8")
+    bin_file = tmp_path / "a.bin"
+    bin_file.write_text("bin", encoding="utf-8")
+    stored = cache.set(str(src), str(bin_file), "g++", "c++20", "-O2")
+    assert os.path.exists(stored)
+    assert cache.get(str(src), "g++", "c++20", "-O2") == stored

@@ -41,6 +41,8 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         基于论文框架，支持：
         - sol.cpp: 标准解法（最优时间复杂度）
         - brute.cpp: 暴力解法（用于验证）
+        - wrong: 错解/卡常对照解（需提供 name 或 source_path，不覆盖 sol/brute，不清空对拍/数据）
+        - reference: 备用参考正解（需提供 name 或 source_path，不覆盖 sol/brute）
 
         前置条件：
         1. 已运行 problem_create 创建题目目录
@@ -57,23 +59,44 @@ class SolutionBuildTool(Tool, BuildToolMixin):
     async def execute(
         self,
         problem_dir: str,
-        solution_type: Literal["sol", "brute"],
+        solution_type: Literal["sol", "brute", "wrong", "reference"],
         name: str | None = None,
         code: str | None = None,
         source_path: str | None = None,
         compiler: str = "g++",
     ) -> ToolResult:
         """执行解法构建。"""
-        if solution_type not in {"sol", "brute"}:
-            return ToolResult.fail("solution_type must be 'sol' or 'brute'")
+        if solution_type not in {"sol", "brute", "wrong", "reference"}:
+            return ToolResult.fail("solution_type must be 'sol', 'brute', 'wrong', or 'reference'")
         if name is not None and not _is_safe_solution_stem(name):
             return ToolResult.fail("name must be a file name stem without path separators")
 
+        is_primary = solution_type in {"sol", "brute"}
+        if is_primary:
+            effective_name = name or solution_type
+        else:
+            if name is not None:
+                effective_name = name
+            elif source_path:
+                inferred = os.path.splitext(os.path.basename(source_path))[0]
+                if not _is_safe_solution_stem(inferred):
+                    return ToolResult.fail("inferred name from source_path is invalid; provide name")
+                effective_name = inferred
+            else:
+                return ToolResult.fail(
+                    f"name or source_path is required when solution_type='{solution_type}'"
+                )
+
+        default_rel = (
+            os.path.join("solutions", f"{solution_type}.cpp")
+            if is_primary
+            else os.path.join("solutions", f"{effective_name}.cpp")
+        )
         resolved, err = resolve_source(
             problem_dir,
             code,
             source_path,
-            default_source_path=os.path.join("solutions", f"{solution_type}.cpp"),
+            default_source_path=default_rel,
         )
         if err is not None:
             return err
@@ -84,26 +107,30 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         solutions_dir = os.path.join(problem_dir, "solutions")
         os.makedirs(solutions_dir, exist_ok=True)
 
-        # 确定文件名
-        effective_name = name or solution_type
+        # 确定文件名（wrong/reference 绝不覆盖 sol.cpp / brute.cpp）
         exe_ext = get_exe_extension()
         canonical_path = os.path.join(solutions_dir, f"{effective_name}.cpp")
         binary_path = os.path.join(solutions_dir, f"{effective_name}{exe_ext}")
-        standard_source_path = os.path.join(solutions_dir, f"{solution_type}.cpp")
-        standard_binary_path = os.path.join(solutions_dir, f"{solution_type}{exe_ext}")
+        standard_source_path = (
+            os.path.join(solutions_dir, f"{solution_type}.cpp") if is_primary else canonical_path
+        )
+        standard_binary_path = (
+            os.path.join(solutions_dir, f"{solution_type}{exe_ext}") if is_primary else binary_path
+        )
 
-        for p in (binary_path, standard_binary_path):
+        remove_targets = (binary_path, standard_binary_path) if is_primary else (binary_path,)
+        for p in remove_targets:
             if os.path.isfile(p):
                 try:
                     os.remove(p)
                 except OSError:
                     pass
 
-        # 保存自定义命名文件，并保留 sol.cpp/brute.cpp 供打包和默认流程使用。
+        # 保存自定义命名文件，仅主解（sol/brute）保留标准拷贝供打包与默认流程使用。
         try:
             with open(canonical_path, "w", encoding="utf-8") as f:
                 f.write(resolved.code)
-            if os.path.normcase(canonical_path) != os.path.normcase(standard_source_path):
+            if is_primary and os.path.normcase(canonical_path) != os.path.normcase(standard_source_path):
                 shutil.copy2(canonical_path, standard_source_path)
         except Exception as e:
             return ToolResult.fail(f"Failed to save code: {str(e)}")
@@ -175,7 +202,7 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             )
 
         binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
-        if os.path.normcase(binary_path) != os.path.normcase(standard_binary_path):
+        if is_primary and os.path.normcase(binary_path) != os.path.normcase(standard_binary_path):
             try:
                 shutil.copy2(binary_path, standard_binary_path)
             except Exception as e:
@@ -223,12 +250,18 @@ class SolutionRunTool(Tool, RunToolMixin):
     async def execute(
         self,
         problem_dir: str,
-        solution_type: Literal["sol", "brute"],
+        solution_type: Literal["sol", "brute", "wrong", "reference"],
         input_data: str,
         name: str | None = None,
         timeout: int = 30,
     ) -> ToolResult:
         """执行解法运行。"""
+        if solution_type not in {"sol", "brute", "wrong", "reference"}:
+            return ToolResult.fail("solution_type must be 'sol', 'brute', 'wrong', or 'reference'")
+        if name is not None and not _is_safe_solution_stem(name):
+            return ToolResult.fail("name must be a file name stem without path separators")
+        if solution_type in {"wrong", "reference"} and not name:
+            return ToolResult.fail(f"name is required when solution_type='{solution_type}'")
         effective_name = name or solution_type
         exe_ext = get_exe_extension()
 
@@ -265,7 +298,7 @@ class SolutionRunTool(Tool, RunToolMixin):
                 )
 
         if manifest is not None and manifest_is_communication(manifest):
-            if solution_type == "brute":
+            if solution_type in {"brute", "wrong"}:
                 run_tl_ms = float(timeout) * 1000.0
             else:
                 tl_ms = float(
@@ -319,7 +352,7 @@ class SolutionRunTool(Tool, RunToolMixin):
                 return ToolResult.fail(
                     f"Interactive problem requires files/interactor{exe_ext}. Run interactor_build first."
                 )
-            if solution_type == "brute":
+            if solution_type in {"brute", "wrong"}:
                 run_tl_ms = float(timeout) * 1000.0
             else:
                 tl_ms = float(
