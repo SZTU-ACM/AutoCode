@@ -10,20 +10,23 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
-from .process import terminate_pid_tree
+from .process import is_pid_alive, terminate_pid_tree
 
 if TYPE_CHECKING:
     from .win_job import WinJobObject
@@ -107,6 +110,42 @@ def cleanup_work_dir(work_dir: str) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+@functools.lru_cache(maxsize=8)
+def _resolve_compiler(compiler: str) -> str:
+    """Resolve `g++` on macOS away from Apple Clang toward Homebrew GCC if installed.
+
+    Apple's `/usr/bin/g++` is a Clang shim lacking GNU `<bits/stdc++.h>`. When the
+    caller requests the default `"g++"` on darwin, probe `g++-15`..`g++-10` via
+    PATH and standard Homebrew prefixes and return the first working GCC binary.
+    """
+    if sys.platform != "darwin" or compiler != "g++":
+        return compiler
+    resolved = shutil.which(compiler) or compiler
+    try:
+        probe = subprocess.run(
+            [resolved, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        banner = f"{probe.stdout}\n{probe.stderr}".lower()
+        if "clang" not in banner:
+            return compiler
+    except (OSError, subprocess.SubprocessError):
+        return compiler
+
+    for candidate in ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11", "g++-10"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+        for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+            full_path = os.path.join(prefix, candidate)
+            if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+                return full_path
+    return compiler
+
+
 def _has_local_headers(
     include_dirs: list[str] | None,
     source_path: str | None = None,
@@ -183,17 +222,24 @@ async def compile_cpp(
                 error=f"Extra source file not found: {extra_src}",
             )
 
+    effective_compiler = _resolve_compiler(compiler)
+
     effective_use_cache = (
         use_cache and not normalized_extra and not _has_local_headers(include_dirs, source_path)
     )
 
     if effective_use_cache:
-        cached_binary = _cache.get(source_path, compiler, std, opt_level)
+        cached_binary = _cache.get(source_path, effective_compiler, std, opt_level)
         if cached_binary:
             output_dir = os.path.dirname(binary_path)
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
             shutil.copy2(cached_binary, binary_path)
+            if sys.platform != "win32":
+                try:
+                    os.chmod(binary_path, os.stat(binary_path).st_mode | 0o111)
+                except OSError:
+                    pass
             return CompileResult(
                 success=True,
                 binary_path=binary_path,
@@ -218,7 +264,7 @@ async def compile_cpp(
         include_flags.extend(["-isystem", templates_dir])
 
     cmd = [
-        compiler,
+        effective_compiler,
         f"-std={std}",
         f"-{opt_level}",
         "-Wall",
@@ -263,15 +309,22 @@ async def compile_cpp(
             )
 
         if process.returncode != 0:
+            err_text = stderr.decode("utf-8", errors="replace")
+            if sys.platform == "darwin" and "bits/stdc++.h" in err_text:
+                err_text = (
+                    f"{err_text}\n"
+                    "Hint (macOS): Apple Clang does not include <bits/stdc++.h>. "
+                    "Install Homebrew GCC (`brew install gcc`) so `g++-14`/`g++-13` is available."
+                )
             return CompileResult(
                 success=False,
                 error=f"Compilation failed with code {process.returncode}",
                 stdout=stdout.decode("utf-8", errors="replace"),
-                stderr=stderr.decode("utf-8", errors="replace"),
+                stderr=err_text,
             )
 
         if effective_use_cache:
-            _cache.set(source_path, binary_path, compiler, std, opt_level)
+            _cache.set(source_path, binary_path, effective_compiler, std, opt_level)
 
         return CompileResult(
             success=True,
@@ -283,7 +336,7 @@ async def compile_cpp(
     except FileNotFoundError:
         return CompileResult(
             success=False,
-            error=f"Compiler not found: {compiler}",
+            error=f"Compiler not found: {effective_compiler}",
         )
     except Exception as e:
         return CompileResult(
@@ -292,30 +345,42 @@ async def compile_cpp(
         )
 
 
-def _set_macos_resource_limit(memory_mb: int) -> None:
-    """macOS 上设置进程资源限制（通过 preexec_fn 调用）。
-
-    Args:
-        memory_mb: 内存限制（MB）
-
-    Note:
-        使用 preexec_fn 与 asyncio 存在潜在死锁风险（在极端情况下），
-        但实际触发概率极低。这是 macOS 上设置资源限制的标准方式。
-    """
+def _clamp_rlimit_bytes(memory_bytes: int, limit_attr: str) -> int:
+    """将请求的内存上限钳制到当前进程的 POSIX hard limit 以内，避免 EPERM/ValueError。"""
     import resource
 
-    memory_bytes = memory_mb * 1024 * 1024
-    # 设置虚拟内存限制 (address space)
+    limit_const = getattr(resource, limit_attr, None)
+    if limit_const is None:
+        return memory_bytes
     try:
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))  # type: ignore[attr-defined, unused-ignore]
-    except (ValueError, OSError) as e:
-        _logger.debug("Failed to set RLIMIT_AS on macOS: %s", e)
+        _, cur_hard = cast(Any, resource).getrlimit(limit_const)
+    except (ValueError, OSError):
+        return memory_bytes
+    rlim_inf = getattr(resource, "RLIM_INFINITY", -1)
+    if cur_hard != rlim_inf and cur_hard >= 0:
+        return min(memory_bytes, int(cur_hard))
+    return memory_bytes
 
-    # 设置数据段大小限制
-    try:
-        resource.setrlimit(resource.RLIMIT_DATA, (memory_bytes, memory_bytes))  # type: ignore[attr-defined, unused-ignore]
-    except (ValueError, OSError) as e:
-        _logger.debug("Failed to set RLIMIT_DATA on macOS: %s", e)
+
+def _set_posix_resource_limit(memory_mb: int | float) -> None:
+    """POSIX 上设置进程资源限制（通过 preexec_fn 调用）。"""
+    import resource
+
+    requested_bytes = max(1, int(round(float(memory_mb) * 1024 * 1024)))
+    for limit_attr in ("RLIMIT_AS", "RLIMIT_DATA"):
+        limit_const = getattr(resource, limit_attr, None)
+        if limit_const is None:
+            continue
+        clamped = _clamp_rlimit_bytes(requested_bytes, limit_attr)
+        try:
+            cast(Any, resource).setrlimit(limit_const, (clamped, clamped))
+        except (ValueError, OSError) as e:
+            _logger.debug("Failed to set %s on POSIX: %s", limit_attr, e)
+
+
+def _set_macos_resource_limit(memory_mb: int | float) -> None:
+    """macOS 上设置进程资源限制（兼容入口，委托给 POSIX 实现）。"""
+    _set_posix_resource_limit(memory_mb)
 
 
 async def _force_terminate_process(
@@ -332,20 +397,24 @@ async def _force_terminate_process(
     if job:
         try:
             job.terminate()
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
             _logger.debug("Job object terminate failed: %s", e)
 
-    if process.pid:
-        await terminate_pid_tree(process.pid)
-
-    # 再尝试正常终止
+    already_gone = False
     try:
-        process.kill()
-    except ProcessLookupError:
-        # 进程已经不存在
+        if process.pid:
+            await terminate_pid_tree(process.pid)
+    finally:
+        # 再尝试直接 kill；即使 terminate_pid_tree 被取消也确保清理子进程句柄。
+        try:
+            process.kill()
+        except ProcessLookupError:
+            already_gone = True
+        except OSError as e:
+            _logger.debug("Failed to kill process: %s", e)
+
+    if already_gone:
         return
-    except OSError as e:
-        _logger.debug("Failed to kill process: %s", e)
 
     # 等待进程退出，设置超时防止卡住
     try:
@@ -363,15 +432,15 @@ async def _force_terminate_process(
 async def _run_process(
     cmd: list[str],
     stdin: str = "",
-    timeout: int = 5,
-    memory_mb: int = 256,
+    timeout: int | float = 5,
+    memory_mb: int | float = 256,
     process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """运行进程的公共逻辑。"""
     import tempfile
-    import time
 
-    start_time = time.time()
+    start_time = time.monotonic()
+    safe_memory_mb = max(1, int(round(float(memory_mb))))
     job = None
     process = None
     out_f = err_f = None
@@ -395,17 +464,26 @@ async def _run_process(
                 try:
                     from .win_job import WinJobObject
 
-                    job = WinJobObject(memory_mb=memory_mb, timeout_sec=timeout)
+                    job = WinJobObject(memory_mb=safe_memory_mb, timeout_sec=timeout)
                     job.assign_process(process.pid)
-                except (OSError, RuntimeError) as e:
-                    # Job Object 创建/分配失败，记录日志并继续（进程仍可运行）
-                    _logger.warning(
+                except (OSError, RuntimeError, TypeError) as e:
+                    if job is not None:
+                        job.close()
+                        job = None
+                    err_msg = str(e)
+                    is_expected_short_lived = (
+                        not is_pid_alive(process.pid)
+                        or "Access is denied" in err_msg
+                        or "拒绝访问" in err_msg
+                        or "(5," in err_msg
+                    )
+                    log_fn = _logger.debug if is_expected_short_lived else _logger.warning
+                    log_fn(
                         "Failed to setup Windows Job Object (pid=%s, cmd=%s): %s",
                         process.pid,
                         cmd[0] if cmd else "",
                         e,
                     )
-                    job = None
         elif sys.platform == "darwin":
             # macOS: 使用 preexec_fn 设置资源限制；start_new_session 使子进程成为
             # 独立进程组 leader，便于超时/取消/清理时以 os.killpg 整树回收。
@@ -414,23 +492,39 @@ async def _run_process(
                 stdin=asyncio.subprocess.PIPE,
                 stdout=out_f,
                 stderr=err_f,
-                preexec_fn=lambda: _set_macos_resource_limit(memory_mb),
+                preexec_fn=lambda: _set_posix_resource_limit(safe_memory_mb),
                 start_new_session=True,
             )
         else:
-            # Linux: 使用 prlimit 设置资源限制；start_new_session 使子进程成为
-            # 独立进程组 leader，便于以 os.killpg 整树回收子进程。
-            memory_bytes = memory_mb * 1024 * 1024
-            process = await asyncio.create_subprocess_exec(
-                "prlimit",
-                f"--as={memory_bytes}",
-                f"--data={memory_bytes}",
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=out_f,
-                stderr=err_f,
-                start_new_session=True,
-            )
+            # Linux: 优先使用 prlimit（钳制到 hard limit）；缺失时回退 preexec_fn。
+            memory_bytes = safe_memory_mb * 1024 * 1024
+            prlimit_path = shutil.which("prlimit")
+            if prlimit_path:
+                as_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_AS")
+                data_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_DATA")
+                process = await asyncio.create_subprocess_exec(
+                    prlimit_path,
+                    f"--as={as_bytes}",
+                    f"--data={data_bytes}",
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                )
+            else:
+                exec_kwargs: dict[str, Any] = {
+                    "stdin": asyncio.subprocess.PIPE,
+                    "stdout": out_f,
+                    "stderr": err_f,
+                    "start_new_session": True,
+                }
+                if os.name != "nt":
+                    exec_kwargs["preexec_fn"] = lambda: _set_posix_resource_limit(safe_memory_mb)
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    **exec_kwargs,
+                )
 
         if process and process.pid and process_start_hook:
             try:
@@ -446,7 +540,7 @@ async def _run_process(
                 processed_stdin = _normalize_windows_stdin(stdin)
 
             await asyncio.wait_for(
-                process.communicate(input=processed_stdin.encode("utf-8") if processed_stdin else None),
+                process.communicate(input=(processed_stdin or "").encode("utf-8")),
                 timeout=timeout,
             )
         except asyncio.CancelledError:
@@ -456,6 +550,12 @@ async def _run_process(
         except (asyncio.TimeoutError, TimeoutError):
             # 超时时强制终止进程
             await _force_terminate_process(process, job)
+            for _timeout_fh in (out_f, err_f):
+                if _timeout_fh is not None:
+                    try:
+                        _timeout_fh.close()
+                    except OSError:
+                        pass
             out_str = ""
             err_str = ""
             if stdout_path and os.path.exists(stdout_path):
@@ -476,10 +576,10 @@ async def _run_process(
                 error=f"Execution timeout after {timeout}s. The program may contain an infinite loop or the input data may be too large.",
                 stdout=out_str,
                 stderr=err_str,
-                time_ms=int((time.time() - start_time) * 1000),
+                time_ms=int((time.monotonic() - start_time) * 1000),
             )
 
-        elapsed_ms = int((time.time() - start_time) * 1000)
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
         # 正常完成后关闭 Job Handle；若 Job 配置了 KILL_ON_JOB_CLOSE，
         # 关闭时仍可能终止 Job 中尚未退出的子进程。
@@ -495,7 +595,9 @@ async def _run_process(
         out_str = stdout_data.decode("utf-8", errors="replace")
         err_str = stderr_data.decode("utf-8", errors="replace")
         mle = False
-        if ret in (-9, 137) or (hasattr(signal, "SIGKILL") and ret == -signal.SIGKILL):
+        if ret in (-9, 137, 3221225495, -1073741801) or (
+            hasattr(signal, "SIGKILL") and ret == -signal.SIGKILL
+        ):
             mle = True
         elif "bad_alloc" in err_str or "Out of memory" in err_str:
             mle = True
@@ -539,8 +641,8 @@ async def _run_process(
 async def run_binary(
     binary_path: str,
     stdin: str = "",
-    timeout: int = 5,
-    memory_mb: int = 256,
+    timeout: int | float = 5,
+    memory_mb: int | float = 256,
     process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """
@@ -550,7 +652,7 @@ async def run_binary(
         binary_path: 二进制文件路径
         stdin: 标准输入
         timeout: 超时时间（秒）
-        memory_mb: 内存限制（MB），仅 Linux 有效
+        memory_mb: 内存限制（MB），仅 Linux/macOS/Windows 支持
 
     Returns:
         RunResult: 执行结果
@@ -561,15 +663,16 @@ async def run_binary(
             error=f"Binary not found: {binary_path}",
         )
 
-    return await _run_process([binary_path], stdin, timeout, memory_mb, process_start_hook)
+    abs_bin = os.path.abspath(binary_path)
+    return await _run_process([abs_bin], stdin, timeout, memory_mb, process_start_hook)
 
 
 async def run_binary_with_args(
     binary_path: str,
     args: list[str],
     stdin: str = "",
-    timeout: int = 5,
-    memory_mb: int = 256,
+    timeout: int | float = 5,
+    memory_mb: int | float = 256,
     process_start_hook: Callable[[int], None] | None = None,
 ) -> RunResult:
     """
@@ -580,7 +683,7 @@ async def run_binary_with_args(
         args: 命令行参数列表
         stdin: 标准输入
         timeout: 超时时间（秒）
-        memory_mb: 内存限制（MB），仅 Linux 有效
+        memory_mb: 内存限制（MB），仅 Linux/macOS/Windows 支持
 
     Returns:
         RunResult: 执行结果
@@ -591,8 +694,9 @@ async def run_binary_with_args(
             error=f"Binary not found: {binary_path}",
         )
 
+    abs_bin = os.path.abspath(binary_path)
     return await _run_process(
-        [binary_path, *args],
+        [abs_bin, *args],
         stdin,
         timeout,
         memory_mb,

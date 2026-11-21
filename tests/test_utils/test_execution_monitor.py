@@ -107,3 +107,36 @@ async def test_run_monitored_process_output_limit(tmp_path: os.PathLike[str]) ->
 
     assert res["status"] == "ok"
     assert len(res["stdout"]) <= 10 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_measure_baseline_overhead_platform_bounds(monkeypatch):
+    """Windows 直接返回合理 C++ 进程创建底噪，避免外部 coreutils true.exe ~90ms 歪斜。"""
+    import autocode_mcp.utils.execution_monitor as em_mod
+
+    monkeypatch.setattr(em_mod.sys, "platform", "win32")
+    assert await DynamicExecutionMonitor.measure_baseline_overhead() == 1.5
+
+
+@pytest.mark.asyncio
+async def test_run_monitored_process_windows_uses_qpc_below_64ms(monkeypatch, tmp_path):
+    """Windows 下 <64ms CPU 样本应采用高精度 QPC wall time 扣减启动底噪，避免 15.625ms 锯齿。"""
+    import autocode_mcp.utils.execution_monitor as em_mod
+
+    in_file = tmp_path / "in.txt"
+    in_file.write_text("1\n", encoding="utf-8")
+
+    monkeypatch.setattr(em_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        DynamicExecutionMonitor, "get_cpu_times_ms", classmethod(lambda cls, p: 15.625)
+    )
+
+    res = await DynamicExecutionMonitor.run_monitored_process(
+        [sys.executable, "-c", "print('ok')"],
+        str(in_file),
+        time_limit_ms=2000.0,
+        baseline_overhead_ms=1.5,
+    )
+    assert res["status"] == "ok"
+    assert res["cpu_time_ms"] is not None
+    assert res["cpu_time_ms"] != 15.625

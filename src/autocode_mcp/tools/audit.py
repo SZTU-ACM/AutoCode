@@ -38,8 +38,7 @@ from ..workflow.models import (
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import (
     _higher_complexity,
-    analyze_loop_complexity,
-    detect_algorithm_patterns,
+    estimate_static_complexity,
     extract_claimed_complexity,
     extract_constraint_numbers,
     extract_n_max_from_constraints,
@@ -1032,19 +1031,31 @@ class ProblemAuditTool(Tool):
     ) -> dict[str, object]:
         sol_source = self._solution_source(problem_path, "sol")
         code = sol_source.read_text(encoding="utf-8", errors="replace") if sol_source else ""
-        complexity = analyze_loop_complexity(code) if code else "unknown"
-        pattern_complexity, tags = detect_algorithm_patterns(code) if code else (None, [])
-        if pattern_complexity:
-            complexity = self._max_complexity(complexity, pattern_complexity)
+        complexity, tags = estimate_static_complexity(code) if code else ("unknown", [])
 
         empirical_signal = quality_signals.get("empirical_complexity", {})
         if self._signal_satisfied(empirical_signal):
-            fitted_comp = empirical_signal.get("evidence", {}).get("fitted_complexity")
-            if fitted_comp:
+            emp_ev = empirical_signal.get("evidence", {})
+            emp_verdict = emp_ev.get("verdict")
+            fitted_comp = emp_ev.get("fitted_complexity")
+            r2 = emp_ev.get("r_squared")
+            low_snr_noise = (
+                emp_verdict in ("verified_within_noise_floor", "verified_with_cache_jump")
+                or (isinstance(r2, int | float) and float(r2) < 0.5)
+                or (
+                    fitted_comp == "O(1)"
+                    and complexity not in ("unknown", "O(1)", "O(log n)")
+                )
+            )
+            if fitted_comp and not low_snr_noise:
                 complexity = str(fitted_comp)
 
         constraint_numbers = self._constraint_numbers(manifest.constraints)
-        n_max = max(constraint_numbers) if constraint_numbers else None
+        raw_largest = max(constraint_numbers) if constraint_numbers else None
+        n_max = extract_n_max_from_constraints(manifest.constraints)
+        if n_max is None:
+            n_max = raw_largest
+        largest_value_bound = raw_largest if (raw_largest and n_max and raw_largest > n_max) else None
         wrong_count = sum(1 for s in manifest.solutions if s.role == "wrong")
         limit_ratio = self._limit_ratio(problem_path)
 
@@ -1073,7 +1084,7 @@ class ProblemAuditTool(Tool):
         confidence = 0.35
         if code:
             confidence += 0.25
-        if constraint_numbers:
+        if n_max or constraint_numbers:
             confidence += 0.15
         if self._signal_satisfied(quality_signals.get("answer_consistency", {})):
             confidence += 0.1
@@ -1100,7 +1111,10 @@ class ProblemAuditTool(Tool):
             "confidence": confidence,
             "estimated_complexity": complexity,
             "algorithm_tags": tags,
-            "constraint_scale": {"largest_numeric_constraint": n_max},
+            "constraint_scale": {
+                "largest_numeric_constraint": n_max,
+                **({"largest_value_bound": largest_value_bound} if largest_value_bound else {}),
+            },
             "implementation_evidence": {
                 "solution_source": str(sol_source) if sol_source else None,
                 "solution_lines": len(code.splitlines()) if code else 0,

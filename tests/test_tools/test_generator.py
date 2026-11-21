@@ -227,3 +227,90 @@ async def test_generator_build_semantic_check_reports_overlap():
         assert "signal_overlap_advisory" in semantic
         assert "type3_signals" in semantic
         assert "type4_signals" in semantic
+
+
+@pytest.mark.asyncio
+async def test_generator_semantic_check_long_branches_and_shared_output_no_false_positive():
+    """长 branch (>240字符) 与 main 末尾共享单处 cout 不得误判为 type=3/4 相似。"""
+    long_distinct_gen = """
+#include "testlib.h"
+#include <iostream>
+#include <vector>
+#include <numeric>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int type = atoi(argv[2]);
+    int n_max = atoi(argv[4]);
+    int n = n_max;
+    std::vector<int> a(n);
+    if (type == 3) {
+        // Long anti-hash / monotonic construction > 240 chars before type=4
+        for (int i = 0; i < n; ++i) {
+            a[i] = (i % 2 == 0) ? (i + 1) : (n - i);
+        }
+        for (int i = 1; i < n; i += 4) {
+            std::swap(a[i - 1], a[i]);
+        }
+    } else if (type == 4) {
+        // Distinct anti-quicksort / bimodal construction with similar length
+        std::iota(a.begin(), a.end(), 1);
+        for (int i = n / 2; i < n; ++i) {
+            a[i] = n - (i - n / 2);
+        }
+        if (n >= 4) {
+            a[0] = n;
+            a[n - 1] = 1;
+        }
+    }
+    std::cout << n << "\\n";
+    for (int i = 0; i < n; ++i) std::cout << a[i] << " \\n"[i + 1 == n];
+    return 0;
+}
+"""
+    tool = GeneratorBuildTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res = await tool.execute(problem_dir=tmpdir, code=long_distinct_gen, strict_semantic_check=True)
+        assert res.success, res.error
+        assert res.data["semantic_check"]["passed"] is True
+
+    switch_distinct = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int type = atoi(argv[2]);
+    int n = atoi(argv[4]);
+    switch (type) {
+        case 3:
+            for (int i = 0; i < n; i++) std::cout << i << " ";
+            break;
+        case 4:
+            for (int i = n; i > 0; i--) std::cout << (i * 2) << " ";
+            break;
+    }
+    return 0;
+}
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res2 = await tool.execute(problem_dir=tmpdir, code=switch_distinct, strict_semantic_check=True)
+        assert res2.success, res2.error
+
+    switch_fallthrough = """
+#include "testlib.h"
+#include <iostream>
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int type = atoi(argv[2]);
+    int n = atoi(argv[4]);
+    switch (type) {
+        case 3:
+        case 4:
+            std::cout << n << "\\n";
+            break;
+    }
+    return 0;
+}
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res3 = await tool.execute(problem_dir=tmpdir, code=switch_fallthrough, strict_semantic_check=True)
+        assert not res3.success

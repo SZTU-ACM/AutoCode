@@ -2269,3 +2269,41 @@ async def test_problem_create_communication_and_conflict_rejection():
         )
         assert not bad_proto.success
         assert "protocol_mode" in (bad_proto.error or "")
+
+
+@pytest.mark.asyncio
+async def test_problem_pack_polygon_unit_trap_and_time_limit_ms():
+    """problem_pack_polygon 应拦截把毫秒误传给 time_limit（如 1000），并支持显式 time_limit_ms 与冲突检查。"""
+    tool = ProblemPackPolygonTool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        problem_dir = os.path.join(tmpdir, "unit_trap")
+        for d in ("statements", "solutions", "tests", ".autocode"):
+            os.makedirs(os.path.join(problem_dir, d), exist_ok=True)
+        with open(os.path.join(problem_dir, ".autocode", "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "problem_name": "UnitTrap",
+                    "time_limit_ms": 2000,
+                    "memory_limit_mb": 256,
+                },
+                f,
+            )
+        Path(problem_dir, "statements", "README.md").write_text("# Test\n", encoding="utf-8")
+        Path(problem_dir, "solutions", "sol.cpp").write_text("// sol\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.in").write_text("1\n", encoding="utf-8")
+        Path(problem_dir, "tests", "01.ans").write_text("1\n", encoding="utf-8")
+        write_verified_workflow_state(problem_dir)
+
+        trap = await tool.execute(problem_dir=problem_dir, time_limit=1000)
+        assert not trap.success
+        assert "time_limit_ms" in (trap.error or "")
+
+        conflict = await tool.execute(problem_dir=problem_dir, time_limit=2, time_limit_ms=1000)
+        assert not conflict.success
+        assert "conflicting" in (conflict.error or "").lower()
+
+        ok = await tool.execute(problem_dir=problem_dir, time_limit_ms=1500)
+        assert ok.success, ok.error
+        xml = Path(problem_dir, "problem.xml").read_text(encoding="utf-8")
+        assert "<time-limit>1500</time-limit>" in xml

@@ -78,13 +78,20 @@ class MultiScaleSampler:
         output_file_path: str,
         timeout_sec: float = 10.0,
     ) -> bool:
-        os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+        out_dir = os.path.dirname(output_file_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        resolved_cmd = list(cmd)
+        if resolved_cmd and os.path.exists(resolved_cmd[0]):
+            resolved_cmd[0] = os.path.abspath(resolved_cmd[0])
         with open(output_file_path, "w", encoding="utf-8", newline="\n") as out_f:
             proc = subprocess.run(
-                cmd,
+                resolved_cmd,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_sec,
                 check=False,
             )

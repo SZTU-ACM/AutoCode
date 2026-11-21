@@ -939,7 +939,7 @@ class ProblemGenerateTestsTool(Tool):
                     seed,
                     "Generator failed: "
                     f"return_code={gen_result.return_code}, "
-                    f"stderr={gen_result.stderr}",
+                    f"stderr={gen_result.stderr or gen_result.error or ''}",
                 ),
                 fallback_used=fallback_used,
             )
@@ -1009,7 +1009,7 @@ class ProblemGenerateTestsTool(Tool):
             sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
             if not sol_result.success:
                 return _CandidateOutcome(
-                    error=(seed, f"sol failed: {sol_result.stderr}"),
+                    error=(seed, f"sol failed: {sol_result.stderr or sol_result.error or f'return_code={sol_result.return_code}'}"),
                     fallback_used=fallback_used,
                 )
             output_data = sol_result.stdout
@@ -1640,6 +1640,7 @@ class ProblemPackPolygonTool(Tool):
         self,
         problem_dir: str,
         time_limit: int | None = None,
+        time_limit_ms: int | None = None,
         memory_limit: int | None = None,
         export_formats: list[Literal["polygon", "hydro", "qoj"]] | None = None,
     ) -> ToolResult:
@@ -1882,13 +1883,32 @@ class ProblemPackPolygonTool(Tool):
             )
 
         # 单位转换与合法性校验：显式传参优先；缺省时回读 manifest 中的 time_limit_ms / memory_limit_mb
+        if time_limit_ms is not None:
+            if isinstance(time_limit_ms, bool) or not isinstance(time_limit_ms, int) or time_limit_ms <= 0:
+                return ToolResult.fail("time_limit_ms must be a positive integer (milliseconds)")
         if time_limit is not None:
             if isinstance(time_limit, bool) or not isinstance(time_limit, int) or time_limit <= 0:
                 return ToolResult.fail("time_limit must be a positive integer (seconds)")
-            time_limit_ms = time_limit * 1000
+            if time_limit_ms is not None and time_limit * 1000 != time_limit_ms:
+                return ToolResult.fail(
+                    f"Conflicting time_limit={time_limit}s and time_limit_ms={time_limit_ms}ms provided; "
+                    "pass only one or matching values"
+                )
+        if time_limit_ms is not None:
+            effective_time_limit_ms = time_limit_ms
+        elif time_limit is not None:
+            if isinstance(time_limit, bool) or not isinstance(time_limit, int) or time_limit <= 0:
+                return ToolResult.fail("time_limit must be a positive integer (seconds)")
+            if time_limit >= 100:
+                return ToolResult.fail(
+                    f"Suspicious time_limit={time_limit} seconds (>= 100s). "
+                    "time_limit expects SECONDS (e.g. 1 or 2); "
+                    f"if you meant {time_limit}ms, pass time_limit_ms={time_limit} instead."
+                )
+            effective_time_limit_ms = time_limit * 1000
         else:
-            time_limit_ms = int(manifest_model.time_limit_ms)
-            if time_limit_ms <= 0:
+            effective_time_limit_ms = int(manifest_model.time_limit_ms)
+            if effective_time_limit_ms <= 0:
                 return ToolResult.fail("manifest.time_limit_ms must be positive")
         if memory_limit is not None:
             if isinstance(memory_limit, bool) or not isinstance(memory_limit, int) or memory_limit <= 0:
@@ -1924,7 +1944,7 @@ class ProblemPackPolygonTool(Tool):
             )
             xml_content = _build_problem_xml(
                 problem_dir,
-                time_limit_ms=time_limit_ms,
+                time_limit_ms=effective_time_limit_ms,
                 memory_limit_bytes=memory_limit_bytes,
                 test_count=actual_test_count,
                 answer_ext=answer_ext,
@@ -1953,7 +1973,7 @@ class ProblemPackPolygonTool(Tool):
                 exports["hydro"] = export_hydro(
                     problem_dir,
                     manifest_model,
-                    time_limit_ms=time_limit_ms,
+                    time_limit_ms=effective_time_limit_ms,
                     memory_limit_mb=memory_limit_mb,
                     in_files=in_files,
                     answer_ext=answer_ext,
@@ -1967,7 +1987,7 @@ class ProblemPackPolygonTool(Tool):
                 exports["qoj"] = export_qoj(
                     problem_dir,
                     manifest_model,
-                    time_limit_ms=time_limit_ms,
+                    time_limit_ms=effective_time_limit_ms,
                     memory_limit_mb=memory_limit_mb,
                     in_files=in_files,
                     answer_ext=answer_ext,

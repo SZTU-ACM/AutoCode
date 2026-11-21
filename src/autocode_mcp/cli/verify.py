@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -46,6 +47,12 @@ def _check_paths(problem_dir: Path, manifest: dict) -> list[str]:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
     parser = argparse.ArgumentParser(description="Verify AutoCode workspace contract quickly.")
     parser.add_argument("problem_dir", help="Problem directory")
     args = parser.parse_args()

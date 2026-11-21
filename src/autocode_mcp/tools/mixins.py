@@ -120,7 +120,7 @@ class RunToolMixin:
         binary_path: str,
         input_data: str,
         problem_dir: str,
-        solution_type: Literal["sol", "brute"],
+        solution_type: Literal["sol", "brute", "wrong", "reference"],
         timeout: int | None = None,
         memory_mb: int | None = None,
     ) -> RunResult:

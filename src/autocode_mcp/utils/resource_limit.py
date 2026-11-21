@@ -40,7 +40,7 @@ def load_problem_config(problem_dir: Path) -> ProblemConfig:
 
 def get_resource_limit(
     problem_dir: str,
-    solution_type: Literal["sol", "brute"],
+    solution_type: Literal["sol", "brute", "wrong", "reference"],
     timeout: int | None = None,
     memory_mb: int | None = None,
 ) -> ResourceLimit:

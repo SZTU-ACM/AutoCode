@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -327,7 +328,12 @@ def test_exporters_reject_escaping_and_symlink_output_dirs(tmp_path):
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    os.symlink(str(outside), str(pdir / "sym_export"))
+    try:
+        os.symlink(str(outside), str(pdir / "sym_export"))
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege not enabled")
+        raise
     with pytest.raises(ValueError, match="escapes problem_dir|symlink"):
         export_hydro(
             str(pdir),
@@ -451,7 +457,12 @@ def test_exporters_block_internal_symlink_and_test_file_escapes(tmp_path):
     pdir, manifest, in_files, _ = _setup_problem(tmp_path, problem_type="standard", test_count=2)
 
     # 1. Internal symlink inside problem_dir MUST be rejected without deleting files/
-    os.symlink(str(pdir / "files"), str(pdir / "internal_sym"))
+    try:
+        os.symlink(str(pdir / "files"), str(pdir / "internal_sym"))
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege not enabled")
+        raise
     with pytest.raises(ValueError, match="symlink"):
         export_hydro(
             str(pdir),

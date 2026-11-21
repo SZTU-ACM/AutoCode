@@ -7,6 +7,8 @@ from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import (
     ComplexityLevel,
     analyze_loop_complexity,
+    estimate_static_complexity,
+    extract_n_max_from_constraints,
     run_empirical_verification,
 )
 from .mixins import resolve_source
@@ -51,7 +53,8 @@ class SolutionAuditStdTool(Tool):
         if claimed_complexity:
             claimed_complexity = normalize_complexity_expression(claimed_complexity)
 
-        estimated = analyze_loop_complexity(code)
+        estimated, patterns = estimate_static_complexity(code)
+        loop_comp = analyze_loop_complexity(code)
         findings: list[dict] = []
         passed = True
 
@@ -64,7 +67,8 @@ class SolutionAuditStdTool(Tool):
                 }
             )
 
-        if constraints and constraints.get("n_max", 0) >= 10**6 and estimated in {
+        n_max = extract_n_max_from_constraints(constraints)
+        if n_max is not None and n_max >= 10**6 and estimated in {
             ComplexityLevel.QUADRATIC,
             ComplexityLevel.CUBIC,
             ComplexityLevel.EXPONENTIAL,
@@ -106,12 +110,21 @@ class SolutionAuditStdTool(Tool):
                     }
                 )
 
+        nested_loop_levels = {
+            ComplexityLevel.QUADRATIC,
+            ComplexityLevel.CUBIC,
+            ComplexityLevel.EXPONENTIAL,
+            ComplexityLevel.FACTORIAL,
+        }
         return ToolResult.ok(
             passed=passed,
             estimated_complexity=estimated,
             claimed_complexity=claimed_complexity,
             findings=findings,
-            evidence={"has_sort": "sort(" in code, "has_nested_loops": code.count("for (") >= 2},
+            evidence={
+                "has_sort": "sorting" in patterns,
+                "has_nested_loops": loop_comp in nested_loop_levels,
+            },
             empirical_verification=empirical_verification,
         )
 
@@ -154,7 +167,8 @@ class SolutionAuditBruteTool(Tool):
         if std_complexity:
             std_complexity = normalize_complexity_expression(std_complexity)
 
-        brute_complexity = analyze_loop_complexity(code)
+        brute_complexity, brute_patterns = estimate_static_complexity(code)
+        brute_loop_comp = analyze_loop_complexity(code)
         findings: list[dict] = []
         if std_complexity and brute_complexity == std_complexity:
             findings.append(
@@ -165,7 +179,16 @@ class SolutionAuditBruteTool(Tool):
                 }
             )
         recommended_n_max = 150
-        if brute_complexity in {ComplexityLevel.CUBIC, ComplexityLevel.EXPONENTIAL, ComplexityLevel.FACTORIAL}:
+        if brute_complexity == ComplexityLevel.FACTORIAL:
+            recommended_n_max = 8
+        elif brute_complexity == ComplexityLevel.EXPONENTIAL:
+            has_poly_factor = "dynamic_programming" in brute_patterns or brute_loop_comp in {
+                ComplexityLevel.QUADRATIC,
+                ComplexityLevel.CUBIC,
+                ComplexityLevel.EXPONENTIAL,
+            }
+            recommended_n_max = 10 if has_poly_factor else 14
+        elif brute_complexity == ComplexityLevel.CUBIC:
             recommended_n_max = 40
         elif brute_complexity == ComplexityLevel.QUADRATIC:
             recommended_n_max = 80

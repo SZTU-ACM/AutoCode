@@ -352,3 +352,52 @@ Sample Output:
             assert len(samples) == 1
         finally:
             os.unlink(temp_path)
+
+
+@pytest.mark.asyncio
+async def test_problem_validate_prefers_isolated_samples_dir_and_crlf_out_fallback():
+    """problem_validate 应自动优先使用 tests/samples/（避免与 tests/ 冲突），并支持显式 samples_dir、.out 与 CRLF。"""
+    from autocode_mcp.tools.solution import SolutionBuildTool
+
+    build_tool = SolutionBuildTool()
+    val_tool = ProblemValidateTool()
+    sol_code = """
+#include <iostream>
+int main() {
+    int a, b;
+    if (std::cin >> a >> b) std::cout << (a + b) << "\\n";
+    return 0;
+}
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "statements"), exist_ok=True)
+        with open(os.path.join(tmpdir, "statements", "README.md"), "w", encoding="utf-8") as rf:
+            rf.write("# Sum\n\n**样例输入 1**\n```text\n1 2\n```\n\n**样例输出 1**\n```text\n3\n```\n")
+        assert (await build_tool.execute(problem_dir=tmpdir, solution_type="sol", code=sol_code)).success
+
+        # 在 tests/ 放一个非样例大测点名、而在 tests/samples/ 放隔离样例（用 .out + CRLF）
+        samples_dir = os.path.join(tmpdir, "tests", "samples")
+        custom_dir = os.path.join(tmpdir, "custom_samples")
+        os.makedirs(samples_dir, exist_ok=True)
+        os.makedirs(custom_dir, exist_ok=True)
+        with open(os.path.join(tmpdir, "tests", "01.in"), "w", encoding="utf-8") as f:
+            f.write("1 1\n")
+        with open(os.path.join(tmpdir, "tests", "01.ans"), "w", encoding="utf-8") as f:
+            f.write("999\n")  # 故意错，若走 tests/ 会失败
+        with open(os.path.join(samples_dir, "sample01.in"), "wb") as f:
+            f.write(b"10 20\r\n")
+        with open(os.path.join(samples_dir, "sample01.out"), "wb") as f:
+            f.write(b"30\r\n")
+
+        res = await val_tool.execute(problem_dir=tmpdir)
+        assert res.success, res.error
+        assert res.data["sample_files"]["total"] == 1
+        assert res.data["sample_files"]["details"][0]["file"] == "sample01.in"
+
+        with open(os.path.join(custom_dir, "s2.in"), "w", encoding="utf-8") as f:
+            f.write("5 6\n")
+        with open(os.path.join(custom_dir, "s2.ans"), "w", encoding="utf-8") as f:
+            f.write("11\n")
+        res_explicit = await val_tool.execute(problem_dir=tmpdir, samples_dir="custom_samples")
+        assert res_explicit.success, res_explicit.error
+        assert res_explicit.data["sample_files"]["details"][0]["file"] == "s2.in"

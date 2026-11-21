@@ -122,3 +122,47 @@ async def test_solution_audit_std_generator_error():
         result = await tool.execute(problem_dir=tmpdir, claimed_complexity="O(n)")
         assert result.success
         assert any(f["type"] == "generator_error" for f in result.data["findings"])
+
+
+@pytest.mark.asyncio
+async def test_solution_audit_std_and_brute_use_pattern_and_bitmask_awareness():
+    """std 应识别 std::sort 为 O(n log n) 且不把顺序单层循环判为嵌套；状压暴力应归类 O(2^n) 并收紧 n_max。"""
+    std_tool = SolutionAuditStdTool()
+    std_code = """
+#include <algorithm>
+#include <vector>
+using namespace std;
+int main() {
+    int n; cin >> n;
+    vector<int> a(n);
+    for (int i = 0; i < n; i++) cin >> a[i];
+    sort(a.begin(), a.end());
+    for (int i = 0; i < n; i++) cout << a[i] << " ";
+    return 0;
+}
+"""
+    std_res = await std_tool.execute(code=std_code, claimed_complexity="O(n log n)")
+    assert std_res.success
+    assert std_res.data["estimated_complexity"] == ComplexityLevel.N_LOG_N
+    assert std_res.data["evidence"]["has_sort"] is True
+    assert std_res.data["evidence"]["has_nested_loops"] is False
+    assert not any(f["type"] == "complexity_mismatch" for f in std_res.data["findings"])
+
+    brute_tool = SolutionAuditBruteTool()
+    bitmask_dp_brute = """
+int main() {
+    int n;
+    for (int mask = 0; mask < (1 << n); mask++) {
+        for (int u = 0; u < n; u++) {
+            for (int v = 0; v < n; v++) {
+                dp[mask][u] += 1;
+            }
+        }
+    }
+    return 0;
+}
+"""
+    brute_res = await brute_tool.execute(code=bitmask_dp_brute, std_complexity="O(n log n)")
+    assert brute_res.success
+    assert brute_res.data["brute_complexity"] == ComplexityLevel.EXPONENTIAL
+    assert brute_res.data["recommended_stress_params"]["n_max"] <= 12

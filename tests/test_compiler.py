@@ -455,6 +455,11 @@ async def test_run_binary_with_args_cancelled_force_terminates(monkeypatch):
         monkeypatch.setattr(compiler_module.sys, "platform", "linux")
         monkeypatch.setattr(compiler_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
+        async def noop_terminate_pid_tree(_pid):
+            return None
+
+        monkeypatch.setattr(compiler_module, "terminate_pid_tree", noop_terminate_pid_tree)
+
         with pytest.raises(asyncio.CancelledError):
             await run_binary_with_args(binary_path, ["1"], timeout=1)
         assert killed["value"] is True
@@ -525,3 +530,76 @@ async def test_run_batch_limit_degrades_to_one():
     result = await run_batch([1, 2, 3], worker, limit=0)
     assert result == [1, 2, 3]
     assert order == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_run_binary_accepts_float_timeout_and_memory():
+    """run_binary 应支持浮点 timeout（如 manifest.time_limit_ms / 1000 * 1.5）与 memory_mb。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = os.path.join(tmpdir, "echo.cpp")
+        exe = os.path.join(tmpdir, "echo.exe" if os.name == "nt" else "echo")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(
+                '#include <iostream>\nint main(){ int x; if (std::cin >> x) std::cout << x << "\\n"; return 0; }'
+            )
+        comp = await compile_cpp(src, exe)
+        assert comp.success, comp.stderr
+
+        res = await run_binary(exe, "42\n", timeout=1.5, memory_mb=128.5)
+        assert res.success, res.error
+        assert res.stdout.strip() == "42"
+
+
+def test_resolve_compiler_prefers_homebrew_gcc_over_apple_clang_on_macos(monkeypatch):
+    """macOS 上 g++ 若实为 Apple Clang 垫片，应自动解析为已安装的 Homebrew GCC。"""
+    import subprocess as sp
+
+    compiler_module._resolve_compiler.cache_clear()
+    try:
+        monkeypatch.setattr(compiler_module.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            compiler_module.shutil,
+            "which",
+            lambda name: "/opt/homebrew/bin/g++-14"
+            if name == "g++-14"
+            else ("/usr/bin/g++" if name == "g++" else None),
+        )
+        monkeypatch.setattr(
+            compiler_module.subprocess,
+            "run",
+            lambda *a, **k: sp.CompletedProcess(a[0], 0, stdout="Apple clang version 15.0.0", stderr=""),
+        )
+        assert compiler_module._resolve_compiler("g++") == "/opt/homebrew/bin/g++-14"
+        assert compiler_module._resolve_compiler("clang++") == "clang++"
+    finally:
+        compiler_module._resolve_compiler.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_linux_fallback_when_prlimit_unavailable(monkeypatch):
+    """Linux 缺少 prlimit（如 Alpine/精简容器）时应回退直接执行而不抛 FileNotFoundError。"""
+    seen_cmds: list[list[str]] = []
+
+    class FakeProc:
+        pid = 4321
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"", b""
+
+    async def fake_exec(*cmd, **kwargs):
+        seen_cmds.append(list(cmd))
+        return FakeProc()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dummy = os.path.join(tmpdir, "prog")
+        with open(dummy, "w", encoding="utf-8") as f:
+            f.write("x")
+
+        monkeypatch.setattr(compiler_module.sys, "platform", "linux")
+        monkeypatch.setattr(compiler_module.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(compiler_module.asyncio, "create_subprocess_exec", fake_exec)
+
+        res = await run_binary(dummy, "", timeout=1.5, memory_mb=256)
+        assert res.success, res.error
+        assert seen_cmds and os.path.abspath(dummy) == seen_cmds[0][0]

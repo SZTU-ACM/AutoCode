@@ -8,6 +8,7 @@ Interactor 工具组 - 交互器。
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 
@@ -159,6 +160,13 @@ class InteractorBuildTool(Tool):
                     interaction_scenarios=scenario_report,
                     scenario_accuracy=scenario_report["accuracy"],
                 )
+            autocode_dir = os.path.join(problem_dir, ".autocode")
+            os.makedirs(autocode_dir, exist_ok=True)
+            scen_name = (
+                "communicator_scenarios.json" if is_communication else "interactor_scenarios.json"
+            )
+            with open(os.path.join(autocode_dir, scen_name), "w", encoding="utf-8", newline="\n") as sf:
+                json.dump(interaction_scenarios, sf, ensure_ascii=False, indent=2)
 
         # 如果没有提供任何解法验证，直接返回成功（pass_rate 为 0）
         if not reference_solution_path and not mutant_solutions:

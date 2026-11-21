@@ -610,5 +610,89 @@ def test_extract_n_max_ignores_bool_negative_and_prefers_n_over_value_range():
         == 200000
     )
     assert extract_n_max_from_constraints({"n_max": 50000, "v_max": 10**9}) == 50000
+    assert extract_n_max_from_constraints({"m": {"min": 1, "max": 100000}, "a_i": 10**9}) == 100000
+
+
+def test_priority_queue_and_dynamic_stl_and_static_complexity_accuracy():
+    """验证 priority_queue 归类、动态 STL 空间复杂度、Dijkstra/单调队列静态识别与 n_max 细分 TL。"""
+    from autocode_mcp.tools.complexity import (
+        estimate_static_complexity,
+        recommend_time_limit_ms,
+    )
+
+    dijkstra_code = """
+#include <queue>
+#include <vector>
+using namespace std;
+int main() {
+    int n, m;
+    cin >> n >> m;
+    vector<vector<pair<int, int>>> adj(n);
+    vector<int> dist(n, 1e9);
+    priority_queue<pair<int, int>> pq;
+    pq.push({0, 0});
+    while (!pq.empty()) {
+        auto [d, u] = pq.top();
+        pq.pop();
+        for (auto &[v, w] : adj[u]) {
+            if (dist[u] + w < dist[v]) pq.push({-dist[v], v});
+        }
+    }
+    return 0;
+}
+"""
+    comp, pats = estimate_static_complexity(dijkstra_code)
+    assert comp == ComplexityLevel.N_LOG_N
+    assert "heap" in pats
+    assert "graph_traversal" not in pats
+    space, _ = estimate_memory_usage(dijkstra_code)
+    assert space == "O(n)"
+
+    mono_stack_code = """
+#include <stack>
+#include <vector>
+using namespace std;
+int main() {
+    int n; cin >> n;
+    vector<int> a(n);
+    stack<int> st;
+    for (int i = 0; i < n; i++) {
+        while (!st.empty() && a[st.top()] <= a[i]) st.pop();
+        st.push(i);
+    }
+}
+"""
+    mono_comp, _ = estimate_static_complexity(mono_stack_code)
+    assert mono_comp == ComplexityLevel.LINEAR
+
+    dp2d_code = """
+#include <vector>
+using namespace std;
+int main() {
+    int n, m;
+    vector<vector<int>> dp(n + 1, vector<int>(m + 1, 0));
+    return 0;
+}
+"""
+    space2d, mem2d = estimate_memory_usage(dp2d_code)
+    assert space2d == "O(n^2)"
+    assert mem2d >= 128
+
+    assert recommend_time_limit_ms(ComplexityLevel.N_LOG_N, {"n_max": 100000}) == 1000
+    assert recommend_time_limit_ms(ComplexityLevel.N_LOG_N, {"n_max": 200000}) == 1500
+    assert recommend_time_limit_ms(ComplexityLevel.N_LOG_N, {"n_max": 1000000}) == 2000
+
+
+@pytest.mark.asyncio
+async def test_analyze_suggested_test_configs_include_type4_and_ordered_bounds():
+    """suggested_test_configs 应包含 type=4 极限档且对极小 n_max（如 12）保持 n_min <= n_max。"""
+    tool = SolutionAnalyzeTool()
+    res = await tool.execute(code="int main() { return 0; }", constraints={"n_max": 12})
+    assert res.success
+    configs = res.data["suggested_test_configs"]
+    assert len(configs) == 6
+    assert any(c["type"] == "4" for c in configs)
+    for cfg in configs:
+        assert 1 <= cfg["n_min"] <= cfg["n_max"] <= 12
 
 

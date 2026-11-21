@@ -26,19 +26,91 @@ class DynamicExecutionMonitor:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return 0.0
 
+    @staticmethod
+    def _abs_cmd(cmd: list[str], abs_cwd: str | None = None) -> list[str]:
+        if not cmd:
+            return []
+        resolved = list(cmd)
+        if os.path.exists(resolved[0]):
+            resolved[0] = os.path.abspath(resolved[0])
+        elif abs_cwd and os.path.exists(os.path.join(abs_cwd, resolved[0])):
+            resolved[0] = os.path.abspath(os.path.join(abs_cwd, resolved[0]))
+        return resolved
+
+    @classmethod
+    def _sample_tree_stats(
+        cls,
+        root_proc: psutil.Process,
+        known_children: dict[int, psutil.Process],
+        cpu_by_pid: dict[int, float],
+        *,
+        refresh_children: bool,
+    ) -> tuple[float, float]:
+        """采集根进程与已知后代树的总 RSS（MB）与累计最大 CPU（ms）。"""
+        if refresh_children:
+            try:
+                for child in root_proc.children(recursive=True):
+                    known_children.setdefault(child.pid, child)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        total_mem = 0.0
+        with root_proc.oneshot():
+            total_mem += cls.get_memory_mb(root_proc)
+            root_cpu = cls.get_cpu_times_ms(root_proc)
+            if root_cpu > cpu_by_pid.get(root_proc.pid, 0.0):
+                cpu_by_pid[root_proc.pid] = root_cpu
+
+        dead_pids: list[int] = []
+        for cpid, cproc in list(known_children.items()):
+            try:
+                if not cproc.is_running():
+                    dead_pids.append(cpid)
+                    continue
+                with cproc.oneshot():
+                    total_mem += cls.get_memory_mb(cproc)
+                    c_cpu = cls.get_cpu_times_ms(cproc)
+                    if c_cpu > cpu_by_pid.get(cpid, 0.0):
+                        cpu_by_pid[cpid] = c_cpu
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                dead_pids.append(cpid)
+        for cpid in dead_pids:
+            known_children.pop(cpid, None)
+
+        return total_mem, sum(cpu_by_pid.values())
+
     @classmethod
     async def measure_baseline_overhead(cls, cwd: str | None = None) -> float:
+        if sys.platform == "win32":
+            # Windows 上 external coreutils `true.exe` 可能有 ~90ms 启动开销，
+            # 不能代表原生 C++ 可执行文件进程创建的 ~1.5ms 底噪。
+            return 1.5
         try:
-            cmd = ["/bin/true"] if os.path.exists("/bin/true") else ["true"]
-            t0 = time.perf_counter()
-            subproc = await asyncio.create_subprocess_exec(
+            true_bin = next((p for p in ("/usr/bin/true", "/bin/true") if os.path.exists(p)), None)
+            if true_bin is None:
+                return 1.5
+            cmd = [true_bin]
+            abs_cwd = os.path.abspath(cwd) if cwd is not None else None
+            # 先执行 1 次预热以预加载动态库/文件系统缓存
+            warmup = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=cwd,
+                cwd=abs_cwd,
             )
-            await subproc.wait()
-            return max(0.0, (time.perf_counter() - t0) * 1000.0)
+            await warmup.wait()
+            samples: list[float] = []
+            for _ in range(3):
+                t0 = time.perf_counter()
+                subproc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=abs_cwd,
+                )
+                await subproc.wait()
+                samples.append(max(0.0, (time.perf_counter() - t0) * 1000.0))
+            return min(15.0, min(samples)) if samples else 1.5
         except Exception:
             return 1.5
 
@@ -54,6 +126,12 @@ class DynamicExecutionMonitor:
     ) -> dict[str, Any]:
         timeout_sec = max(0.1, time_limit_ms / 1000.0)
         max_output_bytes = 10 * 1024 * 1024  # 10MB 输出上限，防止管道填满挂起
+        abs_cwd = os.path.abspath(cwd) if cwd is not None else None
+        effective_cmd = cls._abs_cmd(cmd, abs_cwd)
+
+        popen_kwargs: dict[str, Any] = {}
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True
 
         wall_start = time.perf_counter()
         peak_memory_mb = 0.0
@@ -61,12 +139,12 @@ class DynamicExecutionMonitor:
 
         with open(input_file_path, "rb") as in_f:
             subproc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *effective_cmd,
                 stdin=in_f,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                start_new_session=True,
+                cwd=abs_cwd,
+                **popen_kwargs,
             )
 
         pid = subproc.pid
@@ -81,21 +159,33 @@ class DynamicExecutionMonitor:
 
         async def _sample_resources() -> None:
             nonlocal peak_memory_mb, accumulated_cpu_ms
+            known_children: dict[int, psutil.Process] = {}
+            cpu_by_pid: dict[int, float] = {}
+            last_child_scan = wall_start
             while subproc.returncode is None:
                 if ps_proc:
+                    now = time.perf_counter()
+                    do_refresh = (now - wall_start) >= 0.025 and (
+                        last_child_scan == wall_start or (now - last_child_scan) >= 0.04
+                    )
+                    if do_refresh:
+                        last_child_scan = now
                     try:
-                        with ps_proc.oneshot():
-                            mem = cls.get_memory_mb(ps_proc)
-                            if mem > peak_memory_mb:
-                                peak_memory_mb = mem
-                            cpu = cls.get_cpu_times_ms(ps_proc)
-                            if cpu > accumulated_cpu_ms:
-                                accumulated_cpu_ms = cpu
-                            if peak_memory_mb > memory_limit_mb:
-                                break
+                        mem, cpu = cls._sample_tree_stats(
+                            ps_proc,
+                            known_children,
+                            cpu_by_pid,
+                            refresh_children=do_refresh,
+                        )
+                        if mem > peak_memory_mb:
+                            peak_memory_mb = mem
+                        if cpu > accumulated_cpu_ms:
+                            accumulated_cpu_ms = cpu
+                        if peak_memory_mb > memory_limit_mb:
+                            break
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         break
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0.002)
 
         sampler_task = asyncio.create_task(_sample_resources())
 
@@ -159,11 +249,16 @@ class DynamicExecutionMonitor:
                 status = "runtime_error"
 
         calc_wall_ms = max(0.1, wall_elapsed_ms - baseline_overhead_ms)
-        final_cpu_ms = (
-            accumulated_cpu_ms
-            if (accumulated_cpu_ms and accumulated_cpu_ms > 0.5)
-            else round(calc_wall_ms, 2)
-        ) if status == "ok" else None
+        if status == "ok":
+            # Windows 上 psutil.cpu_times() 为 15.625ms 调度滴答粒度，
+            # 64ms 以下（不足 4 个 tick）改用高精度 QPC wall time 扣减启动底噪。
+            use_qpc_wall = (
+                (sys.platform == "win32" and accumulated_cpu_ms < 64.0)
+                or accumulated_cpu_ms <= 0.5
+            )
+            final_cpu_ms = round(calc_wall_ms, 2) if use_qpc_wall else round(accumulated_cpu_ms, 2)
+        else:
+            final_cpu_ms = None
 
         return {
             "status": status,
@@ -191,26 +286,17 @@ class DynamicExecutionMonitor:
         abs_cwd = os.path.abspath(cwd) if cwd is not None else None
         abs_in = os.path.abspath(input_file_path) if input_file_path else ""
 
-        def _abs_cmd(cmd: list[str]) -> list[str]:
-            if not cmd:
-                return []
-            resolved = list(cmd)
-            if os.path.exists(resolved[0]):
-                resolved[0] = os.path.abspath(resolved[0])
-            elif abs_cwd and os.path.exists(os.path.join(abs_cwd, resolved[0])):
-                resolved[0] = os.path.abspath(os.path.join(abs_cwd, resolved[0]))
-            return resolved
-
         popen_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True
 
+        wall_start = time.perf_counter()
         with tempfile.TemporaryDirectory(dir=abs_cwd) as raw_tmp_dir:
             tmp_dir = os.path.abspath(raw_tmp_dir)
             # testlib registerInteraction 约定 argv = [exe, input_file, output_file, answer_file]；
             # 若调用方未把 input_file_path 显式附加到命令里，则自动补全参数（无参交互器会安全忽略额外 argv）。
-            effective_int_cmd = _abs_cmd(interactor_cmd)
-            effective_sol_cmd = _abs_cmd(solution_cmd)
+            effective_int_cmd = cls._abs_cmd(interactor_cmd, abs_cwd)
+            effective_sol_cmd = cls._abs_cmd(solution_cmd, abs_cwd)
             if abs_in and abs_in not in effective_int_cmd and input_file_path not in effective_int_cmd:
                 out_file = os.path.join(tmp_dir, "output.txt")
                 ans_file = os.path.join(tmp_dir, "answer.ans")
@@ -257,22 +343,34 @@ class DynamicExecutionMonitor:
 
             async def _sample_sol() -> None:
                 nonlocal peak_memory_mb, accumulated_cpu_ms
+                known_children: dict[int, psutil.Process] = {}
+                cpu_by_pid: dict[int, float] = {}
+                last_child_scan = wall_start
                 while solution_proc.returncode is None:
                     if sol_ps:
+                        now = time.perf_counter()
+                        do_refresh = (now - wall_start) >= 0.025 and (
+                            last_child_scan == wall_start or (now - last_child_scan) >= 0.04
+                        )
+                        if do_refresh:
+                            last_child_scan = now
                         try:
-                            with sol_ps.oneshot():
-                                mem = cls.get_memory_mb(sol_ps)
-                                if mem > peak_memory_mb:
-                                    peak_memory_mb = mem
-                                cpu = cls.get_cpu_times_ms(sol_ps)
-                                if cpu > accumulated_cpu_ms:
-                                    accumulated_cpu_ms = cpu
-                                if peak_memory_mb > memory_limit_mb:
-                                    mle_event.set()
-                                    break
+                            mem, cpu = cls._sample_tree_stats(
+                                sol_ps,
+                                known_children,
+                                cpu_by_pid,
+                                refresh_children=do_refresh,
+                            )
+                            if mem > peak_memory_mb:
+                                peak_memory_mb = mem
+                            if cpu > accumulated_cpu_ms:
+                                accumulated_cpu_ms = cpu
+                            if peak_memory_mb > memory_limit_mb:
+                                mle_event.set()
+                                break
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             break
-                    await asyncio.sleep(0.005)
+                    await asyncio.sleep(0.002)
 
             sampler_task = asyncio.create_task(_sample_sol())
 
@@ -383,10 +481,22 @@ class DynamicExecutionMonitor:
                 elif interactor_proc.returncode != 0:
                     status = "interactor_error"
 
+            wall_ms = (time.perf_counter() - wall_start) * 1000.0
+            final_cpu_ms: float | None = None
+            if status == "ok":
+                use_qpc_wall = (
+                    (sys.platform == "win32" and accumulated_cpu_ms < 64.0)
+                    or accumulated_cpu_ms <= 0.5
+                )
+                final_cpu_ms = (
+                    round(max(0.1, wall_ms), 2) if use_qpc_wall else round(accumulated_cpu_ms, 2)
+                )
+
             return {
                 "status": status,
                 "solution_returncode": solution_proc.returncode,
                 "interactor_returncode": interactor_proc.returncode,
-                "cpu_time_ms": max(accumulated_cpu_ms, 0.1) if status == "ok" else None,
+                "cpu_time_ms": final_cpu_ms,
+                "wall_time_ms": round(wall_ms, 2),
                 "memory_mb": round(peak_memory_mb, 2),
             }

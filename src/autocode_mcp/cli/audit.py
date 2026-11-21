@@ -3,11 +3,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 
 from ..tools.audit import ProblemAuditTool
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+
+
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Run a full AutoCode problem audit.")
     parser.add_argument("problem_dir", help="Problem directory")
     parser.add_argument("--mode", choices=["quick", "full"], default="full")
