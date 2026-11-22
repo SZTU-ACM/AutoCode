@@ -322,6 +322,19 @@ def _is_effectively_empty_file(path: str) -> bool:
         return False
 
 
+def _is_interactive_dummy_answer(path: str) -> bool:
+    """Return True if an interactive answer file is empty or only a legacy 'OK' placeholder."""
+    if _is_effectively_empty_file(path):
+        return True
+    try:
+        if os.path.getsize(path) > 16:
+            return False
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().strip().upper() == "OK"
+    except OSError:
+        return False
+
+
 def _stage_data_file(src: str, dst: str, data_mode: ExportDataMode) -> str:
     """Stage a test data file via hardlink (with copy fallback) or copy."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -542,8 +555,8 @@ def export_hydro(
         testdata_dir = os.path.join(out_dir, "testdata")
         os.makedirs(testdata_dir, exist_ok=True)
 
-        # 1. problem.yaml
-        tags: list[str] = ["autocode"]
+        # 1. problem.yaml (never inject internal tool tags like "autocode")
+        tags: list[str] = []
         if is_interactive:
             tags.append("interactive")
         elif is_communication:
@@ -583,7 +596,7 @@ def export_hydro(
             stage_mode_used.add(
                 _stage_data_file(src_in, os.path.join(testdata_dir, in_file), effective_stage_arg)
             )
-            if is_interactive and (src_ans is None or _is_effectively_empty_file(src_ans)):
+            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
                 if ans_file is not None:
                     omitted_empty_answers.append(ans_file)
                 case_pairs.append((in_file, None))
@@ -876,7 +889,7 @@ def export_qoj(
             stage_mode_used.add(
                 _stage_data_file(src_in, os.path.join(data_dir, f"{new_idx}.in"), effective_stage_arg)
             )
-            if is_interactive and (src_ans is None or _is_effectively_empty_file(src_ans)):
+            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
                 if orig_ans_name is not None:
                     omitted_empty_answers.append(orig_ans_name)
             elif src_ans is not None:
@@ -1049,3 +1062,363 @@ def export_qoj(
             temp_ctx.cleanup()
         if stage_dir is not None and os.path.exists(stage_dir):
             shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+_MAX_VERIFY_MEMBER_BYTES = 2 * 1024 * 1024
+_MAX_VERIFY_XML_BYTES = 5 * 1024 * 1024
+_MAX_QOJ_VERIFY_TESTS = 10_000
+
+
+def _read_export_text(container: str, rel_posix: str) -> str | None:
+    """Read a UTF-8 text member from either an extracted export dir or a .zip archive safely."""
+    if os.path.isfile(container) and container.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(container, "r") as zf:
+                try:
+                    info = zf.getinfo(rel_posix)
+                except KeyError:
+                    return None
+                if info.file_size > _MAX_VERIFY_MEMBER_BYTES:
+                    return None
+                return zf.read(info).decode("utf-8", errors="replace")
+        except (OSError, zipfile.BadZipFile):
+            return None
+    resolved = safe_resolve_under_root(container, rel_posix)
+    if resolved is None or not os.path.isfile(resolved):
+        return None
+    try:
+        if os.path.getsize(resolved) > _MAX_VERIFY_MEMBER_BYTES:
+            return None
+        return Path(resolved).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _export_has_member(
+    container: str,
+    rel_posix: str,
+    *,
+    zip_names: set[str] | None = None,
+) -> bool:
+    """Check whether ``rel_posix`` exists strictly inside an export dir or .zip archive."""
+    if os.path.isfile(container) and container.endswith(".zip"):
+        if zip_names is not None:
+            return rel_posix in zip_names
+        try:
+            with zipfile.ZipFile(container, "r") as zf:
+                return rel_posix in zf.namelist()
+        except (OSError, zipfile.BadZipFile):
+            return False
+    resolved = safe_resolve_under_root(container, rel_posix)
+    return resolved is not None and os.path.isfile(resolved)
+
+
+def _load_zip_member_set(container: str) -> set[str] | None:
+    if not (os.path.isfile(container) and container.endswith(".zip")):
+        return None
+    try:
+        with zipfile.ZipFile(container, "r") as zf:
+            return set(zf.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def _resolve_contained_container(problem_dir: str, candidate: str | None) -> str | None:
+    if not candidate:
+        return None
+    try:
+        real_root = Path(problem_dir).resolve()
+        cand_path = Path(candidate)
+        if not cand_path.is_absolute():
+            cand_path = real_root / cand_path
+        real_cand = cand_path.resolve()
+        real_cand.relative_to(real_root)
+    except (OSError, ValueError):
+        return None
+    return str(real_cand) if real_cand.exists() else None
+
+
+def _parse_hydro_time_ms(raw: Any) -> int | None:
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().lower()
+    if len(s) > 32:
+        return None
+    if s.endswith("ms"):
+        try:
+            val = float(s[:-2])
+            return int(round(val)) if math.isfinite(val) else None
+        except (ValueError, OverflowError):
+            return None
+    if s.endswith("s"):
+        try:
+            val = float(s[:-1]) * 1000.0
+            return int(round(val)) if math.isfinite(val) else None
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def _parse_hydro_mem_mb(raw: Any) -> int | None:
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().lower()
+    if len(s) > 32:
+        return None
+    for suf, mult in (("mb", 1.0), ("m", 1.0), ("gb", 1024.0), ("g", 1024.0)):
+        if s.endswith(suf):
+            try:
+                val = float(s[: -len(suf)]) * mult
+                return int(round(val)) if math.isfinite(val) else None
+            except (ValueError, OverflowError):
+                return None
+    return None
+
+
+def verify_exported_packages(
+    problem_dir: str,
+    *,
+    formats: list[str] | None = None,
+    expected_time_limit_ms: int,
+    expected_memory_limit_mb: int,
+    expected_test_count: int | None = None,
+    exports_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read back exported Polygon/Hydro/QOJ artifacts and verify TL, ML, test counts, files, and cleanliness."""
+    import xml.etree.ElementTree as ET
+
+    if formats is None:
+        detected: list[str] = []
+        if os.path.isfile(os.path.join(problem_dir, "problem.xml")):
+            detected.append("polygon")
+        if os.path.isdir(os.path.join(problem_dir, "exports", "hydro")) or os.path.isfile(
+            os.path.join(problem_dir, "exports", "hydro.zip")
+        ):
+            detected.append("hydro")
+        if os.path.isdir(os.path.join(problem_dir, "exports", "qoj")) or os.path.isfile(
+            os.path.join(problem_dir, "exports", "qoj.zip")
+        ):
+            detected.append("qoj")
+        formats = detected
+
+    checks: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if "polygon" in formats:
+        xml_path = safe_resolve_under_root(problem_dir, "problem.xml")
+        p_errors: list[str] = []
+        p_meta: dict[str, Any] = {"present": xml_path is not None and os.path.isfile(xml_path)}
+        if xml_path is None or not os.path.isfile(xml_path):
+            p_errors.append("problem.xml missing or escapes problem_dir")
+        else:
+            try:
+                if os.path.getsize(xml_path) > _MAX_VERIFY_XML_BYTES:
+                    p_errors.append("problem.xml exceeds 5MB safety size limit")
+                else:
+                    xml_raw = Path(xml_path).read_text(encoding="utf-8", errors="replace")
+                    if "<!DOCTYPE" in xml_raw.upper() or "<!ENTITY" in xml_raw.upper():
+                        p_errors.append("problem.xml contains disallowed DOCTYPE/ENTITY declarations")
+                    else:
+                        root = ET.fromstring(xml_raw)
+                        tl_node = root.find(".//judging/testset/time-limit")
+                        ml_node = root.find(".//judging/testset/memory-limit")
+                        tc_node = root.find(".//judging/testset/test-count")
+                        tl_val = int(tl_node.text.strip()) if (tl_node is not None and tl_node.text) else None
+                        ml_bytes = int(ml_node.text.strip()) if (ml_node is not None and ml_node.text) else None
+                        tc_val = int(tc_node.text.strip()) if (tc_node is not None and tc_node.text) else None
+                        p_meta.update(
+                            {
+                                "time_limit_ms": tl_val,
+                                "memory_limit_mb": (ml_bytes // (1024 * 1024)) if ml_bytes is not None else None,
+                                "test_count": tc_val,
+                            }
+                        )
+                        if tl_val != expected_time_limit_ms:
+                            p_errors.append(
+                                f"problem.xml time-limit={tl_val}ms != expected {expected_time_limit_ms}ms"
+                            )
+                        if ml_bytes != expected_memory_limit_mb * 1024 * 1024:
+                            p_errors.append(
+                                f"problem.xml memory-limit={ml_bytes} != expected {expected_memory_limit_mb * 1024 * 1024}"
+                            )
+                        if expected_test_count is not None and tc_val != expected_test_count:
+                            p_errors.append(
+                                f"problem.xml test-count={tc_val} != expected {expected_test_count}"
+                            )
+            except (ET.ParseError, OSError, ValueError) as exc:
+                p_errors.append(f"failed to parse problem.xml: {exc}")
+        checks["polygon"] = {"passed": not p_errors, "errors": p_errors, **p_meta}
+        errors.extend(p_errors)
+
+    if "hydro" in formats:
+        h_raw_container = None
+        if isinstance(exports_meta, dict) and isinstance(exports_meta.get("hydro"), dict):
+            h_raw_container = exports_meta["hydro"].get("archive_path") or exports_meta["hydro"].get("output_dir")
+        if not h_raw_container:
+            cand_zip = os.path.join(problem_dir, "exports", "hydro.zip")
+            cand_dir = os.path.join(problem_dir, "exports", "hydro")
+            h_raw_container = cand_zip if os.path.isfile(cand_zip) else (cand_dir if os.path.isdir(cand_dir) else None)
+        h_container = _resolve_contained_container(problem_dir, h_raw_container)
+        h_errors: list[str] = []
+        h_meta: dict[str, Any] = {"present": h_container is not None}
+        if h_container is None:
+            h_errors.append("hydro export artifact missing or escapes problem_dir")
+        else:
+            h_zip_names = _load_zip_member_set(h_container)
+            pyaml_text = _read_export_text(h_container, "problem.yaml")
+            if pyaml_text is None:
+                h_errors.append("hydro export missing problem.yaml")
+            else:
+                try:
+                    pyaml = yaml.safe_load(pyaml_text) or {}
+                except yaml.YAMLError as exc:
+                    h_errors.append(f"hydro problem.yaml invalid YAML: {exc}")
+                    pyaml = {}
+                raw_tags = pyaml.get("tag") if isinstance(pyaml, dict) else []
+                if isinstance(raw_tags, list) and any(
+                    isinstance(t, str) and t.strip().lower() in {"autocode", "mcp__autocode"}
+                    for t in raw_tags
+                ):
+                    h_errors.append("hydro problem.yaml leaked internal 'autocode' tag")
+            cfg_text = _read_export_text(h_container, "testdata/config.yaml")
+            if cfg_text is None:
+                h_errors.append("hydro export missing testdata/config.yaml")
+            else:
+                try:
+                    cfg = yaml.safe_load(cfg_text) or {}
+                except yaml.YAMLError as exc:
+                    h_errors.append(f"hydro testdata/config.yaml invalid YAML: {exc}")
+                    cfg = {}
+                tl_val = _parse_hydro_time_ms(cfg.get("time")) if isinstance(cfg, dict) else None
+                ml_val = _parse_hydro_mem_mb(cfg.get("memory")) if isinstance(cfg, dict) else None
+                h_meta.update({"time_limit_ms": tl_val, "memory_limit_mb": ml_val})
+                if tl_val != expected_time_limit_ms:
+                    h_errors.append(
+                        f"hydro config.yaml time={cfg.get('time')!r} != expected {expected_time_limit_ms}ms"
+                    )
+                if ml_val != expected_memory_limit_mb:
+                    h_errors.append(
+                        f"hydro config.yaml memory={cfg.get('memory')!r} != expected {expected_memory_limit_mb}m"
+                    )
+                if isinstance(cfg, dict) and isinstance(cfg.get("subtasks"), list):
+                    referenced_inputs: set[str] = set()
+                    for st in cfg["subtasks"]:
+                        if not isinstance(st, dict):
+                            continue
+                        for case in st.get("cases", []) or []:
+                            if not isinstance(case, dict):
+                                continue
+                            for field_key in ("input", "output"):
+                                fname = case.get(field_key)
+                                if isinstance(fname, str) and fname:
+                                    if field_key == "input":
+                                        referenced_inputs.add(fname)
+                                    if not _export_has_member(
+                                        h_container,
+                                        f"testdata/{fname}",
+                                        zip_names=h_zip_names,
+                                    ):
+                                        h_errors.append(f"hydro export missing testdata/{fname}")
+                    h_meta["referenced_input_count"] = len(referenced_inputs)
+                    if expected_test_count is not None and expected_test_count > 0:
+                        if len(referenced_inputs) == 0:
+                            h_errors.append(
+                                f"hydro export references 0 inputs (expected {expected_test_count})"
+                            )
+                        elif len(referenced_inputs) > expected_test_count:
+                            h_errors.append(
+                                f"hydro export references {len(referenced_inputs)} inputs > expected {expected_test_count}"
+                            )
+                        elif len(cfg["subtasks"]) == 1 and len(referenced_inputs) < expected_test_count:
+                            h_errors.append(
+                                f"hydro export references {len(referenced_inputs)} inputs < expected {expected_test_count}"
+                            )
+        checks["hydro"] = {"passed": not h_errors, "errors": h_errors, **h_meta}
+        errors.extend(h_errors)
+
+    if "qoj" in formats:
+        q_raw_container = None
+        if isinstance(exports_meta, dict) and isinstance(exports_meta.get("qoj"), dict):
+            q_raw_container = exports_meta["qoj"].get("archive_path") or exports_meta["qoj"].get("output_dir")
+        if not q_raw_container:
+            cand_zip = os.path.join(problem_dir, "exports", "qoj.zip")
+            cand_dir = os.path.join(problem_dir, "exports", "qoj")
+            q_raw_container = cand_zip if os.path.isfile(cand_zip) else (cand_dir if os.path.isdir(cand_dir) else None)
+        q_container = _resolve_contained_container(problem_dir, q_raw_container)
+        q_errors: list[str] = []
+        q_meta: dict[str, Any] = {"present": q_container is not None}
+        if q_container is None:
+            q_errors.append("qoj export artifact missing or escapes problem_dir")
+        else:
+            q_zip_names = _load_zip_member_set(q_container)
+            conf_text = _read_export_text(q_container, "problem.conf")
+            if conf_text is None:
+                q_errors.append("qoj export missing problem.conf")
+            else:
+                parsed: dict[str, str] = {}
+                for line in conf_text.splitlines():
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) == 2:
+                        parsed[parts[0]] = parts[1].strip()
+                def _safe_qoj_int(key: str) -> int | None:
+                    val_s = parsed.get(key, "")
+                    return int(val_s) if val_s.isdigit() and len(val_s) <= 18 else None
+
+                tl_ms_val = _safe_qoj_int("time_limit_ms")
+                ml_val = _safe_qoj_int("memory_limit")
+                n_tests_val = _safe_qoj_int("n_tests")
+                is_qoj_interactive = parsed.get("interaction_mode", "").lower() == "on"
+                output_suf = parsed.get("output_suf", "ans").lstrip(".") or "ans"
+                q_meta.update(
+                    {
+                        "time_limit_ms": tl_ms_val,
+                        "memory_limit_mb": ml_val,
+                        "n_tests": n_tests_val,
+                    }
+                )
+                if tl_ms_val != expected_time_limit_ms:
+                    q_errors.append(
+                        f"qoj problem.conf time_limit_ms={tl_ms_val} != expected {expected_time_limit_ms}"
+                    )
+                if ml_val != expected_memory_limit_mb:
+                    q_errors.append(
+                        f"qoj problem.conf memory_limit={ml_val} != expected {expected_memory_limit_mb}"
+                    )
+                if expected_test_count is not None and expected_test_count > 0:
+                    if n_tests_val is None or n_tests_val == 0:
+                        q_errors.append(
+                            f"qoj problem.conf n_tests={n_tests_val} (expected >= {expected_test_count})"
+                        )
+                    elif n_tests_val < expected_test_count:
+                        q_errors.append(
+                            f"qoj problem.conf n_tests={n_tests_val} < expected {expected_test_count}"
+                        )
+                if n_tests_val is not None:
+                    if n_tests_val > _MAX_QOJ_VERIFY_TESTS:
+                        q_errors.append(
+                            f"qoj problem.conf n_tests={n_tests_val} exceeds safety cap {_MAX_QOJ_VERIFY_TESTS}"
+                        )
+                    else:
+                        for idx in range(1, n_tests_val + 1):
+                            if not _export_has_member(
+                                q_container, f"data/{idx}.in", zip_names=q_zip_names
+                            ):
+                                q_errors.append(f"qoj export missing data/{idx}.in")
+                                break
+                            if not is_qoj_interactive and not _export_has_member(
+                                q_container,
+                                f"data/{idx}.{output_suf}",
+                                zip_names=q_zip_names,
+                            ):
+                                q_errors.append(f"qoj export missing data/{idx}.{output_suf}")
+                                break
+        checks["qoj"] = {"passed": not q_errors, "errors": q_errors, **q_meta}
+        errors.extend(q_errors)
+
+    return {
+        "passed": not errors,
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings,
+    }

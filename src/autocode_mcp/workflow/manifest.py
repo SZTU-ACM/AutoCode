@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..runtime_store import RUNTIME_DIR_NAME
 from .models import (
+    AuditGates,
     AutoCodeManifest,
     CasePlanItem,
     OracleMode,
@@ -84,6 +85,15 @@ def default_manifest(
     quality_gates = QualityGates(
         require_validator_check=resolved_type not in ("interactive", "communication"),
     )
+    comm_mode_eff = (protocol_mode or "run_twice") if resolved_type == "communication" else None
+    audit_gates = AuditGates(
+        require_validator_self_test=False,
+        require_checker_self_test=(resolved_type == "spj"),
+        require_interactor_self_test=(
+            resolved_type == "interactive"
+            or (resolved_type == "communication" and comm_mode_eff != "grader_linked")
+        ),
+    )
 
     return AutoCodeManifest(
         problem_name=problem_name,
@@ -94,6 +104,7 @@ def default_manifest(
         special_judge=(resolved_type == "spj"),
         stress_comparison="checker" if resolved_type == "spj" else "exact",
         quality_gates=quality_gates,
+        audit_gates=audit_gates,
         solutions=solutions,
         case_plan=[
             CasePlanItem(

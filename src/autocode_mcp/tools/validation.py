@@ -4,10 +4,12 @@ Problem 验证工具组 - 验证题面样例和样例文件。
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -22,6 +24,7 @@ from ..utils.communication_runner import (
 )
 from ..utils.compiler import run_binary
 from ..utils.judge_runner import InteractiveRunner
+from ..utils.logs import safe_spill_json
 from ..utils.platform import get_exe_extension
 from ..workflow import (
     AutoCodeManifest,
@@ -32,6 +35,84 @@ from ..workflow import (
 )
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import ProblemValidateInput
+
+_PREVIEW_CHAR_LIMIT = 2048
+
+
+def _truncate_preview(text: str | None, limit: int = _PREVIEW_CHAR_LIMIT) -> tuple[str | None, bool, int]:
+    """Truncate large text fields for MCP tool responses while reporting full char count."""
+    if text is None:
+        return None, False, 0
+    total_len = len(text)
+    if total_len <= limit:
+        return text, False, total_len
+    return f"{text[:limit]}... [truncated {total_len - limit} chars]", True, total_len
+
+
+def _first_diff_snippet(expected: str, actual: str, context: int = 160) -> dict[str, Any] | None:
+    """Return a concise snippet around the first differing line between expected and actual."""
+    exp_lines = expected.replace("\r\n", "\n").split("\n")
+    act_lines = actual.replace("\r\n", "\n").split("\n")
+    for idx in range(max(len(exp_lines), len(act_lines))):
+        e = exp_lines[idx] if idx < len(exp_lines) else "<EOF>"
+        a = act_lines[idx] if idx < len(act_lines) else "<EOF>"
+        if e.rstrip() != a.rstrip():
+            return {
+                "line": idx + 1,
+                "expected": e[:context] + ("..." if len(e) > context else ""),
+                "actual": a[:context] + ("..." if len(a) > context else ""),
+            }
+    return None
+
+
+def _spill_validation_details(
+    problem_dir: str | None,
+    kind: str,
+    full_details: list[dict[str, Any]],
+) -> str | None:
+    """Persist untruncated validation details safely to .autocode/logs/ (or temp dir fallback)."""
+    return safe_spill_json(problem_dir, f"validate_{kind}", full_details)
+
+
+def _load_interactor_scenarios_fallback(problem_dir: str) -> list[tuple[str, str, str]]:
+    """Load positive test scenarios from .autocode/interactor_scenarios.json (or files/ fallback)."""
+    cases: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for rel in (
+        os.path.join(".autocode", "interactor_scenarios.json"),
+        os.path.join("files", "interactor_scenarios.json"),
+    ):
+        raw_cand = Path(problem_dir) / rel
+        if raw_cand.is_symlink():
+            continue
+        resolved = safe_resolve_under_root(problem_dir, rel)
+        if resolved is None or not os.path.isfile(resolved):
+            continue
+        try:
+            raw = json.loads(Path(resolved).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        items = raw.get("scenarios", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+        for idx, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                continue
+            if item.get("expect_pass") is False or item.get("should_pass") is False:
+                continue
+            expected_verdict = item.get("expected_verdict")
+            if expected_verdict is not None and str(expected_verdict).strip().upper() != "AC":
+                continue
+            inp = item.get("input")
+            if isinstance(inp, str):
+                label = str(item.get("name") or f"scenario#{idx}")
+                ans = str(item.get("answer") or item.get("expected_output") or "")
+                key = (inp, ans)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cases.append((label, inp, ans))
+        if cases:
+            break
+    return cases[:5]
 
 
 class ProblemValidateTool(Tool):
@@ -321,6 +402,8 @@ class ProblemValidateTool(Tool):
                         live_cases.append((in_file, inp, ans))
                     except OSError:
                         continue
+            if not live_cases:
+                live_cases = _load_interactor_scenarios_fallback(problem_dir)
 
         live_interaction: dict[str, object]
         live_passed_all = True
@@ -352,6 +435,8 @@ class ProblemValidateTool(Tool):
                     live_pass_count += 1
                 else:
                     live_fail_count += 1
+                detail_preview, _, _ = _truncate_preview(jres.detail)
+                transcript_preview, _, _ = _truncate_preview(jres.transcript, limit=2000)
                 live_details.append(
                     {
                         "case": label,
@@ -360,8 +445,8 @@ class ProblemValidateTool(Tool):
                         "cpu_time_ms": jres.cpu_time_ms,
                         "memory_mb": jres.memory_mb,
                         "metrics": jres.metrics,
-                        "detail": jres.detail,
-                        "transcript": jres.transcript[:2000],
+                        "detail": detail_preview or "",
+                        "transcript": transcript_preview or "",
                     }
                 )
             live_passed_all = live_fail_count == 0
@@ -387,25 +472,47 @@ class ProblemValidateTool(Tool):
             if not os.path.isfile(sol_exe):
                 skip_reasons.append(f"solutions/sol{exe_ext} not compiled")
             if not live_cases:
-                skip_reasons.append("no interactive input cases provided or present in tests/")
+                skip_reasons.append(
+                    "no interactive input cases provided, present in tests/, or in .autocode/interactor_scenarios.json"
+                )
+            has_sources = os.path.isfile(os.path.join(problem_dir, "files", "interactor.cpp")) and os.path.isfile(
+                os.path.join(problem_dir, "solutions", "sol.cpp")
+            )
             live_interaction = {
                 "validated": False,
                 "skipped": True,
                 "message": "; ".join(skip_reasons),
             }
-            sample_files_result = {
-                "validated": True,
-                "passed": 1,
-                "failed": 0,
-                "total": 1,
-                "details": [
-                    {
-                        "interactive": True,
-                        "message": "transcript samples are validated as protocol text, not static stdin/stdout",
-                    }
-                ],
-                "mode": "interactive_protocol",
-            }
+            if has_sources and (not os.path.isfile(interactor_exe) or not os.path.isfile(sol_exe)):
+                live_interaction["warning"] = (
+                    "interactor.cpp and sol.cpp exist on disk but compiled binaries are missing; "
+                    "run solution_build and interactor_build to execute live bidirectional validation"
+                )
+            missing_bins = not os.path.isfile(interactor_exe) or not os.path.isfile(sol_exe)
+            if (statement_samples or (live_cases and has_sources)) and missing_bins:
+                live_passed_all = False
+                sample_files_result = {
+                    "validated": False,
+                    "passed": 0,
+                    "failed": len(live_cases),
+                    "total": len(live_cases),
+                    "message": "; ".join(skip_reasons),
+                    "mode": "interactive_live",
+                }
+            else:
+                sample_files_result = {
+                    "validated": True,
+                    "passed": 1,
+                    "failed": 0,
+                    "total": 1,
+                    "details": [
+                        {
+                            "interactive": True,
+                            "message": "transcript samples are validated as protocol text, not static stdin/stdout",
+                        }
+                    ],
+                    "mode": "interactive_protocol",
+                }
 
         results = {
             "statement_samples": statement_result,
@@ -582,6 +689,8 @@ class ProblemValidateTool(Tool):
                     live_pass_count += 1
                 else:
                     live_fail_count += 1
+                detail_preview, _, _ = _truncate_preview(jres.detail)
+                transcript_preview, _, _ = _truncate_preview(jres.transcript, limit=2000)
                 live_details.append(
                     {
                         "case": label,
@@ -590,8 +699,8 @@ class ProblemValidateTool(Tool):
                         "cpu_time_ms": jres.cpu_time_ms,
                         "memory_mb": jres.memory_mb,
                         "metrics": jres.metrics,
-                        "detail": jres.detail,
-                        "transcript": jres.transcript[:2000],
+                        "detail": detail_preview or "",
+                        "transcript": transcript_preview or "",
                     }
                 )
             live_passed_all = live_fail_count == 0
@@ -666,6 +775,8 @@ class ProblemValidateTool(Tool):
     ) -> dict:
         """验证题面样例。SPJ 且提供 checker 时用 checker(input, sol_out, expected)。"""
         details = []
+        full_details = []
+        any_truncated = False
         passed = 0
         failed = 0
 
@@ -676,14 +787,30 @@ class ProblemValidateTool(Tool):
             # 运行 sol
             result = await run_binary(sol_exe, input_data, timeout=timeout)
             if not result.success:
-                details.append({
+                in_p, in_tr, _ = _truncate_preview(input_data)
+                ex_p, ex_tr, _ = _truncate_preview(expected)
+                err_p, err_tr, _ = _truncate_preview(result.error or "Execution failed")
+                row_full = {
                     "index": i,
                     "input": input_data,
                     "expected": expected,
                     "actual": None,
                     "passed": False,
                     "error": result.error or "Execution failed",
-                })
+                }
+                row: dict[str, Any] = {
+                    "index": i,
+                    "input": in_p,
+                    "expected": ex_p,
+                    "actual": None,
+                    "passed": False,
+                    "error": err_p,
+                }
+                if in_tr or ex_tr or err_tr:
+                    any_truncated = True
+                    row["truncated"] = True
+                details.append(row)
+                full_details.append(row_full)
                 failed += 1
                 continue
 
@@ -708,25 +835,52 @@ class ProblemValidateTool(Tool):
             else:
                 is_passed = self._compare_output(actual, expected_stripped, tolerance)
 
-            details.append({
+            in_p, in_tr, in_len = _truncate_preview(input_data)
+            ex_p, ex_tr, ex_len = _truncate_preview(expected_stripped)
+            ac_p, ac_tr, ac_len = _truncate_preview(actual)
+            row_full = {
                 "index": i,
                 "input": input_data,
                 "expected": expected_stripped,
                 "actual": actual,
                 "passed": is_passed,
-            })
+            }
+            row = {
+                "index": i,
+                "input": in_p,
+                "expected": ex_p,
+                "actual": ac_p,
+                "passed": is_passed,
+            }
+            if in_tr or ex_tr or ac_tr:
+                any_truncated = True
+                row["truncated"] = True
+                row["input_chars"] = in_len
+                row["expected_chars"] = ex_len
+                row["actual_chars"] = ac_len
+            if not is_passed:
+                diff = _first_diff_snippet(expected_stripped, actual)
+                if diff:
+                    row["diff_snippet"] = diff
+            details.append(row)
+            full_details.append(row_full)
             if is_passed:
                 passed += 1
             else:
                 failed += 1
 
-        out: dict = {
+        out: dict[str, Any] = {
             "validated": True,
             "passed": passed,
             "failed": failed,
             "total": len(samples),
             "details": details,
         }
+        if any_truncated:
+            out["truncated"] = True
+            log_path = _spill_validation_details(problem_dir, "statement_samples", full_details)
+            if log_path:
+                out["details_log_path"] = log_path
         if checker_exe:
             out["mode"] = "checker"
         return out
@@ -755,6 +909,8 @@ class ProblemValidateTool(Tool):
             }
 
         details = []
+        full_details = []
+        any_truncated = False
         passed = 0
         failed = 0
 
@@ -777,12 +933,24 @@ class ProblemValidateTool(Tool):
             # 运行 sol
             result = await run_binary(sol_exe, input_data, timeout=timeout)
             if not result.success:
-                details.append({
+                err_p, err_tr, _ = _truncate_preview(result.error or "Execution failed")
+                row_full = {
                     "file": in_file,
                     "expected_file": ans_file if os.path.exists(ans_path) else None,
                     "passed": False,
                     "error": result.error or "Execution failed",
-                })
+                }
+                row: dict[str, Any] = {
+                    "file": in_file,
+                    "expected_file": ans_file if os.path.exists(ans_path) else None,
+                    "passed": False,
+                    "error": err_p,
+                }
+                if err_tr:
+                    any_truncated = True
+                    row["truncated"] = True
+                details.append(row)
+                full_details.append(row_full)
                 failed += 1
                 continue
 
@@ -790,13 +958,27 @@ class ProblemValidateTool(Tool):
 
             # 检查 .ans / .out 文件是否存在
             if not os.path.exists(ans_path):
-                details.append({
+                ac_p, ac_tr, ac_len = _truncate_preview(actual)
+                row_full = {
                     "file": in_file,
                     "expected_file": None,
                     "actual": actual,
                     "passed": False,
                     "error": f"Missing .ans file: {ans_file}",
-                })
+                }
+                row = {
+                    "file": in_file,
+                    "expected_file": None,
+                    "actual": ac_p,
+                    "passed": False,
+                    "error": f"Missing .ans file: {ans_file}",
+                }
+                if ac_tr:
+                    any_truncated = True
+                    row["truncated"] = True
+                    row["actual_chars"] = ac_len
+                details.append(row)
+                full_details.append(row_full)
                 failed += 1
                 continue
 
@@ -815,25 +997,52 @@ class ProblemValidateTool(Tool):
                     is_passed = verdict == "AC"
             else:
                 is_passed = self._compare_output(actual, expected, tolerance)
-            details.append({
+
+            ac_p, ac_tr, ac_len = _truncate_preview(actual)
+            ex_p, ex_tr, ex_len = _truncate_preview(expected)
+            row_full = {
                 "file": in_file,
                 "expected_file": ans_file,
                 "actual": actual,
                 "expected": expected,
                 "passed": is_passed,
-            })
+            }
+            row = {
+                "file": in_file,
+                "expected_file": ans_file,
+                "actual": ac_p,
+                "expected": ex_p,
+                "passed": is_passed,
+            }
+            if ac_tr or ex_tr:
+                any_truncated = True
+                row["truncated"] = True
+                row["actual_chars"] = ac_len
+                row["expected_chars"] = ex_len
+            if not is_passed:
+                diff = _first_diff_snippet(expected, actual)
+                if diff:
+                    row["diff_snippet"] = diff
+            details.append(row)
+            full_details.append(row_full)
             if is_passed:
                 passed += 1
             else:
                 failed += 1
 
-        return {
+        out: dict[str, Any] = {
             "validated": True,
             "passed": passed,
             "failed": failed,
             "total": len(in_files),
             "details": details,
         }
+        if any_truncated:
+            out["truncated"] = True
+            log_path = _spill_validation_details(problem_dir, "sample_files", full_details)
+            if log_path:
+                out["details_log_path"] = log_path
+        return out
 
     def _compare_output(self, actual: str, expected: str, tolerance: float) -> bool:
         """比较输出（规范化 CRLF）。"""

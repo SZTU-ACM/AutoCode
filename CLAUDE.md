@@ -47,9 +47,11 @@ uv run python scripts/build_plugin_bundle.py --target dsh --check --output /tmp/
 # 运行 MCP Server（本地开发/测试）
 uv run autocode-mcp
 
-# 校验题目 manifest
+# 校验题目 manifest 与统一工作流门禁状态（可选 --status / --strict-gates / --reconcile）
 uv run autocode-verify examples/exact-sample
 uv run autocode-verify examples/communication-sample
+uv run autocode-verify <problem_dir> --status --strict-gates
+uv run autocode-verify <problem_dir> --reconcile
 
 # 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计）
 uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
@@ -159,16 +161,16 @@ AutoCode 当前暴露 22 个 MCP 工具：
    - 交互题 / 通信题（`run_twice` / `multi_process`）：`interactor_build`（可搭配可选 `validator_build` 校验 `.in` 测试输入；禁止 `checker_build`）。
    - 通信题（`grader_linked`）：编写 `files/grader.cpp` 与 `files/problem.h` 后通过 `solution_build` 联合编译（可选 `validator_build`）。
 6. `generator_build`
-7. `checker_build` 与 `stress_test_run`：非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`。交互题通过 `InteractiveRunner` 真实双向管道运行；通信题通过 `CommunicationRunner` 按 `run_twice`（独立进程隔离多阶段）/ `grader_linked` / `multi_process` 运行并校验通信预算。
-8. `problem_validate(validation_passed)`（交互/通信题自动验证协议与实跑样例）
-9. `problem_generate_tests(generated_test_count > 0)`
-10. `problem_verify_tests(passed)`（SPJ 用 checker；交互/通信题用 `InteractiveRunner`/`CommunicationRunner` 校验答案一致性、通信预算指标与错解杀伤；输出每个错解与标程的耗时倍数比 `wrong_ms / std_ms` 与测试点耗时分布，支持配置 `tle_kill_factor` / `slowdown_kill_ratio`）
-11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、经验复杂度、`communication_metrics`、`host_performance_bias` 风险与难度证据；交互题优先拟合查询次数随 $\log_2 n$ 增长曲线；支持 `standalone=True` / `autocode-audit --standalone` 对任意外部题包只读审计）
-12. `problem_pack_polygon`（支持 `export_formats=["polygon", "hydro", "qoj"]` 多 OJ 导出与 `export_data_mode="hardlink"|"copy"|"zip"` 去重存储，交互题自动清理空 `.ans` 并校验平台交互配置字段，自动同步 `subtasks` 到 Polygon `<groups>`/`<tests>`、Hydro `testdata/config.yaml` 与 QOJ `problem.conf`）
+7. `checker_build` 与 `stress_test_run`：非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`。支持一键 `enable_sanitizers=True` 在隔离的 `.autocode/san_bin/` 中自动探测并运行 ASan/UBSan（Linux 预加载容器自动回退 `-static-libasan -static-libubsan` 并强制通过负对照探针）。交互题通过 `InteractiveRunner` 真实双向管道运行；通信题通过 `CommunicationRunner` 按 `run_twice`（独立进程隔离多阶段）/ `grader_linked` / `multi_process` 运行并校验通信预算。
+8. `problem_validate(validation_passed)`（交互/通信题自动验证协议与实跑样例；超长预览自动截断并将完整详情落盘 `.autocode/logs/`）
+9. `problem_generate_tests(generated_test_count > 0)`（支持 `mode="replace"|"append"|"register_existing"`，自定义生成器类型如 `"5"`/`"hack"`，自动保留 `locked: true` 与 `tests/hack/*.in` 人工 Hack 测试点）
+10. `problem_verify_tests(passed)`（默认跑齐当前 `manifest.json` 门禁要求的全部检查项，支持 `verify_types=["all"]` 与 `boundary_coverage`；分项重跑按数据/源码内容指纹合并更新 `verify_signals` 而不覆盖其它已通过项；自动扫描并编译缺失/过期的 `solutions/wrong_*.cpp`，报告 `wrong_ms / std_ms` 倍率与 `max_memory_mb`；建议在常规错解外额外构造 2~3 份**近正解单点变异错解**检验数据强度）
+11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、基于 LaTeX 数值范围与 `val.cpp` 上下界比对的 `statement_consistency`、按 `(sol, gen, config, platform)` 哈希缓存的 `empirical_complexity`、导出包回读一致性检查、`state_drift` 跨平台告警、`communication_metrics`、`host_performance_bias` 与难度证据；不适用自测标记 `status: "not_applicable"`；支持 `standalone=True` / `autocode-audit --standalone` 对任意外部题包只读审计）
+12. `problem_pack_polygon`（统一推荐 `time_limit_ms` 毫秒参数，严禁误传毫秒到废弃秒参数 `time_limit`：超出 `60s` 或相对 `manifest.time_limit_ms` 偏离 >10 倍默认拒绝；支持 `export_formats=["polygon", "hydro", "qoj"]` 与 `export_data_mode="hardlink"|"copy"|"zip"`；Hydro 不自动注入内部工具 tag；导出完成后自动回读校验 Polygon/Hydro/QOJ 的 TL、ML 与文件完整性）
 
 关键门禁：
 
-- `brute` 必须在 `sol` 之后构建（除非 `oracle_mode != "brute"`）。`workflow` 门禁按文件 SHA-256 细粒度缓存：仅修改/重编 `sol.cpp` 只失效 `sol` 侧门禁（`solution_analyze` / `solution_audit_std`），不失效未改动的 `solution_audit_brute`。
+- `brute` 必须在 `sol` 之后构建（除非 `oracle_mode != "brute"`）。`workflow` 门禁按文件 SHA-256 细粒度缓存：仅修改/重编 `sol.cpp` 只失效 `sol` 侧门禁（`solution_analyze` / `solution_audit_std`），不失效未改动的 `solution_audit_brute`；跨平台迁移目录后若源文件 SHA-256 未变，纯重编译（`solution_build` / `problem_build_all`）保留已完成的代码分析、审计、对拍与数据生成状态，仅需重新验证二进制与打包。`.autocode/runtime.json` 统一保存相对路径（`.`），不写入宿主绝对路径。
 - `validator_build` 没有有效 `accuracy` 不算通过。
 - 交互题/通信题不可运行 `checker_build`；允许可选运行 `validator_build` 校验 `.in` 文件；`interactive` 与 `run_twice`/`multi_process` 使用 `interactor_build`。
 - 交互题题面必须完整写明协议：谁先输出、隐藏参数范围、查询/最终答案格式、judge 响应含义、查询上限、flush 要求、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞和额外输出的判定。样例必须是 transcript，不能伪装成普通 stdin/stdout。

@@ -45,7 +45,7 @@ class InteractorBuildTool(Tool):
 
         基于论文 Algorithm 4 实现:
         1. 保存代码到 problem_dir/files/interactor.cpp
-        2. 编译生成 files/interactor.exe
+        2. 编译生成 files/interactor（Windows 下为 files/interactor.exe）
         3. 可用 interaction_scenarios 按 testlib registerInteraction 约定验证协议判定
         4. 可用 reference_solution_path / mutant_solutions + test_inputs 走真实双向管道验证区分能力
            （reference_solution_path 应指向已编译可执行文件如 solutions/sol；若传入 .cpp 源码路径会自动映射或编译为二进制；若传入 test_inputs 且省略 reference_solution_path，会自动解析已编译的 solutions/sol）

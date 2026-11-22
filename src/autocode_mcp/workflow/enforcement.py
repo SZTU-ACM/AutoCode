@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import platform as _platform
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,10 +19,16 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime_store import AUDIT, WORKFLOW, get_section, runtime_file, set_section
+from ..utils.communication_runner import safe_resolve_under_root
+from ..utils.platform import get_exe_extension
+from .guard import check_gates
 from .manifest import (
     CANONICAL_PROBLEM_FILES,
     load_manifest,
+    manifest_is_communication,
+    manifest_is_interactive,
     manifest_path,
+    manifest_requires_brute,
     manifest_uses_testlib_checker,
 )
 
@@ -46,14 +54,155 @@ class GateViolation:
     next_action: str
 
 
+def current_platform() -> str:
+    """Return a normalized OS/architecture tag, e.g. 'linux/x86_64' or 'darwin/arm64'."""
+    machine = (_platform.machine() or "unknown").lower()
+    return f"{sys.platform}/{machine}"
+
+
 def _file_sha256(problem_dir: str, rel_path: str) -> str | None:
-    path = Path(problem_dir) / rel_path
+    resolved = safe_resolve_under_root(problem_dir, rel_path)
+    if resolved is None:
+        return None
+    path = Path(resolved)
     if not path.is_file():
         return None
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _set_source_hash(state: dict[str, Any], rel_path: str, digest: str | None) -> None:
+    hashes = state.get("source_hashes")
+    if not isinstance(hashes, dict):
+        hashes = {}
+        state["source_hashes"] = hashes
+    hashes[rel_path] = digest
+
+
+def _set_target_platform(state: dict[str, Any], rel_path: str, plat: str | None = None) -> None:
+    tp = state.get("target_platforms")
+    if not isinstance(tp, dict):
+        tp = {}
+        state["target_platforms"] = tp
+    if plat is None:
+        tp.pop(rel_path, None)
+    else:
+        tp[rel_path] = plat
+
+
+def _update_build_platform(state: dict[str, Any], cur_plat: str) -> None:
+    """Update global build_platform while preserving legacy cross-platform mismatch for un-rebuilt targets."""
+    old_plat = state.get("build_platform")
+    tp = state.get("target_platforms")
+    if isinstance(old_plat, str) and old_plat and old_plat != cur_plat and not (isinstance(tp, dict) and tp):
+        seeded: dict[str, str] = {}
+        hashes = state.get("source_hashes")
+        if isinstance(hashes, dict):
+            for rel, digest in hashes.items():
+                if isinstance(rel, str) and isinstance(digest, str) and digest:
+                    seeded[rel] = old_plat
+        if state.get("sol_built"):
+            seeded.setdefault("solutions/sol.cpp", old_plat)
+        if state.get("brute_built"):
+            seeded.setdefault("solutions/brute.cpp", old_plat)
+        if state.get("generator_built"):
+            seeded.setdefault("files/gen.cpp", old_plat)
+        if seeded:
+            state["target_platforms"] = seeded
+    state["build_platform"] = cur_plat
+
+
+def _grader_deps_unchanged(problem_dir: str, state: dict[str, Any]) -> bool:
+    """For grader_linked problems, verify grader/header hashes did not drift before pure recompile."""
+    if state.get("protocol_mode") != "grader_linked":
+        return True
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        return False
+    dep_rels: list[str] = []
+    if manifest is not None and manifest.protocol is not None:
+        dep_rels.append(manifest.protocol.grader_file or "files/grader.cpp")
+        if manifest.protocol.header_file:
+            dep_rels.append(manifest.protocol.header_file)
+    else:
+        dep_rels.extend(["files/grader.cpp", "files/problem.h"])
+    raw_hashes = state.get("source_hashes")
+    hashes: dict[str, Any] = raw_hashes if isinstance(raw_hashes, dict) else {}
+    for dep in dep_rels:
+        cur = _file_sha256(problem_dir, dep)
+        if cur is None:
+            continue
+        prev = hashes.get(dep)
+        if isinstance(prev, str) and prev and cur != prev:
+            return False
+    return True
+
+
+def _record_grader_dep_hashes(problem_dir: str, state: dict[str, Any]) -> None:
+    if state.get("protocol_mode") != "grader_linked":
+        return
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    dep_rels = (
+        [
+            manifest.protocol.grader_file or "files/grader.cpp",
+            *(
+                [manifest.protocol.header_file]
+                if manifest.protocol.header_file
+                else []
+            ),
+        ]
+        if (manifest is not None and manifest.protocol is not None)
+        else ["files/grader.cpp", "files/problem.h"]
+    )
+    for dep in dep_rels:
+        dig = _file_sha256(problem_dir, dep)
+        if dig is not None:
+            _set_source_hash(state, dep, dig)
+
+
+def _is_pure_recompile(
+    problem_dir: str,
+    state: dict[str, Any],
+    rel_path: str,
+    *,
+    legacy_hash_key: str | None = None,
+    ready_flag: str | None = None,
+) -> tuple[bool, str | None]:
+    """Return (True, sha256) when recompiling identical source bytes (e.g. cross-platform rebuild)."""
+    cur = _file_sha256(problem_dir, rel_path)
+    if cur is None:
+        return False, None
+    if ready_flag is not None and not bool(state.get(ready_flag)):
+        return False, cur
+    if rel_path in ("solutions/sol.cpp", "solutions/brute.cpp") and not _grader_deps_unchanged(
+        problem_dir, state
+    ):
+        return False, cur
+    hashes = state.get("source_hashes")
+    prev = hashes.get(rel_path) if isinstance(hashes, dict) else None
+    if not (isinstance(prev, str) and prev) and legacy_hash_key:
+        prev = state.get(legacy_hash_key)
+    return (isinstance(prev, str) and bool(prev) and cur == prev), cur
+
+
+def _canonical_comm_rel(problem_dir: str) -> str:
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    if manifest is not None and manifest.protocol is not None and manifest.protocol.communicator_file:
+        norm = _saved_relative_path(problem_dir, manifest.protocol.communicator_file)
+        if norm:
+            return norm
+    if (Path(problem_dir) / "files" / "communicator.cpp").is_file():
+        return "files/communicator.cpp"
+    return "files/interactor.cpp"
 
 
 def _matches_canonical_source(
@@ -99,6 +248,7 @@ def _sync_solution_hashes(problem_dir: str, state: dict[str, Any]) -> None:
                 "std_claimed_complexity": None,
             }
         )
+        _set_source_hash(state, "solutions/sol.cpp", None)
     std_hash = state.get("std_audited_hash")
     if isinstance(std_hash, str) and std_hash and cur_sol != std_hash:
         state["std_audited"] = False
@@ -124,13 +274,14 @@ def _sync_solution_hashes(problem_dir: str, state: dict[str, Any]) -> None:
                 "brute_audited_hash": None,
             }
         )
+        _set_source_hash(state, "solutions/brute.cpp", None)
     brute_hash = state.get("brute_audited_hash")
     if isinstance(brute_hash, str) and brute_hash and cur_brute != brute_hash:
         state["brute_audited"] = False
         state["brute_audited_hash"] = None
 
     if sol_drifted or brute_drifted:
-        _invalidate_downstream(problem_dir, state)
+        _invalidate_downstream_in_memory(state)
 
 
 def _state_problem_type(state: dict[str, Any]) -> str:
@@ -338,8 +489,21 @@ _DOWNSTREAM_INVALIDATING_TOOLS = frozenset(
 )
 
 
-def _invalidate_downstream(problem_dir: str, state: dict[str, Any]) -> None:
-    """Discard results that depend on an upstream artifact or validation step."""
+def _invalidate_verify_only(problem_dir: str, state: dict[str, Any]) -> None:
+    """Invalidate binary-dependent verification/packaging while preserving source-verified stages."""
+    state.update(
+        {
+            "tests_verified": False,
+            "verify_signals": {},
+            "verify_dataset_fingerprint": None,
+            "packaged": False,
+        }
+    )
+    set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+
+
+def _invalidate_downstream_in_memory(state: dict[str, Any]) -> None:
+    """Pure in-memory downstream invalidation (safe for read-only inspections)."""
     state.update(
         {
             "stress_passed": False,
@@ -353,29 +517,54 @@ def _invalidate_downstream(problem_dir: str, state: dict[str, Any]) -> None:
             "tests_verified": False,
             "limit_case_ratio": None,
             "verify_signals": {},
+            "verify_dataset_fingerprint": None,
             "packaged": False,
         }
     )
+
+
+def _invalidate_downstream(problem_dir: str, state: dict[str, Any]) -> None:
+    """Discard results that depend on an upstream artifact or validation step."""
+    _invalidate_downstream_in_memory(state)
     set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
 
 
 def _saved_relative_path(problem_dir: str, raw_path: Any) -> str | None:
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
-    path_text = raw_path.replace("\\", "/")
+    path_text = raw_path.strip().replace("\\", "/")
     if not Path(path_text).is_absolute() and "/" not in path_text:
         path_text = CANONICAL_PROBLEM_FILES.get(path_text, path_text)
     root = Path(problem_dir).resolve()
     path = Path(path_text)
     candidate = path.resolve() if path.is_absolute() else (root / path).resolve()
     try:
-        return candidate.relative_to(root).as_posix()
+        rel = candidate.relative_to(root).as_posix()
     except ValueError:
         try:
             Path(os.path.normcase(str(candidate))).relative_to(Path(os.path.normcase(str(root))))
         except ValueError:
             return None
-        return Path(*candidate.parts[len(root.parts) :]).as_posix()
+        rel = Path(*candidate.parts[len(root.parts) :]).as_posix()
+    if sys.platform in ("win32", "darwin"):
+        low = rel.lower()
+        canonical_lower = {
+            ".autocode/manifest.json",
+            "statements/tutorial.md",
+            "statements/readme.md",
+            "solutions/sol.cpp",
+            "solutions/brute.cpp",
+            "files/val.cpp",
+            "files/gen.cpp",
+            "files/checker.cpp",
+            "files/interactor.cpp",
+            "files/communicator.cpp",
+            "files/grader.cpp",
+            "files/problem.h",
+        }
+        if low in canonical_lower:
+            return "statements/README.md" if low == "statements/readme.md" else low
+    return rel
 
 
 def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_input: dict[str, Any]) -> None:
@@ -405,6 +594,8 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "interactor_ready": False,
                 "interaction_scenarios": {},
                 "statement_dirty": False,
+                "source_hashes": {},
+                "verify_dataset_fingerprint": None,
             }
         )
         return
@@ -435,6 +626,7 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "tests_verified": False,
                 "limit_case_ratio": None,
                 "verify_signals": {},
+                "verify_dataset_fingerprint": None,
                 "packaged": False,
             }
         )
@@ -474,6 +666,7 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "std_claimed_complexity": None,
             }
         )
+        _set_source_hash(state, "solutions/sol.cpp", None)
     elif relative == "solutions/brute.cpp":
         state.update(
             {
@@ -483,12 +676,16 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "brute_audited_hash": None,
             }
         )
+        _set_source_hash(state, "solutions/brute.cpp", None)
     elif relative == "files/val.cpp":
         state.update({"validator_ready": False, "validator_accuracy": None})
+        _set_source_hash(state, "files/val.cpp", None)
     elif relative == "files/gen.cpp":
         state["generator_built"] = False
+        _set_source_hash(state, "files/gen.cpp", None)
     elif relative == "files/checker.cpp":
         state.update({"checker_ready": False, "checker_accuracy": None})
+        _set_source_hash(state, "files/checker.cpp", None)
     custom_comm_files: set[str] = set()
     custom_grader_files: set[str] = set()
     try:
@@ -509,6 +706,7 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
     if relative in ({"files/interactor.cpp", "files/communicator.cpp"} | custom_comm_files):
         _invalidate_downstream(problem_dir, state)
         state.update({"interactor_ready": False, "interaction_scenarios": {}})
+        _set_source_hash(state, relative, None)
     elif relative in ({"files/grader.cpp", "files/problem.h"} | custom_grader_files):
         _invalidate_downstream(problem_dir, state)
         state.update(
@@ -526,6 +724,9 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "std_claimed_complexity": None,
             }
         )
+        _set_source_hash(state, relative, None)
+        _set_source_hash(state, "solutions/sol.cpp", None)
+        _set_source_hash(state, "solutions/brute.cpp", None)
 
 
 def _stress_rounds_complete(data: dict[str, Any]) -> bool:
@@ -677,7 +878,12 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
     else:
         manifest_error = None
     state: dict[str, Any] = {
-        "problem_dir": str(root),
+        "problem_dir": ".",
+        "build_platform": None,
+        "target_platforms": {},
+        "source_hashes": {},
+        "verify_dataset_fingerprint": None,
+        "packaged_time_limit_ms": None,
         "created": root.exists()
         and (root / "files").exists()
         and (root / "solutions").exists()
@@ -726,6 +932,11 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
 def load_workflow_state(problem_dir: str) -> dict[str, Any]:
     loaded = get_section(problem_dir, WORKFLOW)
     state = dict(loaded) if isinstance(loaded, dict) else _default_state(problem_dir)
+    state["problem_dir"] = "."
+    if not isinstance(state.get("source_hashes"), dict):
+        state["source_hashes"] = {}
+    if not isinstance(state.get("target_platforms"), dict):
+        state["target_platforms"] = {}
     try:
         manifest = load_manifest(problem_dir)
     except (OSError, ValueError) as exc:
@@ -743,7 +954,9 @@ def load_workflow_state(problem_dir: str) -> dict[str, Any]:
 
 
 def save_workflow_state(problem_dir: str, state: dict[str, Any]) -> None:
-    set_section(problem_dir, WORKFLOW, state)
+    normalized = dict(state)
+    normalized["problem_dir"] = "."
+    set_section(problem_dir, WORKFLOW, normalized)
 
 
 def has_workflow_context(problem_dir: str) -> bool:
@@ -811,8 +1024,165 @@ def _append_history(state: dict[str, Any], tool: str, success: bool, data: dict[
     for key in ("completed_rounds", "total_rounds", "accuracy", "generated_tests", "passed"):
         if key in data:
             metrics[key] = data[key]
-    history.append({"tool": tool, "success": success, "timestamp": datetime.now(timezone.utc).isoformat(), "gate_result": gate_result, "key_metrics": metrics})
+    entry = {
+        "tool": tool,
+        "success": success,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "gate_result": gate_result,
+        "key_metrics": metrics,
+    }
+    # When problem_verify_tests writes directly and then MCP server calls apply_result,
+    # upgrade the direct entry in-place instead of logging duplicate history entries.
+    if (
+        gate_result == "post"
+        and tool == "problem_verify_tests"
+        and history
+        and isinstance(history[-1], dict)
+        and history[-1].get("tool") == "problem_verify_tests"
+        and history[-1].get("gate_result") == "tool_direct"
+    ):
+        history[-1] = entry
+    else:
+        history.append(entry)
     state["history"] = history[-200:]
+
+
+def merge_verify_state(
+    state: dict[str, Any],
+    *,
+    success: bool,
+    passed: bool,
+    results: dict[str, Any],
+    quality_signals: dict[str, Any],
+    dataset_fingerprint: str | None = None,
+    executed_signals: list[str] | set[str] | None = None,
+    require_core_checks: bool = False,
+) -> dict[str, Any]:
+    """Merge verification signals into workflow state (Single Source of Truth).
+
+    When ``dataset_fingerprint`` is provided:
+      - Signals executed or explicitly evaluated in this run are updated and stamped
+        with ``dataset_fingerprint``.
+      - Signals omitted from a subset run are preserved ONLY when the prior stored
+        signal carries the exact same ``dataset_fingerprint``. Legacy or stale
+        un-fingerprinted signals are always overwritten.
+    When ``dataset_fingerprint`` is None (e.g., error exit or unit-test mock):
+      - ``verify_signals`` is replaced directly.
+    """
+    prev_signals = state.get("verify_signals")
+    prev_signals = prev_signals if isinstance(prev_signals, dict) else {}
+    prev_fp = state.get("verify_dataset_fingerprint")
+    in_run = set(executed_signals) if executed_signals is not None else set()
+
+    if isinstance(dataset_fingerprint, str) and dataset_fingerprint:
+        merged: dict[str, Any] = {}
+        for sig_name, raw_sig in quality_signals.items():
+            sig = dict(raw_sig) if isinstance(raw_sig, dict) else {}
+            was_evaluated = (
+                sig_name in in_run
+                or bool(sig.get("executed"))
+                or sig.get("status") == "not_applicable"
+            )
+            if was_evaluated:
+                if bool(sig.get("executed")) or sig.get("status") == "not_applicable":
+                    sig["fingerprint"] = dataset_fingerprint
+                merged[sig_name] = sig
+            else:
+                prev_sig = prev_signals.get(sig_name)
+                if (
+                    isinstance(prev_sig, dict)
+                    and prev_sig.get("fingerprint") == dataset_fingerprint
+                    and (bool(prev_sig.get("executed")) or prev_sig.get("status") == "not_applicable")
+                ):
+                    merged[sig_name] = dict(prev_sig)
+                else:
+                    merged[sig_name] = sig
+        for prev_name, prev_sig in prev_signals.items():
+            if prev_name not in merged and isinstance(prev_sig, dict):
+                if prev_sig.get("fingerprint") == dataset_fingerprint and (
+                    bool(prev_sig.get("executed")) or prev_sig.get("status") == "not_applicable"
+                ):
+                    merged[prev_name] = dict(prev_sig)
+
+        state["verify_signals"] = merged
+        state["verify_dataset_fingerprint"] = dataset_fingerprint
+
+        limit_ratio = results.get("limit_ratio", {}) if isinstance(results, dict) else {}
+        if isinstance(limit_ratio, dict) and "limit_case_ratio" in limit_ratio:
+            state["limit_case_ratio"] = limit_ratio.get("limit_case_ratio")
+        elif (
+            "limit_ratio" not in in_run
+            and prev_fp == dataset_fingerprint
+            and state.get("limit_case_ratio") is not None
+        ):
+            pass
+        else:
+            state["limit_case_ratio"] = None
+    else:
+        state["verify_signals"] = dict(quality_signals) if isinstance(quality_signals, dict) else {}
+        state["verify_dataset_fingerprint"] = None
+        limit_ratio = results.get("limit_ratio", {}) if isinstance(results, dict) else {}
+        state["limit_case_ratio"] = (
+            limit_ratio.get("limit_case_ratio")
+            if isinstance(limit_ratio, dict) and "limit_case_ratio" in limit_ratio
+            else None
+        )
+
+    any_merged_failed = any(
+        isinstance(sig, dict) and bool(sig.get("executed")) and not bool(sig.get("passed"))
+        for sig in state["verify_signals"].values()
+    )
+    ratio_ok = _min_limit_ratio_gate_ok(state, {})
+    core_ok = True
+    if require_core_checks and isinstance(dataset_fingerprint, str) and dataset_fingerprint:
+        sigs = state["verify_signals"]
+        for core_key in ("file_count", "no_empty", "answer_consistency"):
+            csig = sigs.get(core_key)
+            if not (isinstance(csig, dict) and bool(csig.get("executed")) and bool(csig.get("passed"))):
+                core_ok = False
+                break
+        req_ratio = _limit_ratio_threshold(state)
+        if core_ok and req_ratio is not None and req_ratio > 0 and _quality_gate_enabled(state, "require_limit_semantics"):
+            if state.get("limit_case_ratio") is None:
+                core_ok = False
+    state["tests_verified"] = bool(success and passed and ratio_ok and core_ok and not any_merged_failed)
+    return state
+
+
+def record_verify_state(
+    problem_dir: str,
+    *,
+    success: bool,
+    passed: bool,
+    results: dict[str, Any],
+    quality_signals: dict[str, Any],
+    dataset_fingerprint: str | None = None,
+    executed_signals: list[str] | set[str] | None = None,
+) -> dict[str, Any]:
+    """Persist problem_verify_tests outcome via the unified enforcement state model."""
+    state = load_workflow_state(problem_dir)
+    managed = manifest_path(problem_dir).is_file() and _quality_gate_enabled(
+        state, "require_tests_verified"
+    )
+    merge_verify_state(
+        state,
+        success=success,
+        passed=passed,
+        results=results,
+        quality_signals=quality_signals,
+        dataset_fingerprint=dataset_fingerprint,
+        executed_signals=executed_signals,
+        require_core_checks=managed,
+    )
+    _append_history(
+        state,
+        "problem_verify_tests",
+        success,
+        {"passed": passed},
+        "tool_direct",
+    )
+    save_workflow_state(problem_dir, state)
+    return state
 
 
 def _apply_problem_build_all(
@@ -840,6 +1210,8 @@ def _apply_problem_build_all(
 
     # Failed targets had their old binaries removed prior to compilation; reset their gates.
     for rel in failures:
+        if isinstance(rel, str):
+            _set_source_hash(state, rel, None)
         if rel == "solutions/sol.cpp":
             state.update(
                 {
@@ -880,17 +1252,22 @@ def _apply_problem_build_all(
         elif isinstance(rel, str) and rel.startswith("solutions/"):
             invalidate_verify_only = True
 
+    cur_plat = current_platform()
     for rel in compiled:
+        if isinstance(rel, str):
+            _set_target_platform(state, rel, cur_plat)
         if rel == "solutions/sol.cpp":
-            cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
-            sol_changed = (
-                (not bool(state.get("sol_built")))
-                or cur_sol is None
-                or cur_sol != state.get("sol_source_hash")
+            pure, cur_sol = _is_pure_recompile(
+                problem_dir,
+                state,
+                "solutions/sol.cpp",
+                legacy_hash_key="sol_source_hash",
             )
             state["sol_built"] = True
             state["sol_source_hash"] = cur_sol
-            if sol_changed:
+            _set_source_hash(state, "solutions/sol.cpp", cur_sol)
+            _record_grader_dep_hashes(problem_dir, state)
+            if not pure:
                 state.update(
                     {
                         "solution_analyzed": False,
@@ -901,50 +1278,132 @@ def _apply_problem_build_all(
                     }
                 )
                 invalidate_full = True
+            else:
+                invalidate_verify_only = True
         elif rel == "solutions/brute.cpp":
-            cur_brute = _file_sha256(problem_dir, "solutions/brute.cpp")
-            brute_changed = (
-                (not bool(state.get("brute_built")))
-                or cur_brute is None
-                or cur_brute != state.get("brute_source_hash")
+            pure, cur_brute = _is_pure_recompile(
+                problem_dir,
+                state,
+                "solutions/brute.cpp",
+                legacy_hash_key="brute_source_hash",
             )
             state["brute_built"] = True
             state["brute_source_hash"] = cur_brute
-            if brute_changed:
+            _set_source_hash(state, "solutions/brute.cpp", cur_brute)
+            _record_grader_dep_hashes(problem_dir, state)
+            if not pure:
                 if cur_brute is None or cur_brute != state.get("brute_audited_hash"):
                     state.update({"brute_audited": False, "brute_audited_hash": None})
                 invalidate_full = True
+            else:
+                invalidate_verify_only = True
         elif rel == "files/gen.cpp":
+            pure, cur_gen = _is_pure_recompile(problem_dir, state, "files/gen.cpp")
             state["generator_built"] = True
-            invalidate_full = True
-        elif isinstance(rel, str) and (rel in comm_targets or rel.startswith("files/")):
-            invalidate_full = True
+            _set_source_hash(state, "files/gen.cpp", cur_gen)
+            if not pure:
+                invalidate_full = True
+            else:
+                invalidate_verify_only = True
+        elif rel == "files/val.cpp":
+            pure, cur_val = _is_pure_recompile(problem_dir, state, "files/val.cpp")
+            _set_source_hash(state, "files/val.cpp", cur_val)
+            if not pure:
+                state.update({"validator_ready": False, "validator_accuracy": None})
+                invalidate_full = True
+            else:
+                invalidate_verify_only = True
+        elif rel == "files/checker.cpp":
+            pure, cur_chk = _is_pure_recompile(problem_dir, state, "files/checker.cpp")
+            _set_source_hash(state, "files/checker.cpp", cur_chk)
+            if not pure:
+                state.update({"checker_ready": False, "checker_accuracy": None})
+                invalidate_full = True
+            else:
+                invalidate_verify_only = True
+        elif isinstance(rel, str) and rel in comm_targets:
+            pure, cur_comm = _is_pure_recompile(problem_dir, state, rel)
+            _set_source_hash(state, rel, cur_comm)
+            if not pure:
+                state.update({"interactor_ready": False, "interaction_scenarios": {}})
+                invalidate_full = True
+            else:
+                invalidate_verify_only = True
+        elif isinstance(rel, str) and rel.startswith("files/"):
+            pure, cur_f = _is_pure_recompile(problem_dir, state, rel)
+            _set_source_hash(state, rel, cur_f)
+            if not pure:
+                invalidate_full = True
+            else:
+                invalidate_verify_only = True
         elif isinstance(rel, str) and rel.startswith("solutions/"):
             invalidate_verify_only = True
+
+    if compiled and not failures:
+        _update_build_platform(state, cur_plat)
 
     if invalidate_full:
         _invalidate_downstream(problem_dir, state)
     elif invalidate_verify_only:
-        state.update(
-            {
-                "tests_verified": False,
-                "verify_signals": {},
-                "packaged": False,
-            }
-        )
-        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+        _invalidate_verify_only(problem_dir, state)
 
 
 def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], success: bool, data: dict[str, Any]) -> dict[str, Any]:
     state = load_workflow_state(problem_dir)
     if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
         return state
+    if tool_name == "solution_build" and bool(tool_input.get("enable_sanitizers")):
+        # Isolated sanitizer build in .autocode/san_bin/ — never alters production workflow gates.
+        _append_history(state, tool_name, success, data, "post")
+        save_workflow_state(problem_dir, state)
+        return state
+
     is_auxiliary_solution_build = (
         tool_name == "solution_build"
         and tool_input.get("solution_type") in ("wrong", "reference")
     )
+    pure_recompile = False
+    if success and tool_name == "solution_build" and not is_auxiliary_solution_build:
+        st_type = tool_input.get("solution_type")
+        if st_type == "sol":
+            pure_recompile, _ = _is_pure_recompile(
+                problem_dir,
+                state,
+                "solutions/sol.cpp",
+                legacy_hash_key="sol_source_hash",
+            )
+        elif st_type == "brute":
+            pure_recompile, _ = _is_pure_recompile(
+                problem_dir,
+                state,
+                "solutions/brute.cpp",
+                legacy_hash_key="brute_source_hash",
+            )
+    elif success and tool_name == "validator_build":
+        pure_recompile, _ = _is_pure_recompile(
+            problem_dir, state, "files/val.cpp", ready_flag="validator_ready"
+        )
+    elif success and tool_name == "generator_build":
+        pure_recompile, _ = _is_pure_recompile(
+            problem_dir, state, "files/gen.cpp"
+        )
+    elif success and tool_name == "checker_build":
+        pure_recompile, _ = _is_pure_recompile(
+            problem_dir, state, "files/checker.cpp", ready_flag="checker_ready"
+        )
+    elif success and tool_name == "interactor_build":
+        pure_recompile, _ = _is_pure_recompile(
+            problem_dir,
+            state,
+            _canonical_comm_rel(problem_dir),
+            ready_flag="interactor_ready",
+        )
+
     if tool_name in _DOWNSTREAM_INVALIDATING_TOOLS and not is_auxiliary_solution_build:
-        _invalidate_downstream(problem_dir, state)
+        if pure_recompile:
+            _invalidate_verify_only(problem_dir, state)
+        else:
+            _invalidate_downstream(problem_dir, state)
     elif is_auxiliary_solution_build and success:
         state.update(
             {
@@ -960,8 +1419,13 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
     if tool_name == "problem_generate_tests":
         state["tests_verified"] = False
         generated = data.get("generated_tests", [])
-        state["tests_generated"] = bool(generated) if success else False
-        state["generated_test_count"] = len(generated) if isinstance(generated, list) else 0
+        total_tests = data.get("total_tests")
+        if isinstance(total_tests, int) and not isinstance(total_tests, bool) and total_tests > 0:
+            effective_count = total_tests
+        else:
+            effective_count = len(generated) if isinstance(generated, list) else 0
+        state["tests_generated"] = bool(effective_count > 0) if success else False
+        state["generated_test_count"] = effective_count if success else 0
     elif tool_name == "problem_validate":
         statement = data.get("statement_samples", {})
         samples = data.get("sample_files", {})
@@ -977,12 +1441,22 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         _apply_problem_build_all(problem_dir, state, data)
     elif tool_name == "problem_verify_tests":
         results = data.get("results", {})
-        ratio = results.get("limit_ratio", {}) if isinstance(results, dict) else {}
-        state["limit_case_ratio"] = ratio.get("limit_case_ratio") if isinstance(ratio, dict) else None
         signals = data.get("quality_signals", {})
-        state["verify_signals"] = signals if isinstance(signals, dict) else {}
-        ratio_ok = _min_limit_ratio_gate_ok(state, {})
-        state["tests_verified"] = bool(success and data.get("passed", False) and ratio_ok)
+        raw_fp = data.get("dataset_fingerprint")
+        raw_exec = data.get("executed_signals")
+        managed = manifest_path(problem_dir).is_file() and _quality_gate_enabled(
+            state, "require_tests_verified"
+        )
+        merge_verify_state(
+            state,
+            success=success,
+            passed=bool(data.get("passed", False)),
+            results=results if isinstance(results, dict) else {},
+            quality_signals=signals if isinstance(signals, dict) else {},
+            dataset_fingerprint=raw_fp if isinstance(raw_fp, str) else None,
+            executed_signals=raw_exec if isinstance(raw_exec, list) else None,
+            require_core_checks=managed,
+        )
     elif not success:
         resets: dict[str, tuple[str, ...]] = {
             "solution_analyze": ("solution_analyzed", "sol_analyzed_hash"),
@@ -1018,6 +1492,7 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                         "std_claimed_complexity": None,
                     }
                 )
+                _set_source_hash(state, "solutions/sol.cpp", None)
             elif solution_type == "brute":
                 state.update(
                     {
@@ -1027,6 +1502,7 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
                         "brute_audited_hash": None,
                     }
                 )
+                _set_source_hash(state, "solutions/brute.cpp", None)
         elif tool_name == "problem_validate":
             state.update(
                 {
@@ -1079,11 +1555,16 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         )
     elif tool_name == "solution_build":
         solution_type = tool_input.get("solution_type")
+        cur_plat = current_platform()
+        _update_build_platform(state, cur_plat)
         if solution_type == "sol":
             cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
             sol_changed = cur_sol is None or cur_sol != state.get("sol_source_hash")
             state["sol_built"] = True
             state["sol_source_hash"] = cur_sol
+            _set_source_hash(state, "solutions/sol.cpp", cur_sol)
+            _set_target_platform(state, "solutions/sol.cpp", cur_plat)
+            _record_grader_dep_hashes(problem_dir, state)
             if sol_changed:
                 state.update(
                     {
@@ -1099,6 +1580,9 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
             brute_changed = cur_brute is None or cur_brute != state.get("brute_source_hash")
             state["brute_built"] = True
             state["brute_source_hash"] = cur_brute
+            _set_source_hash(state, "solutions/brute.cpp", cur_brute)
+            _set_target_platform(state, "solutions/brute.cpp", cur_plat)
+            _record_grader_dep_hashes(problem_dir, state)
             if brute_changed and (
                 cur_brute is None or cur_brute != state.get("brute_audited_hash")
             ):
@@ -1153,18 +1637,31 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         state["validator_accuracy"] = accuracy
         parsed = _finite_ratio(accuracy)
         state["validator_ready"] = parsed is not None and parsed >= 0.9
+        cur_plat = current_platform()
+        _update_build_platform(state, cur_plat)
+        _set_source_hash(state, "files/val.cpp", _file_sha256(problem_dir, "files/val.cpp"))
+        _set_target_platform(state, "files/val.cpp", cur_plat)
     elif tool_name == "generator_build":
+        cur_plat = current_platform()
         state["generator_built"] = True
+        _update_build_platform(state, cur_plat)
+        _set_source_hash(state, "files/gen.cpp", _file_sha256(problem_dir, "files/gen.cpp"))
+        _set_target_platform(state, "files/gen.cpp", cur_plat)
     elif tool_name == "stress_test_run":
         state["stress_completed_rounds"] = data.get("completed_rounds", 0)
         state["stress_total_rounds"] = data.get("total_rounds", 0)
         state["stress_passed"] = success and _stress_rounds_complete(data)
     elif tool_name == "checker_build":
+        cur_plat = current_platform()
         accuracy = data.get("accuracy")
         state["checker_accuracy"] = accuracy
         parsed = _finite_ratio(accuracy)
         state["checker_ready"] = parsed is not None and parsed >= 0.9
+        _update_build_platform(state, cur_plat)
+        _set_source_hash(state, "files/checker.cpp", _file_sha256(problem_dir, "files/checker.cpp"))
+        _set_target_platform(state, "files/checker.cpp", cur_plat)
     elif tool_name == "interactor_build":
+        cur_plat = current_platform()
         scenarios = data.get("interaction_scenarios", {})
         state["interaction_scenarios"] = scenarios if isinstance(scenarios, dict) else {}
         pass_rate = _finite_ratio(data.get("pass_rate", 0))
@@ -1175,8 +1672,15 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         )
         state["interactor_pass_rate"] = pass_rate
         state["interactor_fail_rate"] = fail_rate
+        _update_build_platform(state, cur_plat)
+        comm_rel = _canonical_comm_rel(problem_dir)
+        _set_source_hash(state, comm_rel, _file_sha256(problem_dir, comm_rel))
+        _set_target_platform(state, comm_rel, cur_plat)
     elif tool_name == "problem_pack_polygon":
         state["packaged"] = True
+        tl_ms = data.get("time_limit_ms")
+        if isinstance(tl_ms, int) and not isinstance(tl_ms, bool):
+            state["packaged_time_limit_ms"] = tl_ms
     _append_history(state, tool_name, success, data, "post")
     save_workflow_state(problem_dir, state)
     return state
@@ -1188,4 +1692,191 @@ def blocked_result(tool_name: str, violations: list[GateViolation]) -> dict[str,
         "tool": tool_name,
         "blocking_issues": [{"gate": v.gate, "reason": v.reason} for v in violations],
         "next_actions": [v.next_action for v in violations],
+    }
+
+
+def inspect_workspace_state(problem_dir: str) -> dict[str, Any]:
+    """Inspect workspace binaries, per-target platform parity, containment, and unified MCP gate status."""
+    root = Path(problem_dir).resolve()
+    exe_ext = get_exe_extension()
+    cur_plat = current_platform()
+    wf_raw = get_section(problem_dir, WORKFLOW)
+    wf_present = runtime_file(problem_dir).is_file() and isinstance(wf_raw, dict)
+    state = load_workflow_state(problem_dir)
+    build_plat = state.get("build_platform") if isinstance(state.get("build_platform"), str) else None
+    raw_tp = state.get("target_platforms")
+    target_platforms: dict[str, Any] = raw_tp if isinstance(raw_tp, dict) else {}
+
+    manifest = None
+    manifest_err: str | None = None
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError) as exc:
+        manifest_err = str(exc)
+
+    targets: list[tuple[str, str, str]] = [
+        ("sol", "solutions/sol.cpp", f"solutions/sol{exe_ext}"),
+    ]
+    if manifest is None or manifest_requires_brute(manifest):
+        targets.append(("brute", "solutions/brute.cpp", f"solutions/brute{exe_ext}"))
+    elif (root / "solutions" / "brute.cpp").is_file():
+        targets.append(("brute", "solutions/brute.cpp", f"solutions/brute{exe_ext}"))
+
+    if (root / "files" / "val.cpp").is_file():
+        targets.append(("validator", "files/val.cpp", f"files/val{exe_ext}"))
+    if (root / "files" / "gen.cpp").is_file():
+        targets.append(("generator", "files/gen.cpp", f"files/gen{exe_ext}"))
+    if (root / "files" / "checker.cpp").is_file() or (manifest and manifest_uses_testlib_checker(manifest)):
+        targets.append(("checker", "files/checker.cpp", f"files/checker{exe_ext}"))
+    if manifest and (manifest_is_interactive(manifest) or manifest_is_communication(manifest)):
+        if manifest.protocol is None or manifest.protocol.mode != "grader_linked":
+            comm_rel = _canonical_comm_rel(problem_dir)
+            comm_stem = Path(comm_rel).with_suffix("").as_posix()
+            targets.append(("interactor", comm_rel, f"{comm_stem}{exe_ext}"))
+    elif (root / "files" / "interactor.cpp").is_file():
+        targets.append(("interactor", "files/interactor.cpp", f"files/interactor{exe_ext}"))
+
+    binary_status: dict[str, dict[str, Any]] = {}
+    stale_reasons: list[str] = []
+    if manifest_err:
+        stale_reasons.append(f"manifest.json unreadable: {manifest_err}")
+
+    any_platform_mismatch = bool(build_plat and build_plat != cur_plat)
+    if any_platform_mismatch:
+        stale_reasons.append(f"build_platform mismatch: {build_plat} != {cur_plat}")
+
+    for name, src_rel, bin_rel in targets:
+        raw_src = root / src_rel
+        raw_bin = root / bin_rel
+        safe_src = safe_resolve_under_root(str(root), src_rel)
+        safe_bin = safe_resolve_under_root(str(root), bin_rel)
+        src_escaped = (raw_src.exists() or raw_src.is_symlink()) and safe_src is None
+        bin_escaped = (raw_bin.exists() or raw_bin.is_symlink()) and safe_bin is None
+        src_exists = safe_src is not None and Path(safe_src).is_file()
+        bin_exists = safe_bin is not None and Path(safe_bin).is_file()
+        target_plat = (
+            target_platforms.get(src_rel)
+            if isinstance(target_platforms.get(src_rel), str)
+            else build_plat
+        )
+        target_mismatch = bool(target_plat and target_plat != cur_plat)
+        if target_mismatch and bin_exists:
+            any_platform_mismatch = True
+
+        stale = False
+        reason: str | None = None
+        if src_escaped or bin_escaped:
+            stale = True
+            reason = f"symlink escapes problem_dir: {bin_rel if bin_escaped else src_rel}"
+        elif src_exists and not bin_exists:
+            stale = True
+            reason = f"missing binary: {bin_rel}"
+        elif src_exists and bin_exists:
+            try:
+                assert safe_src is not None and safe_bin is not None
+                if Path(safe_src).stat().st_mtime > Path(safe_bin).stat().st_mtime + 1e-6:
+                    stale = True
+                    reason = f"source newer than binary: {src_rel}"
+            except OSError:
+                pass
+        if target_mismatch and bin_exists and not stale:
+            stale = True
+            reason = f"binary {bin_rel} built on {target_plat}, current platform is {cur_plat}"
+        if reason:
+            stale_reasons.append(reason)
+        binary_status[name] = {
+            "source_rel": src_rel,
+            "binary_rel": bin_rel,
+            "source_exists": src_exists,
+            "binary_exists": bin_exists,
+            "target_platform": target_plat,
+            "stale": stale,
+        }
+
+    gate_summary: dict[str, Any] = {
+        "quality_gate_issues": [],
+        "pack_preflight_issues": [],
+        "pack_ready": False,
+    }
+    if manifest is not None:
+        q_issues = check_gates(manifest, state, state.get("verify_signals", {}))
+        p_issues = preflight("problem_pack_polygon", problem_dir, {"problem_dir": problem_dir})
+        gate_summary = {
+            "quality_gate_issues": [{"gate": i.gate, "reason": i.reason} for i in q_issues],
+            "pack_preflight_issues": [
+                {"gate": v.gate, "reason": v.reason, "next_action": v.next_action}
+                for v in p_issues
+            ],
+            "pack_ready": (
+                (not q_issues)
+                and (not p_issues)
+                and (not any_platform_mismatch)
+                and (not stale_reasons)
+            ),
+        }
+
+    return {
+        "workflow_state_present": wf_present,
+        "build_platform": build_plat,
+        "current_platform": cur_plat,
+        "platform_mismatch": any_platform_mismatch,
+        "binary_status": binary_status,
+        "stale_reasons": stale_reasons,
+        "gate_summary": gate_summary,
+    }
+
+
+def reconcile_workspace_state(problem_dir: str) -> dict[str, Any]:
+    """Reconcile runtime.json against actual binaries/hashes on disk without fabricating passes."""
+    inspection = inspect_workspace_state(problem_dir)
+    actions: list[str] = []
+    if not has_workflow_context(problem_dir):
+        return {
+            "reconciled": False,
+            "actions": ["no managed workflow context found"],
+            "inspection": inspection,
+        }
+
+    raw_before = get_section(problem_dir, WORKFLOW) or {}
+    state = load_workflow_state(problem_dir)
+    if isinstance(raw_before, dict):
+        if raw_before.get("sol_built") and not state.get("sol_built"):
+            actions.append("invalidated sol_built/downstream due to sol.cpp source hash drift")
+        if raw_before.get("brute_built") and not state.get("brute_built"):
+            actions.append("invalidated brute_built/downstream due to brute.cpp source hash drift")
+
+    binary_status = inspection["binary_status"]
+    flag_map = {
+        "sol": "sol_built",
+        "brute": "brute_built",
+        "generator": "generator_built",
+        "validator": "validator_ready",
+        "checker": "checker_ready",
+        "interactor": "interactor_ready",
+    }
+    invalidated_verify = False
+    for name, flag in flag_map.items():
+        info = binary_status.get(name)
+        if not info:
+            continue
+        if info.get("stale") and state.get(flag):
+            state[flag] = False
+            if name in ("validator", "checker"):
+                state[f"{name}_accuracy"] = None
+            actions.append(f"cleared {flag} (stale/missing {info['binary_rel']})")
+            invalidated_verify = True
+
+    if inspection["platform_mismatch"] or invalidated_verify:
+        if inspection["platform_mismatch"]:
+            actions.append(
+                f"cleared tests_verified/packaged due to platform mismatch "
+                f"({inspection['build_platform']} -> {inspection['current_platform']})"
+            )
+        _invalidate_verify_only(problem_dir, state)
+
+    save_workflow_state(problem_dir, state)
+    return {
+        "reconciled": True,
+        "actions": actions,
+        "inspection": inspect_workspace_state(problem_dir),
     }

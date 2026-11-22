@@ -499,13 +499,21 @@ async def test_problem_generate_tests_test_configs_validation():
     assert not result.success
     assert "test_configs[0]: 'type' is required" in result.error
 
-    # 测试 type 字段值无效
+    # 测试 type 字段值无效（不允许路径穿越或非法字符）
     result = await tool.execute(
+        problem_dir="/dummy",
+        test_configs=[{"type": "../bad", "n_min": 1, "n_max": 10, "t_min": 1, "t_max": 5}],
+    )
+    assert not result.success
+    assert "test_configs[0]: 'type' must match" in result.error
+
+    # 自定义生成器类型（如 '5' / 'hack'）应被允许通过参数校验
+    result_custom = await tool.execute(
         problem_dir="/dummy",
         test_configs=[{"type": "5", "n_min": 1, "n_max": 10, "t_min": 1, "t_max": 5}],
     )
-    assert not result.success
-    assert "test_configs[0]: 'type' must be one of '1', '2', '3', '4'" in result.error
+    assert not result_custom.success
+    assert "Generator not found" in result_custom.error
 
     # 测试缺少必需字段
     result = await tool.execute(
