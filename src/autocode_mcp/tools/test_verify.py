@@ -11,13 +11,13 @@ import json
 import math
 import os
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from ..runtime_store import TEST_MANIFEST, WORKFLOW, get_section, set_section
+from .. import TEMPLATES_DIR
+from ..runtime_store import TEST_MANIFEST, WORKFLOW, get_section
 from ..utils.answer_ext import normalize_answer_ext
 from ..utils.checker_judge import (
     checker_exe_path,
@@ -28,24 +28,53 @@ from ..utils.checker_judge import (
 from ..utils.communication_runner import (
     CommunicationRunner,
     _run_communicator_stage,
+    is_safe_stem,
     resolve_communicator_binary,
+    resolve_grader_source_existing,
     resolve_participant_binaries,
+    safe_resolve_under_root,
 )
-from ..utils.compiler import run_batch, run_binary, run_binary_with_args
+from ..utils.compiler import (
+    compile_cpp,
+    resolve_effective_compiler,
+    run_batch,
+    run_binary,
+    run_binary_with_args,
+)
 from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
 from ..workflow import (
+    current_platform,
     load_manifest,
     manifest_is_communication,
     manifest_is_interactive,
+    manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
+    record_verify_state,
 )
 from ..workflow.models import AutoCodeManifest
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import ProblemVerifyTestsInput
 
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
+_LIMIT_GROUPS = frozenset({"limit", "extreme", "tle"})
 _VERIFY_CONCURRENCY = 4
+_SIGNAL_MAP: dict[str, str] = {
+    "file_count": "file_count",
+    "answer_consistency": "answer_consistency",
+    "validator": "validator_check",
+    "no_empty": "no_empty",
+    "limit_ratio": "limit_ratio",
+    "limit_semantics": "limit_semantics",
+    "wrong_solution_kill": "wrong_solution_kill",
+    "duplicate_inputs": "duplicate_inputs",
+    "scale_distribution": "scale_distribution",
+    "purpose_coverage": "purpose_coverage",
+    "boundary_coverage": "boundary_coverage",
+    "validator_self_test": "validator_self_test",
+    "checker_self_test": "checker_self_test",
+    "interactor_self_test": "interactor_self_test",
+}
 
 
 def _validate_tle_policy_params(
@@ -135,6 +164,136 @@ def _timing_cache_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _compute_dataset_fingerprint(
+    problem_dir: str,
+    tests_dir: str,
+    manifest: AutoCodeManifest | None = None,
+    *,
+    answer_ext: str = ".ans",
+    tests_manifest: dict[str, Any] | None = None,
+) -> str:
+    """Compute a content-based SHA-256 fingerprint across tests, manifest policy, sources, and platform."""
+    hasher = hashlib.sha256()
+    hasher.update(current_platform().encode("utf-8"))
+    hasher.update(answer_ext.encode("utf-8"))
+    if manifest is not None:
+        policy_blob = json.dumps(
+            {
+                "tl": manifest.time_limit_ms,
+                "ml": manifest.memory_limit_mb,
+                "qg": manifest.quality_gates.model_dump(mode="json"),
+                "cmp": manifest.stress_comparison,
+                "spj": manifest.special_judge,
+                "ptype": manifest.problem_type,
+                "compiler": manifest.compiler,
+            },
+            sort_keys=True,
+        )
+        hasher.update(policy_blob.encode("utf-8"))
+    if isinstance(tests_manifest, dict):
+        hasher.update(json.dumps(tests_manifest, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+    allowed_exts = {".in", ".ans", ".out", answer_ext}
+    tests_path = Path(tests_dir)
+    if tests_path.is_dir():
+        for p in sorted(tests_path.iterdir()):
+            if p.is_file() and not p.is_symlink() and p.suffix in allowed_exts:
+                try:
+                    hasher.update(p.name.encode("utf-8"))
+                    hasher.update(hashlib.sha256(p.read_bytes()).digest())
+                except OSError:
+                    continue
+
+    source_rels = [
+        "solutions/sol.cpp",
+        "files/val.cpp",
+        "files/checker.cpp",
+        "files/interactor.cpp",
+        "files/communicator.cpp",
+        "files/grader.cpp",
+        "files/problem.h",
+    ]
+    sols_dir = Path(problem_dir) / "solutions"
+    if sols_dir.is_dir() and not sols_dir.is_symlink():
+        for wf in sorted(sols_dir.glob("wrong_*.cpp")):
+            if wf.is_file() and not wf.is_symlink() and is_safe_stem(wf.stem):
+                source_rels.append(f"solutions/{wf.name}")
+    if manifest is not None:
+        if manifest.protocol is not None:
+            for p_rel in (
+                manifest.protocol.communicator_file,
+                manifest.protocol.grader_file,
+                manifest.protocol.header_file,
+            ):
+                if isinstance(p_rel, str) and p_rel.strip():
+                    source_rels.append(p_rel.strip())
+            for part_name in manifest.protocol.participant_solutions:
+                if is_safe_stem(part_name):
+                    source_rels.append(f"solutions/{part_name}.cpp")
+        for s in manifest.solutions:
+            if s.role == "wrong":
+                rel = s.path or f"solutions/{s.name}.cpp"
+                if rel not in source_rels:
+                    source_rels.append(rel)
+    for rel in sorted(set(source_rels)):
+        resolved = safe_resolve_under_root(problem_dir, rel)
+        if resolved is None:
+            continue
+        src = Path(resolved)
+        if src.is_file() and not src.is_symlink():
+            try:
+                hasher.update(rel.encode("utf-8"))
+                hasher.update(hashlib.sha256(src.read_bytes()).digest())
+            except OSError:
+                continue
+    return hasher.hexdigest()
+
+
+def _discover_wrong_solution_names(
+    problem_dir: str,
+    manifest: AutoCodeManifest | None,
+    explicit_names: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    """Return (wrong_names_to_run, undeclared_disk_wrong_names), rejecting unsafe stems."""
+    declared: list[str] = []
+    declared_stems: set[str] = set()
+    if manifest is not None:
+        for s in manifest.solutions:
+            if s.role == "wrong" and is_safe_stem(s.name):
+                if s.name not in declared:
+                    declared.append(s.name)
+                declared_stems.add(s.name)
+                if s.path:
+                    declared_stems.add(Path(s.path).stem)
+    disk_wrongs: list[str] = []
+    sols_dir = Path(problem_dir) / "solutions"
+    if sols_dir.is_dir() and not sols_dir.is_symlink():
+        for wf in sorted(sols_dir.glob("wrong_*.cpp")):
+            if (
+                wf.is_file()
+                and not wf.is_symlink()
+                and is_safe_stem(wf.stem)
+                and safe_resolve_under_root(problem_dir, f"solutions/{wf.name}") is not None
+                and wf.stem not in disk_wrongs
+            ):
+                disk_wrongs.append(wf.stem)
+    undeclared = [name for name in disk_wrongs if name not in declared_stems]
+
+    combined: list[str] = []
+    if explicit_names is not None:
+        for name in explicit_names:
+            if isinstance(name, str) and name not in combined:
+                combined.append(name)
+        for name in declared:
+            if name not in combined:
+                combined.append(name)
+    else:
+        for name in declared + undeclared:
+            if name not in combined:
+                combined.append(name)
+    return combined, undeclared
+
+
 class ProblemVerifyTestsTool(Tool):
     """验证生成的测试数据。"""
 
@@ -149,7 +308,7 @@ class ProblemVerifyTestsTool(Tool):
         自动执行以下检查：
         1. file_count: 每个 .in 有对应的 .ans，文件名连续
         2. answer_consistency: 用 sol 重跑 .in；special_judge 且 stress_comparison=checker 时用 checker，否则比 .ans 文本
-        3. validator: 用 val 检查每个 .in 是否满足约束（如有 val.exe）
+        3. validator: 用 val 检查每个 .in 是否满足约束（如有 files/val）
         4. no_empty: 没有空文件
         5. limit_ratio: 最终测试中 extreme/tle（type=3/4）不少于一半（需存在 manifest）
 
@@ -219,10 +378,59 @@ class ProblemVerifyTestsTool(Tool):
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         verify_with_checker = manifest_uses_testlib_checker(manifest_model)
         is_interactive = manifest_is_interactive(manifest_model)
+        is_communication = manifest_model is not None and manifest_is_communication(manifest_model)
+        uses_protocol = manifest_uses_protocol_judge(manifest_model)
+        comm_needs_communicator = is_communication and (
+            manifest_model is not None
+            and (manifest_model.protocol is None or manifest_model.protocol.mode != "grader_linked")
+        )
 
-        # 默认执行所有验证
-        if not verify_types:
+        # 默认执行当前 manifest 门禁所需的全部检查项；verify_types=["all"] 额外全量展开
+        explicit_all = bool(verify_types and "all" in verify_types)
+        if not verify_types or explicit_all:
             verify_types = ["file_count", "answer_consistency", "validator", "no_empty"]
+            if manifest_model is not None or explicit_all:
+                for extra in ("duplicate_inputs", "scale_distribution"):
+                    if extra not in verify_types:
+                        verify_types.append(extra)
+                if tests_manifest or explicit_all:
+                    if "purpose_coverage" not in verify_types:
+                        verify_types.append("purpose_coverage")
+                discovered_wrongs, _ = _discover_wrong_solution_names(
+                    problem_dir, manifest_model, wrong_solution_names
+                )
+                need_wrong_kill = bool(
+                    discovered_wrongs
+                    or (
+                        manifest_model is not None
+                        and manifest_model.quality_gates.require_wrong_solution_kill
+                    )
+                )
+                if need_wrong_kill and "wrong_solution_kill" not in verify_types:
+                    verify_types.append("wrong_solution_kill")
+                if not uses_protocol and (
+                    explicit_all
+                    or (manifest_model is not None and manifest_model.audit_gates.require_validator_self_test)
+                ):
+                    if "validator_self_test" not in verify_types:
+                        verify_types.append("validator_self_test")
+                if verify_with_checker and (
+                    explicit_all
+                    or (manifest_model is not None and manifest_model.audit_gates.require_checker_self_test)
+                ):
+                    if "checker_self_test" not in verify_types:
+                        verify_types.append("checker_self_test")
+                if (is_interactive or comm_needs_communicator) and (
+                    explicit_all
+                    or (manifest_model is not None and manifest_model.audit_gates.require_interactor_self_test)
+                ):
+                    if "interactor_self_test" not in verify_types:
+                        verify_types.append("interactor_self_test")
+                if explicit_all and manifest_model is not None and manifest_model.constraints:
+                    if "boundary_coverage" not in verify_types:
+                        verify_types.append("boundary_coverage")
+        else:
+            verify_types = list(verify_types)
 
         if enable_limit_ratio:
             if "limit_ratio" not in verify_types:
@@ -231,6 +439,14 @@ class ProblemVerifyTestsTool(Tool):
                 verify_types.append("limit_semantics")
         else:
             verify_types = [v for v in verify_types if v not in {"limit_ratio", "limit_semantics"}]
+
+        dataset_fingerprint = _compute_dataset_fingerprint(
+            problem_dir,
+            tests_dir,
+            manifest_model,
+            answer_ext=resolved_answer_ext,
+            tests_manifest=tests_manifest,
+        )
 
         results = {}
         all_passed = True
@@ -288,11 +504,9 @@ class ProblemVerifyTestsTool(Tool):
                 all_passed = False
 
         if "wrong_solution_kill" in verify_types:
-            wrong_names = list(wrong_solution_names or [])
-            if manifest_model:
-                for s in manifest_model.solutions:
-                    if s.role == "wrong" and s.name not in wrong_names:
-                        wrong_names.append(s.name)
+            wrong_names, undeclared_wrongs = _discover_wrong_solution_names(
+                problem_dir, manifest_model, wrong_solution_names
+            )
             std_timings: dict[str, float] | None = None
             ans_res = results.get("answer_consistency")
             if isinstance(ans_res, dict) and isinstance(ans_res.get("per_test_timings"), list):
@@ -340,6 +554,7 @@ class ProblemVerifyTestsTool(Tool):
                 tle_kill_factor=tle_kill_factor,
                 slowdown_kill_ratio=slowdown_kill_ratio,
                 sol_name=effective_sol_name,
+                undeclared_wrong_solutions=undeclared_wrongs,
             )
             results["wrong_solution_kill"] = result
             if not result["passed"]:
@@ -358,9 +573,15 @@ class ProblemVerifyTestsTool(Tool):
                 all_passed = False
 
         if "purpose_coverage" in verify_types:
-            result = self._check_purpose_coverage(tests_dir)
+            result = self._check_purpose_coverage(tests_dir, manifest=manifest_model)
             results["purpose_coverage"] = result
-            if not result["passed"]:
+            if not result["passed"] and not result.get("skipped", False):
+                all_passed = False
+
+        if "boundary_coverage" in verify_types:
+            result = self._check_boundary_coverage(tests_dir, manifest_model)
+            results["boundary_coverage"] = result
+            if not result["passed"] and not result.get("skipped", False):
                 all_passed = False
 
         if "validator_self_test" in verify_types:
@@ -390,7 +611,10 @@ class ProblemVerifyTestsTool(Tool):
         )
         skipped_checks = sum(1 for r in results.values() if r.get("skipped", False))
         effective_checks = total_checks - skipped_checks
-        quality_signals = self._build_quality_signals(verify_types, results)
+        quality_signals = self._build_quality_signals(verify_types, results, manifest=manifest_model)
+        executed_signals = sorted(
+            _SIGNAL_MAP[v] for v in verify_types if v in _SIGNAL_MAP
+        )
 
         if all_passed and effective_checks:
             message = f"All {total_checks} verification checks passed"
@@ -405,11 +629,15 @@ class ProblemVerifyTestsTool(Tool):
                 passed=True,
                 quality_signals=quality_signals,
                 results=results,
+                dataset_fingerprint=dataset_fingerprint,
+                executed_signals=executed_signals,
             )
             return ToolResult.ok(
                 passed=True,
                 results=results,
                 quality_signals=quality_signals,
+                dataset_fingerprint=dataset_fingerprint,
+                executed_signals=executed_signals,
                 total_checks=total_checks,
                 passed_checks=passed_checks,
                 skipped_checks=skipped_checks,
@@ -426,12 +654,16 @@ class ProblemVerifyTestsTool(Tool):
                 passed=False,
                 quality_signals=quality_signals,
                 results=results,
+                dataset_fingerprint=dataset_fingerprint,
+                executed_signals=executed_signals,
             )
             return ToolResult.fail(
                 f"{passed_checks}/{total_checks} checks passed",
                 passed=False,
                 results=results,
                 quality_signals=quality_signals,
+                dataset_fingerprint=dataset_fingerprint,
+                executed_signals=executed_signals,
                 total_checks=total_checks,
                 passed_checks=passed_checks,
                 skipped_checks=skipped_checks,
@@ -441,25 +673,16 @@ class ProblemVerifyTestsTool(Tool):
                 limit_ratio_enabled=enable_limit_ratio,
             )
 
-    def _build_quality_signals(self, verify_types: list[str], results: dict) -> dict[str, dict]:
-        signal_map = {
-            "file_count": "file_count",
-            "answer_consistency": "answer_consistency",
-            "validator": "validator_check",
-            "no_empty": "no_empty",
-            "limit_ratio": "limit_ratio",
-            "limit_semantics": "limit_semantics",
-            "wrong_solution_kill": "wrong_solution_kill",
-            "duplicate_inputs": "duplicate_inputs",
-            "scale_distribution": "scale_distribution",
-            "purpose_coverage": "purpose_coverage",
-            "validator_self_test": "validator_self_test",
-            "checker_self_test": "checker_self_test",
-            "interactor_self_test": "interactor_self_test",
-        }
+    def _build_quality_signals(
+        self,
+        verify_types: list[str],
+        results: dict,
+        *,
+        manifest: AutoCodeManifest | None = None,
+    ) -> dict[str, dict]:
         verify_set = set(verify_types)
         signals: dict[str, dict] = {}
-        for verify_name, signal_name in signal_map.items():
+        for verify_name, signal_name in _SIGNAL_MAP.items():
             raw_result = results.get(verify_name)
             result = raw_result if isinstance(raw_result, dict) else {}
             executed = verify_name in verify_set and isinstance(result, dict)
@@ -470,6 +693,38 @@ class ProblemVerifyTestsTool(Tool):
                 "passed": bool(result.get("passed")) if executed else False,
                 "evidence": result if executed else {},
             }
+
+        if manifest is not None:
+            uses_protocol = manifest_uses_protocol_judge(manifest)
+            is_interactive = manifest_is_interactive(manifest)
+            is_comm = manifest_is_communication(manifest)
+            comm_needs_comm = is_comm and (
+                manifest.protocol is None or manifest.protocol.mode != "grader_linked"
+            )
+            if uses_protocol and not signals["validator_self_test"]["executed"]:
+                signals["validator_self_test"] = {
+                    "applicable": False,
+                    "status": "not_applicable",
+                    "executed": False,
+                    "passed": True,
+                    "evidence": {"reason": "not applicable for protocol problems"},
+                }
+            if not manifest_uses_testlib_checker(manifest) and not signals["checker_self_test"]["executed"]:
+                signals["checker_self_test"] = {
+                    "applicable": False,
+                    "status": "not_applicable",
+                    "executed": False,
+                    "passed": True,
+                    "evidence": {"reason": "not applicable when stress_comparison != checker"},
+                }
+            if not (is_interactive or comm_needs_comm) and not signals["interactor_self_test"]["executed"]:
+                signals["interactor_self_test"] = {
+                    "applicable": False,
+                    "status": "not_applicable",
+                    "executed": False,
+                    "passed": True,
+                    "evidence": {"reason": "not applicable for non-interactor problems"},
+                }
         return signals
 
     def _write_workflow_state(
@@ -480,35 +735,22 @@ class ProblemVerifyTestsTool(Tool):
         passed: bool,
         quality_signals: dict[str, dict],
         results: dict,
+        dataset_fingerprint: str | None = None,
+        executed_signals: list[str] | None = None,
     ) -> None:
-        state = get_section(problem_dir, WORKFLOW) or {}
-        if not isinstance(state, dict):
-            state = {}
-
-        limit_ratio = results.get("limit_ratio", {})
-        if isinstance(limit_ratio, dict) and "limit_case_ratio" in limit_ratio:
-            state["limit_case_ratio"] = limit_ratio.get("limit_case_ratio")
-        else:
-            state["limit_case_ratio"] = None
-
-        state["verify_signals"] = quality_signals
-        state["tests_verified"] = bool(success and passed)
-        history = state.get("history", [])
-        if not isinstance(history, list):
-            history = []
-        history.append(
-            {
-                "tool": "problem_verify_tests",
-                "success": state["tests_verified"],
-                "at": datetime.now(timezone.utc).isoformat(),
-                "key_metrics": {
-                    "tests_verified": state["tests_verified"],
-                    "limit_case_ratio": state.get("limit_case_ratio"),
-                },
-            }
-        )
-        state["history"] = history[-50:]
-        set_section(problem_dir, WORKFLOW, state)
+        try:
+            record_verify_state(
+                problem_dir,
+                success=success,
+                passed=passed,
+                results=results,
+                quality_signals=quality_signals,
+                dataset_fingerprint=dataset_fingerprint,
+                executed_signals=executed_signals,
+            )
+        except OSError:
+            # Best-effort persistence (matches contract when .autocode is unwritable)
+            pass
 
     def _check_file_count(
         self,
@@ -905,7 +1147,7 @@ class ProblemVerifyTestsTool(Tool):
                 "passed": True,
                 "total": 0,
                 "skipped": True,
-                "message": "val.exe not found, validator check skipped",
+                "message": f"files/val{exe_ext} not found, validator check skipped (run validator_build)",
             }
 
         in_files = sorted(
@@ -976,6 +1218,7 @@ class ProblemVerifyTestsTool(Tool):
         )
         in_file_set = set(in_files)
         type_by_in_file: dict[str, str] = {}
+        group_by_in_file: dict[str, str] = {}
         for item in tests:
             if not isinstance(item, dict):
                 continue
@@ -983,6 +1226,7 @@ class ProblemVerifyTestsTool(Tool):
             type_param = item.get("type_param")
             if isinstance(in_file, str) and isinstance(type_param, str):
                 type_by_in_file[in_file] = type_param
+                group_by_in_file[in_file] = str(item.get("group", "")).strip().lower()
 
         missing_in_manifest = sorted(f for f in in_files if f not in type_by_in_file)
         if missing_in_manifest:
@@ -1008,7 +1252,10 @@ class ProblemVerifyTestsTool(Tool):
             }
 
         limit_case_count = sum(
-            1 for in_file in in_file_set if type_by_in_file[in_file] in _LIMIT_STRATEGY_TYPES
+            1
+            for in_file in in_file_set
+            if type_by_in_file[in_file] in _LIMIT_STRATEGY_TYPES
+            or group_by_in_file.get(in_file, "") in _LIMIT_GROUPS
         )
         minimum_required = (total + 1) // 2
         ratio = limit_case_count / total
@@ -1128,11 +1375,20 @@ class ProblemVerifyTestsTool(Tool):
             "non_empty_scale_bucket_count": non_empty_scale_buckets,
         }
 
-    def _check_purpose_coverage(self, tests_dir: str) -> dict:
-        manifest = self._read_tests_manifest(tests_dir)
-        if not manifest:
+    def _check_purpose_coverage(
+        self, tests_dir: str, manifest: AutoCodeManifest | None = None
+    ) -> dict:
+        tmanifest = self._read_tests_manifest(tests_dir)
+        if not tmanifest:
             return {"passed": False, "error": "tests manifest missing or unreadable"}
-        tests = manifest.get("tests", [])
+        if tmanifest.get("mode") == "register_existing":
+            return {
+                "passed": True,
+                "skipped": True,
+                "total": len(tmanifest.get("tests", [])) if isinstance(tmanifest.get("tests"), list) else 0,
+                "message": "purpose_coverage skipped for register_existing tests",
+            }
+        tests = tmanifest.get("tests", [])
         if not isinstance(tests, list) or not tests:
             return {"passed": False, "error": "tests manifest has no tests"}
         type_counts: dict[str, int] = {}
@@ -1147,7 +1403,10 @@ class ProblemVerifyTestsTool(Tool):
                 purpose_count += 1
             type_counts[type_param] = type_counts.get(type_param, 0) + 1
             group_counts[group] = group_counts.get(group, 0) + 1
-        required_types = {"1", "2", "3", "4"}
+        if manifest is not None and manifest.case_plan:
+            required_types = {str(cp.type) for cp in manifest.case_plan}
+        else:
+            required_types = {"1", "2", "3", "4"}
         missing_types = sorted(required_types - set(type_counts))
         return {
             "passed": not missing_types,
@@ -1156,6 +1415,99 @@ class ProblemVerifyTestsTool(Tool):
             "group_counts": group_counts,
             "purpose_count": purpose_count,
             "missing_types": missing_types,
+        }
+
+    def _check_boundary_coverage(
+        self, tests_dir: str, manifest: AutoCodeManifest | None
+    ) -> dict[str, Any]:
+        """Verify that formal test inputs cover declared min/max primary scale boundaries."""
+        if manifest is None or not manifest.constraints:
+            return {
+                "passed": True,
+                "skipped": True,
+                "message": "no numeric constraints declared in manifest",
+            }
+        expected_min: int | None = None
+        expected_max: int | None = None
+        c = manifest.constraints
+        # Prefer explicit n / N / primary variable bounds
+        for primary in ("n", "N"):
+            entry = c.get(primary)
+            if isinstance(entry, dict):
+                if isinstance(entry.get("min"), int) and not isinstance(entry.get("min"), bool):
+                    expected_min = int(entry["min"])
+                if isinstance(entry.get("max"), int) and not isinstance(entry.get("max"), bool):
+                    expected_max = int(entry["max"])
+        if expected_min is None:
+            for key in ("n_min", "N_min", "min_n"):
+                val = c.get(key)
+                if isinstance(val, int) and not isinstance(val, bool):
+                    expected_min = int(val)
+                    break
+        if expected_max is None:
+            for key in ("n_max", "N_max", "max_n", "sum_n_max"):
+                val = c.get(key)
+                if isinstance(val, int) and not isinstance(val, bool):
+                    expected_max = int(val)
+                    break
+
+        if expected_min is None and expected_max is None:
+            return {
+                "passed": True,
+                "skipped": True,
+                "message": "no n_min/n_max primary bounds declared in manifest.constraints",
+            }
+
+        tests_path = Path(tests_dir)
+        in_files = sorted(
+            p for p in tests_path.iterdir() if p.is_file() and not p.is_symlink() and p.suffix == ".in"
+        )
+        observed_vals: list[int] = []
+        for p in in_files:
+            try:
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            first_nonempty = next((ln.strip() for ln in lines if ln.strip()), "")
+            if not first_nonempty:
+                continue
+            tok = first_nonempty.split()[0]
+            try:
+                observed_vals.append(int(tok))
+            except ValueError:
+                continue
+        if not observed_vals:
+            return {
+                "passed": False,
+                "expected_min": expected_min,
+                "expected_max": expected_max,
+                "observed_min": None,
+                "observed_max": None,
+                "missing_boundaries": ["no_integer_inputs_found"],
+            }
+
+        obs_min = min(observed_vals)
+        obs_max = max(observed_vals)
+        missing_boundaries: list[str] = []
+        min_covered = expected_min is None or (expected_min in observed_vals)
+        max_covered = expected_max is None or (
+            expected_max in observed_vals
+            or (expected_max > 0 and obs_max >= int(expected_max * 0.95))
+        )
+        if not min_covered:
+            missing_boundaries.append(f"min({expected_min}) not hit (observed min={obs_min})")
+        if not max_covered:
+            missing_boundaries.append(f"max({expected_max}) not hit (observed max={obs_max})")
+        return {
+            "passed": not missing_boundaries,
+            "total": len(in_files),
+            "expected_min": expected_min,
+            "expected_max": expected_max,
+            "observed_min": obs_min,
+            "observed_max": obs_max,
+            "min_covered": min_covered,
+            "max_covered": max_covered,
+            "missing_boundaries": missing_boundaries,
         }
 
     async def _check_validator_self_test(self, problem_dir: str, tests_dir: str, timeout: int) -> dict:
@@ -1577,7 +1929,7 @@ class ProblemVerifyTestsTool(Tool):
                     return None
                 ms = float(jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms)
                 return (in_file.name, round(ms, 2))
-            run = await run_binary(sol_exe, input_data, timeout=test_timeout)
+            run = await run_binary(sol_exe, input_data, timeout=test_timeout, memory_mb=mem_mb)
             if not run.success or run.timed_out:
                 return None
             return (in_file.name, round(float(run.time_ms), 2))
@@ -1600,6 +1952,7 @@ class ProblemVerifyTestsTool(Tool):
         tle_kill_factor: float | None = None,
         slowdown_kill_ratio: float | None = None,
         sol_name: str = "sol",
+        undeclared_wrong_solutions: list[str] | None = None,
     ) -> dict:
         policy_err = _validate_tle_policy_params(tle_kill_factor, slowdown_kill_ratio)
         if policy_err is not None:
@@ -1702,8 +2055,127 @@ class ProblemVerifyTestsTool(Tool):
             )
             std_timings_map.update(measured_std)
 
+        effective_compiler = resolve_effective_compiler(None, manifest)
+        wf_snapshot = get_section(problem_dir, WORKFLOW) or {}
+        saved_build_plat = (
+            wf_snapshot.get("build_platform")
+            if isinstance(wf_snapshot, dict) and isinstance(wf_snapshot.get("build_platform"), str)
+            else None
+        )
+        platform_changed = bool(saved_build_plat and saved_build_plat != current_platform())
+        manifest_wrong_paths: dict[str, str] = {}
+        if manifest is not None:
+            for s in manifest.solutions:
+                if s.role == "wrong" and s.path:
+                    manifest_wrong_paths[s.name] = s.path
+
         for wrong_name in wrong_solution_names:
-            binary_path = Path(problem_dir) / "solutions" / f"{wrong_name}{exe_ext}"
+            if not isinstance(wrong_name, str) or not is_safe_stem(wrong_name):
+                details.append(
+                    {
+                        "name": str(wrong_name),
+                        "killed": False,
+                        "reason": f"invalid wrong solution name (must be a safe file stem): {wrong_name!r}",
+                    }
+                )
+                all_killed = False
+                continue
+
+            bin_rel = f"solutions/{wrong_name}{exe_ext}"
+            raw_bin = Path(problem_dir) / bin_rel
+            if raw_bin.is_symlink():
+                details.append(
+                    {
+                        "name": wrong_name,
+                        "killed": False,
+                        "reason": f"refusing symlinked wrong binary: {bin_rel}",
+                    }
+                )
+                all_killed = False
+                continue
+            resolved_bin = safe_resolve_under_root(problem_dir, bin_rel)
+            if resolved_bin is None:
+                details.append(
+                    {
+                        "name": wrong_name,
+                        "killed": False,
+                        "reason": f"wrong binary path escapes problem_dir: {bin_rel}",
+                    }
+                )
+                all_killed = False
+                continue
+            binary_path = Path(resolved_bin)
+
+            src_rel = manifest_wrong_paths.get(wrong_name, f"solutions/{wrong_name}.cpp")
+            resolved_src = safe_resolve_under_root(problem_dir, src_rel)
+            src_path = (
+                Path(resolved_src)
+                if (resolved_src is not None and not Path(resolved_src).is_symlink())
+                else None
+            )
+
+            grader_src: Path | None = None
+            grader_deps: list[Path] = []
+            if is_communication and manifest is not None and comm_mode == "grader_linked":
+                grader_rel = resolve_grader_source_existing(problem_dir, manifest)
+                if grader_rel:
+                    g_res = safe_resolve_under_root(problem_dir, grader_rel)
+                    if g_res and Path(g_res).is_file():
+                        grader_src = Path(g_res)
+                        grader_deps.append(grader_src)
+                hdr_rel = (
+                    manifest.protocol.header_file
+                    if (manifest.protocol and manifest.protocol.header_file)
+                    else "files/problem.h"
+                )
+                if hdr_rel:
+                    h_res = safe_resolve_under_root(problem_dir, hdr_rel)
+                    if h_res and Path(h_res).is_file():
+                        grader_deps.append(Path(h_res))
+
+            auto_compiled = False
+            needs_compile = False
+            if not use_system_temp and src_path is not None and src_path.is_file():
+                if not binary_path.exists() or platform_changed:
+                    needs_compile = True
+                else:
+                    try:
+                        bin_mtime = binary_path.stat().st_mtime
+                        if src_path.stat().st_mtime > bin_mtime + 1e-6:
+                            needs_compile = True
+                        elif any(dep.is_file() and dep.stat().st_mtime > bin_mtime + 1e-6 for dep in grader_deps):
+                            needs_compile = True
+                    except OSError:
+                        pass
+            if needs_compile and src_path is not None:
+                include_dirs = [TEMPLATES_DIR]
+                extra_sources: list[str] | None = None
+                if is_communication and manifest is not None and comm_mode == "grader_linked" and grader_src is not None:
+                    extra_sources = [str(grader_src)]
+                    files_dir = os.path.join(problem_dir, "files")
+                    if os.path.isdir(files_dir):
+                        include_dirs.append(files_dir)
+                comp_res = await compile_cpp(
+                    str(src_path),
+                    str(binary_path),
+                    include_dirs=include_dirs,
+                    extra_sources=extra_sources,
+                    compiler=effective_compiler,
+                )
+                if not comp_res.success:
+                    details.append(
+                        {
+                            "name": wrong_name,
+                            "killed": False,
+                            "auto_compiled": False,
+                            "reason": "auto-compile failed",
+                            "compile_error": (comp_res.stderr or "")[:500],
+                        }
+                    )
+                    all_killed = False
+                    continue
+                auto_compiled = True
+
             if not binary_path.exists():
                 details.append({"name": wrong_name, "killed": False, "reason": "binary not found"})
                 all_killed = False
@@ -1723,6 +2195,7 @@ class ProblemVerifyTestsTool(Tool):
                 ans_file = in_file.with_suffix(answer_ext)
                 tle_reason: str | None = None
                 fail_reason_detail: str | None = None
+                measured_mem_mb: float | None = None
                 if is_communication and manifest is not None:
                     input_data = in_file.read_text(encoding="utf-8")
                     answer_data = ans_file.read_text(encoding="utf-8") if ans_file.exists() else ""
@@ -1740,6 +2213,7 @@ class ProblemVerifyTestsTool(Tool):
                     measured_ms = float(
                         jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms
                     )
+                    measured_mem_mb = jres.memory_mb
                     if verdict == "FAIL":
                         fail_reason_detail = (jres.detail or jres.judge_stderr[:200]) or None
                 elif is_interactive:
@@ -1758,6 +2232,7 @@ class ProblemVerifyTestsTool(Tool):
                     measured_ms = float(
                         jres.cpu_time_ms if jres.cpu_time_ms is not None else jres.wall_time_ms
                     )
+                    measured_mem_mb = jres.memory_mb
                     if verdict == "FAIL":
                         fail_reason_detail = (jres.detail or jres.judge_stderr[:200]) or None
                 else:
@@ -1771,12 +2246,15 @@ class ProblemVerifyTestsTool(Tool):
                         memory_mb=mem_mb,
                     )
                     measured_ms = float(run.time_ms)
+                    measured_mem_mb = getattr(run, "memory_mb", None)
                     if run.timed_out:
                         verdict = "TLE"
                         tle_reason = "hard_timeout"
                     elif run.memory_limit_exceeded:
                         verdict = "MLE"
-                    elif run.error and run.return_code == -1:
+                    elif (run.error and run.return_code == -1) or (
+                        run.error and "Exec format error" in run.error
+                    ):
                         verdict = "FAIL"
                         fail_reason_detail = run.error
                     elif not run.success:
@@ -1834,6 +2312,8 @@ class ProblemVerifyTestsTool(Tool):
                     "verdict": verdict,
                     "time_ms": round(measured_ms, 2),
                 }
+                if isinstance(measured_mem_mb, int | float) and not isinstance(measured_mem_mb, bool):
+                    out_item["memory_mb"] = round(float(measured_mem_mb), 2)
                 if std_ms is not None:
                     out_item["std_time_ms"] = round(std_ms, 2)
                     out_item["ratio_to_std"] = ratio_to_std
@@ -1886,6 +2366,12 @@ class ProblemVerifyTestsTool(Tool):
                 killed = all(v == "AC" for v in per_test)
 
             wrong_times = [float(item["time_ms"]) for item in per_test_timings]
+            wrong_mems = [
+                float(item["memory_mb"])
+                for item in per_test_timings
+                if isinstance(item.get("memory_mb"), int | float)
+            ]
+            max_memory_mb = round(max(wrong_mems), 2) if wrong_mems else None
             std_matched = [
                 float(item["std_time_ms"])
                 for item in per_test_timings
@@ -1931,8 +2417,10 @@ class ProblemVerifyTestsTool(Tool):
                 "name": wrong_name,
                 "killed": killed,
                 "expected": exp,
+                "auto_compiled": auto_compiled,
                 "max_time_ms": max_time_ms,
                 "total_time_ms": total_time_ms,
+                "max_memory_mb": max_memory_mb,
                 "std_max_time_ms": std_max_time_ms,
                 "max_ratio_to_std": max_ratio_to_std,
                 "total_ratio_to_std": total_ratio_to_std,
@@ -1986,6 +2474,11 @@ class ProblemVerifyTestsTool(Tool):
             "passed": all_killed,
             "validated": True,
             "details": details,
+            **(
+                {"undeclared_wrong_solutions": list(undeclared_wrong_solutions)}
+                if undeclared_wrong_solutions
+                else {}
+            ),
             "tle_policy": {
                 "time_limit_ms": tl_ms,
                 "wrong_tle_kill_factor": effective_tle_factor,

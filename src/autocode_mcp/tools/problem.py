@@ -7,11 +7,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -43,7 +45,13 @@ from ..utils.compiler import (
     run_binary,
     run_binary_with_args,
 )
-from ..utils.exporters import ExportDataMode, export_hydro, export_qoj, map_tests_to_subtasks
+from ..utils.exporters import (
+    ExportDataMode,
+    export_hydro,
+    export_qoj,
+    map_tests_to_subtasks,
+    verify_exported_packages,
+)
 from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
 from ..utils.process import filter_alive_pids, is_pid_alive, terminate_pid_tree
@@ -91,6 +99,7 @@ class _CandidateOutcome:
 
 # 最终测试集中「极限类」占比下限：至少一半来自 generator type 3/4（extreme + TLE 压力）
 _LIMIT_STRATEGY_TYPES = frozenset({"3", "4"})
+_GENERATOR_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
 class ProblemCreateTool(Tool):
@@ -395,6 +404,7 @@ class ProblemGenerateTestsTool(Tool):
         oversample_ratio: float = 1.5,
         answer_ext: str = ".ans",
         resume: bool = False,
+        mode: Literal["replace", "append", "register_existing"] = "replace",
         hard_timeout_seconds: int | None = None,
         checkpoint_every: int = 10,
         concurrency_limit: int = 4,
@@ -404,7 +414,7 @@ class ProblemGenerateTestsTool(Tool):
         实现论文 Algorithm 2 的后处理步骤：
         1. 生成超额候选数据
         2. 去重（基于 MD5 signature）
-        3. Validator 过滤（自动检测 val.exe）
+        3. Validator 过滤（自动检测 files/val）
         4. 采样：至少一半为 type=3/4（极限 + TLE 压力），其余再平衡或按签名排序
         5. 输出最终 test_count 个
         """
@@ -432,21 +442,32 @@ class ProblemGenerateTestsTool(Tool):
             if t_max is not None and sum_n_max is not None and t_max > sum_n_max:
                 return ToolResult.fail("t_max cannot be greater than sum_n_max")
 
-        # 验证 test_configs 参数
+        if mode not in ("replace", "append", "register_existing"):
+            return ToolResult.fail(
+                f"invalid mode {mode!r}; expected one of: replace, append, register_existing"
+            )
+
+        # 验证 test_configs 参数（兼容 1..4 及自定义类型如 5/6/hack），浅拷贝避免就地修改调用方字典
         if test_configs:
-            for i, config in enumerate(test_configs):
+            normalized_configs: list[dict] = []
+            for i, raw_config in enumerate(test_configs):
+                config = dict(raw_config)
                 if "type" not in config:
                     return ToolResult.fail(f"test_configs[{i}]: 'type' is required")
-                if config["type"] not in ("1", "2", "3", "4"):
+                raw_type = config["type"]
+                if isinstance(raw_type, int) and not isinstance(raw_type, bool):
+                    raw_type = str(raw_type)
+                if not isinstance(raw_type, str) or not _GENERATOR_TYPE_RE.fullmatch(raw_type.strip()):
                     return ToolResult.fail(
-                        f"test_configs[{i}]: 'type' must be one of '1', '2', '3', '4'"
+                        f"test_configs[{i}]: 'type' must match ^[A-Za-z0-9][A-Za-z0-9_-]{{0,31}}$"
                     )
+                config["type"] = raw_type.strip()
 
                 for field in ["n_min", "n_max", "t_min", "t_max"]:
                     if field not in config:
                         return ToolResult.fail(f"test_configs[{i}]: '{field}' is required")
                     val = config[field]
-                    if not isinstance(val, int) or val < 0:
+                    if not isinstance(val, int) or isinstance(val, bool) or val < 0:
                         return ToolResult.fail(
                             f"test_configs[{i}]: '{field}' must be a non-negative integer"
                         )
@@ -459,6 +480,8 @@ class ProblemGenerateTestsTool(Tool):
                     return ToolResult.fail(
                         f"test_configs[{i}]: t_min cannot be greater than t_max"
                     )
+                normalized_configs.append(config)
+            test_configs = normalized_configs
 
         exe_ext = get_exe_extension()
         effective_sol_name = sol_name or "sol"
@@ -494,6 +517,15 @@ class ProblemGenerateTestsTool(Tool):
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
         is_interactive = manifest_is_interactive(manifest_model)
         is_communication = manifest_is_communication(manifest_model)
+
+        if mode == "register_existing":
+            assert tests_dir is not None
+            return self._register_existing_tests(
+                problem_dir=problem_dir,
+                tests_dir=tests_dir,
+                answer_ext=normalized_answer_ext,
+                manifest_model=manifest_model,
+            )
 
         if not os.path.exists(gen_exe):
             return ToolResult.fail("Generator not found. Run generator_build first.")
@@ -574,12 +606,28 @@ class ProblemGenerateTestsTool(Tool):
         active_pids: set[int] = set()
         generator_tle_extra_args_fallbacks = 0
 
+        assert tests_dir is not None
+        existing_manifest_entries: list[dict[str, Any]] = []
+        existing_max_index = 0
+        preserved_locked: list[dict[str, Any]] = []
+        if mode == "append":
+            os.makedirs(tests_dir, exist_ok=True)
+            existing_manifest_entries, existing_max_index, existing_sigs = (
+                self._snapshot_existing_tests(tests_dir, problem_dir, normalized_answer_ext)
+            )
+            if enable_dedup:
+                signatures.update(existing_sigs)
+        elif mode == "replace":
+            preserved_locked = self._snapshot_locked_and_hack_tests(
+                tests_dir, problem_dir, normalized_answer_ext
+            )
+
         if resume:
             restored = self._load_state(problem_dir)
             if restored:
                 seed = int(restored.get("next_seed", 1))
                 candidates = self._restore_candidates(restored.get("candidates", []))
-                signatures = {c.signature for c in candidates}
+                signatures.update(c.signature for c in candidates)
                 errors = [(int(e.get("seed", 0)), str(e.get("error", ""))) for e in restored.get("errors", []) if isinstance(e, dict)]
                 raw_active_pids = restored.get("active_pids", [])
                 if isinstance(raw_active_pids, list):
@@ -590,18 +638,13 @@ class ProblemGenerateTestsTool(Tool):
                 progress_snapshot["phase"] = str(restored.get("phase", "resumed"))
                 progress_snapshot["candidates_generated"] = len(candidates)
             else:
-                # resume=true 但状态文件不存在/损坏时，回退到 fresh run，
-                # 避免与旧测试文件混合导致 manifest 覆盖不完整。
-                clear_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
-                if clear_error:
-                    return clear_error
+                # resume=true 但状态文件不存在/损坏时，回退到 fresh run（延迟到写盘前再原子清理，避免超时/取消破坏 locked 用例）
+                os.makedirs(tests_dir, exist_ok=True)
                 progress_snapshot["phase"] = "resume_fallback_fresh"
                 progress_snapshot["resume_fallback"] = True
-        else:
-            # 创建/清空 tests 目录。只移除旧的测试数据，避免误删用户源码或其他文件。
-            clear_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
-            if clear_error:
-                return clear_error
+        elif mode == "replace":
+            # 确保目录存在；历史测试清理延后到最终写盘前执行，确保超时/取消时不会丢失人工 locked 测试点。
+            os.makedirs(tests_dir, exist_ok=True)
 
         while len(candidates) < candidate_count and seed < candidate_count * 10:
             elapsed = time.time() - start_ts
@@ -715,10 +758,11 @@ class ProblemGenerateTestsTool(Tool):
         else:
             final_tests = candidates
 
-        # 最终写盘前清理历史生成产物，防止 resume 场景残留旧编号样例。
-        clear_before_write_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
-        if clear_before_write_error:
-            return clear_before_write_error
+        if mode == "replace":
+            # 最终写盘前清理历史生成产物，防止 resume 场景残留旧编号样例。
+            clear_before_write_error = self._clear_generated_tests(tests_dir, normalized_answer_ext)
+            if clear_before_write_error:
+                return clear_before_write_error
 
         # 写入文件
         type_to_group: dict[str, str] = {
@@ -732,34 +776,115 @@ class ProblemGenerateTestsTool(Tool):
                 if plan_item.group and plan_item.group.strip():
                     type_to_group[str(plan_item.type)] = plan_item.group.strip()
 
-        generated_tests = []
-        test_manifest: list[dict[str, str | int]] = []
-        for i, candidate in enumerate(final_tests, 1):
+        generated_tests: list[int] = []
+        test_manifest: list[dict[str, Any]] = list(existing_manifest_entries) if mode == "append" else []
+        start_index = (existing_max_index + 1) if mode == "append" else 1
+        preserved_by_sig: dict[str, dict[str, Any]] = (
+            {str(p["signature"]): p for p in preserved_locked if p.get("signature")}
+            if mode == "replace"
+            else {}
+        )
+        preserved_locked_count = 0
+
+        for offset, candidate in enumerate(final_tests):
+            i = start_index + offset
             test_file = os.path.join(tests_dir, f"{i:02d}.in")
-            ans_file = os.path.join(tests_dir, f"{i:02d}{normalized_answer_ext}")
+            ans_name = f"{i:02d}{normalized_answer_ext}"
+            ans_file = os.path.join(tests_dir, ans_name)
 
             with open(test_file, "w", encoding="utf-8", newline="") as f:
                 f.write(candidate.input_data)
-            with open(ans_file, "w", encoding="utf-8", newline="") as f:
-                f.write(candidate.output_data)
+            write_ans = (not is_interactive) or bool(candidate.output_data.strip())
+            if write_ans:
+                with open(ans_file, "w", encoding="utf-8", newline="") as f:
+                    f.write(candidate.output_data)
 
             generated_tests.append(i)
-            test_manifest.append(
-                {
-                    "index": i,
-                    "in_file": f"{i:02d}.in",
-                    "ans_file": f"{i:02d}{normalized_answer_ext}",
-                    "type_param": candidate.type_param,
-                    "group": type_to_group.get(str(candidate.type_param), "default"),
-                    "signature": candidate.signature,
-                }
-            )
+            entry_m: dict[str, Any] = {
+                "index": i,
+                "in_file": f"{i:02d}.in",
+                "ans_file": ans_name if write_ans else "",
+                "type_param": candidate.type_param,
+                "group": type_to_group.get(str(candidate.type_param), "default"),
+                "signature": candidate.signature,
+            }
+            matched_locked = preserved_by_sig.get(candidate.signature)
+            if matched_locked is not None:
+                entry_m["locked"] = True
+                if matched_locked.get("purpose"):
+                    entry_m["purpose"] = str(matched_locked["purpose"])
+                preserved_locked_count += 1
+            test_manifest.append(entry_m)
+
+        # replace 模式下保留人工锁定（locked=true）与 tests/hack/ 用例，绝不静默覆盖
+        if mode == "replace" and preserved_locked:
+            next_idx = start_index + len(final_tests)
+            seen_written_sigs = {str(m.get("signature", "")) for m in test_manifest}
+            for item in preserved_locked:
+                sig = str(item.get("signature", ""))
+                if enable_dedup and sig and sig in seen_written_sigs:
+                    continue
+                idx = next_idx
+                next_idx += 1
+                ans_text = item.get("output_data")
+                if ans_text is None and not is_interactive:
+                    if is_communication and manifest_model is not None:
+                        tl_ms = float(manifest_model.time_limit_ms or timeout * 1000)
+                        mem_mb = float(manifest_model.memory_limit_mb or 256)
+                        comm_run = await CommunicationRunner.run_from_manifest(
+                            problem_dir=problem_dir,
+                            manifest=manifest_model,
+                            solution_exe=sol_exe,
+                            input_data=str(item["input_data"]),
+                            time_limit_ms=min(tl_ms * 1.5, float(timeout) * 1000.0),
+                            memory_limit_mb=mem_mb,
+                        )
+                        if not comm_run.accepted:
+                            return ToolResult.fail(
+                                f"Communication solution failed on preserved hack test ({item.get('purpose', idx)}): {comm_run.verdict} {comm_run.detail}"
+                            )
+                        ans_text = comm_run.judge_stdout or comm_run.stdout or ""
+                    elif os.path.isfile(sol_exe):
+                        sol_run = await run_binary(sol_exe, str(item["input_data"]), timeout=timeout)
+                        if not sol_run.success:
+                            return ToolResult.fail(
+                                f"Solution failed on preserved hack test ({item.get('purpose', idx)}): "
+                                f"{sol_run.error or sol_run.stderr[:300]}"
+                            )
+                        ans_text = sol_run.stdout
+                    else:
+                        return ToolResult.fail(
+                            f"Cannot compute answer for preserved hack test ({item.get('purpose', idx)}): sol binary missing"
+                        )
+                with open(os.path.join(tests_dir, f"{idx:02d}.in"), "w", encoding="utf-8", newline="") as f:
+                    f.write(str(item["input_data"]))
+                ans_name = f"{idx:02d}{normalized_answer_ext}"
+                if isinstance(ans_text, str) and ((not is_interactive) or bool(ans_text.strip())):
+                    with open(os.path.join(tests_dir, ans_name), "w", encoding="utf-8", newline="") as f:
+                        f.write(ans_text)
+                else:
+                    ans_name = ""
+                test_manifest.append(
+                    {
+                        "index": idx,
+                        "in_file": f"{idx:02d}.in",
+                        "ans_file": ans_name,
+                        "type_param": str(item.get("type_param", "4")),
+                        "group": str(item.get("group", "limit")),
+                        "purpose": str(item.get("purpose", "manual hack test")),
+                        "signature": sig,
+                        "locked": True,
+                    }
+                )
+                seen_written_sigs.add(sig)
+                preserved_locked_count += 1
 
         set_section(
             problem_dir,
             TEST_MANIFEST,
             {
                 "version": 1,
+                "mode": mode,
                 "answer_ext": normalized_answer_ext,
                 "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
                 "tests": test_manifest,
@@ -767,19 +892,25 @@ class ProblemGenerateTestsTool(Tool):
         )
         # 生成检查点已写入 runtime store，清空以免残留。
         set_section(problem_dir, GENERATE_CHECKPOINT, {})
-        # 统计信息
+        # 统计信息（覆盖完整 test_manifest，含 append 已有用例与 replace 保留的 locked 用例）
         type_counts: dict[str, int] = {}
-        for c in final_tests:
-            type_counts[c.type_param] = type_counts.get(c.type_param, 0) + 1
+        for m_item in test_manifest:
+            tp = str(m_item.get("type_param", "unknown"))
+            type_counts[tp] = type_counts.get(tp, 0) + 1
 
         type_names = {"1": "tiny", "2": "random", "3": "extreme", "4": "tle"}
         type_distribution = {
             type_names.get(k, k): v for k, v in type_counts.items()
         }
 
-        limit_in_final = sum(1 for c in final_tests if c.type_param in _LIMIT_STRATEGY_TYPES)
-        limit_minimum = (len(final_tests) + 1) // 2 if final_tests else 0
-        limit_quota_met = len(final_tests) == 0 or limit_in_final >= limit_minimum
+        limit_in_final = sum(
+            1
+            for m_item in test_manifest
+            if str(m_item.get("type_param")) in _LIMIT_STRATEGY_TYPES
+            or str(m_item.get("group", "")).lower() in {"limit", "extreme", "tle"}
+        )
+        limit_minimum = (len(test_manifest) + 1) // 2 if test_manifest else 0
+        limit_quota_met = len(test_manifest) == 0 or limit_in_final >= limit_minimum
 
         if len(generated_tests) == test_count:
             return ToolResult.ok(
@@ -796,6 +927,9 @@ class ProblemGenerateTestsTool(Tool):
                 sol_name=effective_sol_name,
                 answer_ext=normalized_answer_ext,
                 progress_snapshot=progress_snapshot,
+                mode=mode,
+                total_tests=len(test_manifest),
+                preserved_locked_count=preserved_locked_count,
                 generator_tle_extra_args_fallbacks=generator_tle_extra_args_fallbacks,
                 message=f"Generated {len(generated_tests)} test cases (from {len(candidates)} candidates)",
             )
@@ -831,7 +965,9 @@ class ProblemGenerateTestsTool(Tool):
             {
                 "tests_verified": False,
                 "verify_signals": {},
+                "verify_dataset_fingerprint": None,
                 "limit_case_ratio": None,
+                "packaged": False,
             },
         )
         set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
@@ -888,6 +1024,247 @@ class ProblemGenerateTestsTool(Tool):
             if os.path.isfile(path):
                 os.remove(path)
         return None
+
+    @staticmethod
+    def _test_file_sort_key(filename: str) -> tuple[int, int, str]:
+        stem = os.path.splitext(filename)[0]
+        return (0, int(stem), filename) if stem.isdigit() else (1, 0, filename)
+
+    @staticmethod
+    def _safe_plain_file(base_dir: str, root_dir: str, fname: str) -> str | None:
+        """Return resolved file path strictly inside ``base_dir`` and ``root_dir``, rejecting traversal/symlinks."""
+        if (
+            not isinstance(fname, str)
+            or not fname
+            or fname in {".", ".."}
+            or "/" in fname
+            or "\\" in fname
+            or (os.sep and os.sep in fname)
+            or (os.altsep and os.altsep in fname)
+            or ":" in fname
+            or "\x00" in fname
+        ):
+            return None
+        candidate = os.path.join(base_dir, fname)
+        if os.path.islink(candidate) or not os.path.isfile(candidate):
+            return None
+        try:
+            real_cand = Path(candidate).resolve()
+            real_base = Path(base_dir).resolve()
+            real_root = Path(root_dir).resolve()
+            real_cand.relative_to(real_base)
+            real_cand.relative_to(real_root)
+        except (OSError, ValueError):
+            return None
+        return str(real_cand)
+
+    def _snapshot_existing_tests(
+        self,
+        tests_dir: str,
+        problem_dir: str,
+        answer_ext: str,
+    ) -> tuple[list[dict[str, Any]], int, set[str]]:
+        """Snapshot existing tests/ entries and signatures for mode='append' / 'register_existing'."""
+        prev_manifest = get_section(problem_dir, TEST_MANIFEST)
+        prev_by_file: dict[str, dict[str, Any]] = {}
+        if isinstance(prev_manifest, dict) and isinstance(prev_manifest.get("tests"), list):
+            for item in prev_manifest["tests"]:
+                if isinstance(item, dict) and isinstance(item.get("in_file"), str):
+                    prev_by_file[item["in_file"]] = dict(item)
+
+        in_files = sorted(
+            (
+                f
+                for f in os.listdir(tests_dir)
+                if f.endswith(".in") and self._safe_plain_file(tests_dir, problem_dir, f) is not None
+            ),
+            key=self._test_file_sort_key,
+        )
+        max_numeric = max(
+            (int(os.path.splitext(f)[0]) for f in in_files if os.path.splitext(f)[0].isdigit()),
+            default=0,
+        )
+        next_non_numeric = max_numeric
+        entries: list[dict[str, Any]] = []
+        sigs: set[str] = set()
+        max_idx = max_numeric
+        for fname in in_files:
+            stem = os.path.splitext(fname)[0]
+            if stem.isdigit():
+                idx = int(stem)
+            else:
+                next_non_numeric += 1
+                idx = next_non_numeric
+            max_idx = max(max_idx, idx)
+            in_path = self._safe_plain_file(tests_dir, problem_dir, fname)
+            if in_path is None:
+                continue
+            try:
+                content = Path(in_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            sig = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()
+            sigs.add(sig)
+            ans_name = f"{stem}{answer_ext}"
+            resolved_ans = self._safe_plain_file(tests_dir, problem_dir, ans_name)
+            if resolved_ans is None and answer_ext != ".out":
+                alt_name = f"{stem}.out"
+                if self._safe_plain_file(tests_dir, problem_dir, alt_name) is not None:
+                    ans_name = alt_name
+                    resolved_ans = alt_name
+            prev = prev_by_file.get(fname, {})
+            entry = {
+                **prev,
+                "index": idx,
+                "in_file": fname,
+                "ans_file": ans_name if resolved_ans is not None else "",
+                "type_param": str(prev.get("type_param", "registered")),
+                "group": str(prev.get("group", "default")),
+                "signature": sig,
+            }
+            entries.append(entry)
+        return entries, max_idx, sigs
+
+    def _snapshot_locked_and_hack_tests(
+        self,
+        tests_dir: str,
+        problem_dir: str,
+        answer_ext: str,
+    ) -> list[dict[str, Any]]:
+        """Snapshot locked entries in TEST_MANIFEST and any tests/hack/*.in files before replace."""
+        preserved: list[dict[str, Any]] = []
+        seen_sigs: set[str] = set()
+        prev_manifest = get_section(problem_dir, TEST_MANIFEST)
+        if isinstance(prev_manifest, dict) and isinstance(prev_manifest.get("tests"), list) and os.path.isdir(tests_dir):
+            for item in prev_manifest["tests"]:
+                if not isinstance(item, dict) or not bool(item.get("locked", False)):
+                    continue
+                in_name = item.get("in_file")
+                if not isinstance(in_name, str) or not in_name:
+                    continue
+                in_path = self._safe_plain_file(tests_dir, problem_dir, in_name)
+                if in_path is None:
+                    continue
+                try:
+                    in_text = Path(in_path).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                sig = hashlib.md5(in_text.encode("utf-8", errors="replace")).hexdigest()
+                if sig in seen_sigs:
+                    continue
+                seen_sigs.add(sig)
+                raw_ans_name = item.get("ans_file")
+                ans_name = (
+                    raw_ans_name
+                    if isinstance(raw_ans_name, str) and raw_ans_name
+                    else f"{os.path.splitext(in_name)[0]}{answer_ext}"
+                )
+                ans_path = self._safe_plain_file(tests_dir, problem_dir, ans_name) if ans_name else None
+                ans_text = (
+                    Path(ans_path).read_text(encoding="utf-8", errors="replace")
+                    if ans_path is not None
+                    else None
+                )
+                preserved.append(
+                    {
+                        "input_data": in_text,
+                        "output_data": ans_text,
+                        "type_param": str(item.get("type_param", "4")),
+                        "group": str(item.get("group", "limit")),
+                        "purpose": str(item.get("purpose", "locked manual test")),
+                        "signature": sig,
+                    }
+                )
+
+        hack_dir = os.path.join(tests_dir, "hack")
+        hack_dir_safe = False
+        if os.path.isdir(hack_dir) and not os.path.islink(hack_dir):
+            try:
+                real_hack = Path(hack_dir).resolve()
+                real_hack.relative_to(Path(tests_dir).resolve())
+                real_hack.relative_to(Path(problem_dir).resolve())
+                hack_dir_safe = True
+            except (OSError, ValueError):
+                hack_dir_safe = False
+        if hack_dir_safe:
+            for fname in sorted(os.listdir(hack_dir), key=self._test_file_sort_key):
+                if not fname.endswith(".in"):
+                    continue
+                in_path = self._safe_plain_file(hack_dir, problem_dir, fname)
+                if in_path is None:
+                    continue
+                try:
+                    in_text = Path(in_path).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                sig = hashlib.md5(in_text.encode("utf-8", errors="replace")).hexdigest()
+                if sig in seen_sigs:
+                    continue
+                seen_sigs.add(sig)
+                stem = os.path.splitext(fname)[0]
+                ans_path = self._safe_plain_file(hack_dir, problem_dir, f"{stem}{answer_ext}")
+                ans_text = (
+                    Path(ans_path).read_text(encoding="utf-8", errors="replace")
+                    if ans_path is not None
+                    else None
+                )
+                preserved.append(
+                    {
+                        "input_data": in_text,
+                        "output_data": ans_text,
+                        "type_param": "4",
+                        "group": "limit",
+                        "purpose": f"manual hack ({fname})",
+                        "signature": sig,
+                    }
+                )
+        return preserved
+
+    def _register_existing_tests(
+        self,
+        *,
+        problem_dir: str,
+        tests_dir: str,
+        answer_ext: str,
+        manifest_model: AutoCodeManifest | None,
+    ) -> ToolResult:
+        """Index existing tests/*.in without deleting or regenerating any files."""
+        if not os.path.isdir(tests_dir):
+            return ToolResult.fail(f"tests directory not found: {tests_dir}")
+        entries, _, _ = self._snapshot_existing_tests(tests_dir, problem_dir, answer_ext)
+        if not entries:
+            return ToolResult.fail(f"no .in files found in {tests_dir}")
+        set_section(
+            problem_dir,
+            TEST_MANIFEST,
+            {
+                "version": 1,
+                "mode": "register_existing",
+                "answer_ext": answer_ext,
+                "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
+                "tests": entries,
+            },
+        )
+        set_section(problem_dir, GENERATE_CHECKPOINT, {})
+        indices = [int(e["index"]) for e in entries]
+        limit_in_final = sum(
+            1
+            for e in entries
+            if str(e.get("type_param")) in _LIMIT_STRATEGY_TYPES
+            or str(e.get("group", "")).lower() in {"limit", "extreme", "tle"}
+        )
+        limit_minimum = (len(entries) + 1) // 2
+        return ToolResult.ok(
+            tests_dir=tests_dir,
+            generated_tests=indices,
+            mode="register_existing",
+            total_tests=len(entries),
+            limit_case_count=limit_in_final,
+            limit_case_minimum_required=limit_minimum,
+            limit_case_quota_met=limit_in_final >= limit_minimum,
+            answer_ext=answer_ext,
+            message=f"Registered {len(entries)} existing test cases in {tests_dir}",
+        )
 
     def _normalize_answer_ext(self, answer_ext: str) -> tuple[str | None, ToolResult | None]:
         ext = normalize_answer_ext(answer_ext or ".ans")
@@ -1015,7 +1392,7 @@ class ProblemGenerateTestsTool(Tool):
                     ),
                     fallback_used=fallback_used,
                 )
-            output_data = jres.judge_stdout if jres.judge_stdout.strip() else "OK\n"
+            output_data = jres.judge_stdout if jres.judge_stdout.strip() else ""
         else:
             sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
             if not sol_result.success:
@@ -1277,14 +1654,16 @@ class ProblemGenerateTestsTool(Tool):
                 ("12", "3", str(max(1, n_per_test // 2)), str(n_per_test), str(t_limit), str(t_limit), [])
             )
 
-        # 7. TLE 诱导数据 (type=4)
-        if n_limit >= 100:
-            configs.extend(
-                [
-                    ("13", "4", str(n_limit), str(n_limit), "1", "1", ["mode=tle_dense"]),
-                    ("14", "4", str(int(n_limit * 0.9)), str(n_limit), "1", "1", ["mode=tle_chain"]),
-                ]
-            )
+        # 7. TLE 诱导数据 (type=4)，确保默认配置中极限/TLE 用例占比 >= 50%
+        configs.extend(
+            [
+                ("13", "4", str(n_limit), str(n_limit), "1", "1", ["mode=tle_dense"]),
+                ("14", "4", str(max(1, int(n_limit * 0.9))), str(n_limit), "1", "1", ["mode=tle_chain"]),
+                ("15", "4", str(max(1, int(n_limit * 0.95))), str(n_limit), "1", "1", ["mode=tle_adversarial"]),
+                ("16", "3", str(n_limit), str(n_limit), "1", str(t_limit), []),
+                ("17", "4", str(n_limit), str(n_limit), "1", str(t_limit), ["mode=tle_worst"]),
+            ]
+        )
 
         return self._sanitize_default_configs(configs, n_limit=n_limit, t_limit=t_limit)
 
@@ -1652,6 +2031,7 @@ class ProblemPackPolygonTool(Tool):
         problem_dir: str,
         time_limit: int | None = None,
         time_limit_ms: int | None = None,
+        allow_time_limit_override: bool = False,
         memory_limit: int | None = None,
         export_formats: list[Literal["polygon", "hydro", "qoj"]] | None = None,
         export_data_mode: ExportDataMode = "hardlink",
@@ -1917,19 +2297,35 @@ class ProblemPackPolygonTool(Tool):
         if time_limit_ms is not None:
             effective_time_limit_ms = time_limit_ms
         elif time_limit is not None:
-            if isinstance(time_limit, bool) or not isinstance(time_limit, int) or time_limit <= 0:
-                return ToolResult.fail("time_limit must be a positive integer (seconds)")
-            if time_limit >= 100:
+            if not allow_time_limit_override and time_limit > 60:
                 return ToolResult.fail(
-                    f"Suspicious time_limit={time_limit} seconds (>= 100s). "
+                    f"Suspicious time_limit={time_limit} seconds (> 60s). "
                     "time_limit expects SECONDS (e.g. 1 or 2); "
-                    f"if you meant {time_limit}ms, pass time_limit_ms={time_limit} instead."
+                    f"if you meant {time_limit}ms, pass time_limit_ms={time_limit} instead "
+                    "(or set allow_time_limit_override=true)."
                 )
             effective_time_limit_ms = time_limit * 1000
         else:
             effective_time_limit_ms = int(manifest_model.time_limit_ms)
             if effective_time_limit_ms <= 0:
                 return ToolResult.fail("manifest.time_limit_ms must be positive")
+
+        if not allow_time_limit_override:
+            if effective_time_limit_ms > 60_000:
+                return ToolResult.fail(
+                    f"Suspicious effective time limit {effective_time_limit_ms}ms (> 60000ms). "
+                    "Check units (time_limit is seconds, time_limit_ms is milliseconds) "
+                    "or set allow_time_limit_override=true."
+                )
+            manifest_tl_ms = int(manifest_model.time_limit_ms) if manifest_model.time_limit_ms > 0 else 0
+            if (time_limit is not None or time_limit_ms is not None) and manifest_tl_ms > 0:
+                ratio = effective_time_limit_ms / float(manifest_tl_ms)
+                if ratio > 10.0 or ratio < 0.1:
+                    return ToolResult.fail(
+                        f"Requested time limit ({effective_time_limit_ms}ms) deviates >10x from "
+                        f"manifest.time_limit_ms ({manifest_tl_ms}ms). "
+                        "Check seconds vs milliseconds (use time_limit_ms) or set allow_time_limit_override=true."
+                    )
         if memory_limit is not None:
             if isinstance(memory_limit, bool) or not isinstance(memory_limit, int) or memory_limit <= 0:
                 return ToolResult.fail("memory_limit must be a positive integer (MB)")
@@ -2018,6 +2414,43 @@ class ProblemPackPolygonTool(Tool):
             except (ValueError, OSError) as exc:
                 return ToolResult.fail(f"QOJ export failed: {exc}")
 
+        # Scan for undeclared solutions/wrong_*.cpp on disk to prevent manifest/problem.xml desync
+        pack_warnings: list[str] = []
+        declared_sol_paths = {PurePosixPath(s.path.replace("\\", "/")).as_posix().lstrip("./") for s in manifest_model.solutions}
+        sols_dir = os.path.join(problem_dir, "solutions")
+        if os.path.isdir(sols_dir):
+            undeclared_wrongs = sorted(
+                f"solutions/{fname}"
+                for fname in os.listdir(sols_dir)
+                if fname.startswith("wrong_")
+                and fname.endswith(".cpp")
+                and f"solutions/{fname}" not in declared_sol_paths
+            )
+            if undeclared_wrongs:
+                pack_warnings.append(
+                    f"Undeclared wrong solutions on disk not listed in manifest.json/problem.xml: {undeclared_wrongs}"
+                )
+
+        # Post-export read-back verification (TL, ML, test count, file existence, no leaked internal tags)
+        export_verification = verify_exported_packages(
+            problem_dir,
+            formats=formats,
+            expected_time_limit_ms=effective_time_limit_ms,
+            expected_memory_limit_mb=memory_limit_mb,
+            expected_test_count=actual_test_count,
+            exports_meta=exports,
+        )
+        if not export_verification["passed"]:
+            return ToolResult.fail(
+                "Exported package self-verification failed: " + "; ".join(export_verification["errors"]),
+                results=results,
+                exports=exports,
+                export_formats=formats,
+                export_data_mode=export_data_mode,
+                export_verification=export_verification,
+                pack_warnings=pack_warnings,
+            )
+
         msg = (
             "Packed to Polygon format"
             if formats == ["polygon"]
@@ -2028,5 +2461,10 @@ class ProblemPackPolygonTool(Tool):
             exports=exports,
             export_formats=formats,
             export_data_mode=export_data_mode,
+            time_limit_ms=effective_time_limit_ms,
+            effective_time_limit_ms=effective_time_limit_ms,
+            memory_limit_mb=memory_limit_mb,
+            export_verification=export_verification,
+            pack_warnings=pack_warnings,
             message=msg,
         )

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import platform
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +12,14 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from ..runtime_store import AUDIT, TEST_MANIFEST, WORKFLOW, get_section, set_section
+from ..runtime_store import (
+    AUDIT,
+    TEST_MANIFEST,
+    WORKFLOW,
+    get_section,
+    set_section,
+    update_section,
+)
 from ..utils.checker_judge import checker_exe_path
 from ..utils.communication_runner import (
     is_safe_stem,
@@ -20,9 +30,12 @@ from ..utils.communication_runner import (
     resolve_participant_binaries,
     safe_resolve_under_root,
 )
+from ..utils.exporters import verify_exported_packages
 from ..utils.platform import get_exe_extension
 from ..workflow import (
     check_gates,
+    current_platform,
+    inspect_workspace_state,
     load_manifest,
     manifest_is_communication,
     manifest_is_interactive,
@@ -48,6 +61,335 @@ from .complexity import (
 )
 from .schemas import ProblemAuditInput
 from .test_verify import ProblemVerifyTestsTool
+
+_MAX_INT_LITERAL_DIGITS = 30
+_MAX_EXPR_ABS = 10**30
+
+
+def _strip_outer_parens(expr: str) -> str:
+    """Strip outer parentheses only when the opening '(' matches the final ')'."""
+    s = expr.strip()
+    while len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        wraps_all = True
+        for idx, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and idx < len(s) - 1:
+                    wraps_all = False
+                    break
+        if wraps_all and depth == 0:
+            s = s[1:-1].strip()
+        else:
+            break
+    return s
+
+
+def _safe_int_token(token: str) -> int | None:
+    stripped = token.strip()
+    digits = stripped[1:] if stripped.startswith(("+", "-")) else stripped
+    if not digits or len(digits) > _MAX_INT_LITERAL_DIGITS or not digits.isdigit():
+        return None
+    try:
+        return int(stripped)
+    except ValueError:
+        return None
+
+
+def _split_top_level_op(expr: str, ops: str) -> tuple[str, str, str] | None:
+    """Find the rightmost top-level binary operator in ``ops`` (outside parens, skipping unary/sci)."""
+    depth = 0
+    for idx in range(len(expr) - 1, -1, -1):
+        ch = expr[idx]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            depth -= 1
+        elif depth == 0 and ch in ops:
+            left = expr[:idx].rstrip()
+            right = expr[idx + 1 :].lstrip()
+            if not left or not right:
+                continue
+            # Ignore exponent sign in scientific notation (e.g. 1e+9, 1E-3)
+            if ch in "+-" and left[-1] in "eE" and len(left) >= 2 and (left[-2].isdigit() or left[-2] == "."):
+                continue
+            # Ignore unary sign right after another operator
+            if ch in "+-" and left[-1] in "+-*/<(&|,":
+                continue
+            return left, ch, right
+    return None
+
+
+def _parse_cpp_int_expr(expr: str, constants: dict[str, int], *, _depth: int = 0) -> int | None:
+    """Safely parse common C++ integer constant expressions without eval()."""
+    if _depth > 8:
+        return None
+    s = _strip_outer_parens(expr)
+    if not s or len(s) > 128:
+        return None
+    if s in constants:
+        return constants[s]
+    # Handle C++ digit separators (e.g. 1'000'000'000LL)
+    cleaned = s.replace("'", "")
+    # Top-level binary + / - (lowest precedence among supported ops)
+    add_split = _split_top_level_op(cleaned, "+-")
+    if add_split is not None:
+        left_s, op, right_s = add_split
+        left = _parse_cpp_int_expr(left_s, constants, _depth=_depth + 1)
+        right = _parse_cpp_int_expr(right_s, constants, _depth=_depth + 1)
+        if left is not None and right is not None:
+            res = left + right if op == "+" else left - right
+            return res if abs(res) <= _MAX_EXPR_ABS else None
+    # Top-level binary *
+    mul_split = _split_top_level_op(cleaned, "*")
+    if mul_split is not None:
+        left_s, _, right_s = mul_split
+        left = _parse_cpp_int_expr(left_s, constants, _depth=_depth + 1)
+        right = _parse_cpp_int_expr(right_s, constants, _depth=_depth + 1)
+        if left is not None and right is not None and abs(left) <= 10**18 and abs(right) <= 10**18:
+            res = left * right
+            return res if abs(res) <= _MAX_EXPR_ABS else None
+    # Bit shift: base << shift
+    m_shift = re.fullmatch(r"(-?\d+)[uUlL]*\s*<<\s*(\d+)[uUlL]*", cleaned)
+    if m_shift:
+        base = _safe_int_token(m_shift.group(1))
+        shift = _safe_int_token(m_shift.group(2))
+        if base is not None and shift is not None and 0 <= shift <= 62 and abs(base) <= (1 << 62):
+            return base << shift
+        return None
+    # Scientific notation: 1e9, 2.5e5
+    m_sci = re.fullmatch(r"(-?\d{1,12}(?:\.\d{1,12})?)[eE]\+?(\d{1,2})", cleaned)
+    if m_sci:
+        exp = int(m_sci.group(2))
+        if exp <= 18:
+            try:
+                val = float(m_sci.group(1)) * (10**exp)
+            except (ValueError, OverflowError):
+                return None
+            if math.isfinite(val) and abs(val - round(val)) < 1e-6:
+                return int(round(val))
+        return None
+    m_int = re.fullmatch(r"(-?\d+)[uUlL]*", cleaned)
+    if m_int:
+        return _safe_int_token(m_int.group(1))
+    return None
+
+
+def _extract_statement_numeric_bounds(content: str) -> set[int]:
+    """Extract numeric bounds from Markdown/LaTeX statements (10^k, a\\times 10^k, 2^k, 1e9, commas, ints)."""
+    bounds: set[int] = set()
+    # Strip fenced code blocks so sample inputs/outputs do not mask missing statement bounds
+    text = re.sub(r"(?s)```.*?```", " ", content)
+    text = re.sub(r"(?s)~~~.*?~~~", " ", text)
+    # Normalize LaTeX spacing commands (e.g. 1\,000\,000 -> 1000000, 2\,\times\,10^5 -> 2 \times 10^5)
+    text = re.sub(r"(?<=\d)\\[,;:](?=\d)", "", text)
+    text = re.sub(r"\\[,;:]", " ", text)
+
+    # 1. a \times 10^{k} or a \cdot 10^k or a * 10^{k} (optionally ± c)
+    for m in re.finditer(
+        r"(\d{1,12}(?:\.\d{1,12})?)\s*(?:\\times|\\cdot|\*)\s*10\s*\^\s*\{?\s*(\d{1,2})\s*\}?(?:\s*([+-])\s*(\d{1,6}))?",
+        text,
+    ):
+        exp = int(m.group(2))
+        if exp <= 18:
+            try:
+                val = float(m.group(1)) * (10**exp)
+            except (ValueError, OverflowError):
+                continue
+            if math.isfinite(val) and abs(val - round(val)) < 1e-6:
+                base_int = int(round(val))
+                bounds.add(base_int)
+                if m.group(3) and m.group(4):
+                    delta = int(m.group(4))
+                    bounds.add(base_int + delta if m.group(3) == "+" else base_int - delta)
+    # 2. Bare 10^{k} or 10^k (optionally ± c, e.g. 10^9 + 7 or 10^9 - 1)
+    for m in re.finditer(
+        r"(?<![\d.])10\s*\^\s*\{?\s*(\d{1,2})\s*\}?(?:\s*([+-])\s*(\d{1,6}))?",
+        text,
+    ):
+        exp = int(m.group(1))
+        if exp <= 18:
+            base = 10**exp
+            bounds.add(base)
+            if m.group(2) and m.group(3):
+                delta = int(m.group(3))
+                bounds.add(base + delta if m.group(2) == "+" else base - delta)
+    # 3. Powers of 2: 2^{k} or 2^k (optionally ± c)
+    for m in re.finditer(
+        r"(?<![\d.])2\s*\^\s*\{?\s*(\d{1,2})\s*\}?(?:\s*([+-])\s*(\d{1,6}))?",
+        text,
+    ):
+        exp = int(m.group(1))
+        if exp <= 62:
+            base = 1 << exp
+            bounds.add(base)
+            if m.group(2) and m.group(3):
+                delta = int(m.group(3))
+                bounds.add(base + delta if m.group(2) == "+" else base - delta)
+    # 4. Scientific notation: 1e5, 2e5, 1e9
+    for m in re.finditer(
+        r"(?<![A-Za-z0-9_])(\d{1,12}(?:\.\d{1,12})?)[eE]\+?(\d{1,2})(?![A-Za-z0-9_])",
+        text,
+    ):
+        exp = int(m.group(2))
+        if exp <= 18:
+            try:
+                val = float(m.group(1)) * (10**exp)
+            except (ValueError, OverflowError):
+                continue
+            if math.isfinite(val) and abs(val - round(val)) < 1e-6:
+                bounds.add(int(round(val)))
+    # 5. Comma-separated numbers: 200,000 / 1,000,000,000
+    for m in re.finditer(r"(?<![\d,])\d{1,3}(?:,\d{3}){1,6}(?!\d)", text):
+        try:
+            bounds.add(int(m.group(0).replace(",", "")))
+        except ValueError:
+            pass
+    # 6. Plain integers
+    for m in re.finditer(r"(?<![A-Za-z0-9_])(\d{1,19})(?![A-Za-z0-9_])", text):
+        try:
+            bounds.add(int(m.group(1)))
+        except ValueError:
+            pass
+    return bounds
+
+
+def _split_call_args(text: str, open_paren_idx: int) -> list[str] | None:
+    """Split a parenthesized C++ call argument list starting at ``open_paren_idx``."""
+    if open_paren_idx >= len(text) or text[open_paren_idx] != "(":
+        return None
+    args: list[str] = []
+    cur: list[str] = []
+    depth = 0
+    in_str = False
+    in_char = False
+    i = open_paren_idx + 1
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < n:
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if in_char:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < n:
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                in_char = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            cur.append(ch)
+        elif ch == "'":
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i + 1 < n else ""
+            if prev.isdigit() and nxt.isdigit():
+                cur.append(ch)
+            else:
+                in_char = True
+                cur.append(ch)
+        elif ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            if depth == 0:
+                args.append("".join(cur).strip())
+                return args
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    return None
+
+
+def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
+    """Extract constant upper/lower bounds from testlib inf.readInt/readLong calls in val.cpp."""
+    if not val_path.is_file():
+        return []
+    try:
+        src = val_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    # Strip // line comments and /* */ block comments
+    no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    no_comments = re.sub(r"//[^\n]*", "", no_comments)
+
+    constants: dict[str, int] = {}
+    for m in re.finditer(
+        r"(?:const|constexpr)\s+(?:unsigned\s+|signed\s+)?(?:long\s+long|long|int|int64_t|int32_t|ll)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);",
+        no_comments,
+    ):
+        parsed = _parse_cpp_int_expr(m.group(2), constants)
+        if parsed is not None:
+            constants[m.group(1)] = parsed
+    for m in re.finditer(r"#\s*define\s+([A-Za-z_]\w*)\s+([^\n]+)", no_comments):
+        parsed = _parse_cpp_int_expr(m.group(2), constants)
+        if parsed is not None:
+            constants[m.group(1)] = parsed
+
+    extracted: list[dict[str, Any]] = []
+    for m in re.finditer(r"\binf\.read(?:Int|Long|UnsignedLong)\s*\(", no_comments):
+        args = _split_call_args(no_comments, m.end() - 1)
+        if not args or len(args) < 2:
+            continue
+        lo = _parse_cpp_int_expr(args[0], constants)
+        hi = _parse_cpp_int_expr(args[1], constants)
+        var: str | None = None
+        if len(args) >= 3:
+            m_var = re.fullmatch(r'"([^"]*)"', args[2].strip())
+            if m_var:
+                var = m_var.group(1).strip() or None
+        if lo is not None or hi is not None:
+            extracted.append({"var": var, "min": lo, "max": hi})
+    return extracted
+
+
+def _collect_constraint_entry_ints(value: Any) -> list[int]:
+    """Extract numeric bounds declared in a single manifest.constraints entry."""
+    nums: list[int] = []
+    if isinstance(value, bool):
+        return nums
+    if isinstance(value, int):
+        nums.append(value)
+    elif isinstance(value, float):
+        if abs(value - round(value)) < 1e-6:
+            nums.append(int(round(value)))
+    elif isinstance(value, str):
+        nums.extend(sorted(_extract_statement_numeric_bounds(value)))
+    elif isinstance(value, dict):
+        for k in ("min", "max", "lower", "upper"):
+            if k in value:
+                nums.extend(_collect_constraint_entry_ints(value[k]))
+    elif isinstance(value, list):
+        for item in value:
+            nums.extend(_collect_constraint_entry_ints(item))
+    return nums
+
+
+def _rel_posix(problem_path: Path, raw: str | Path | None) -> str | None:
+    if raw is None:
+        return None
+    p = Path(raw)
+    try:
+        return p.resolve().relative_to(problem_path.resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
 
 
 class ProblemAuditTool(Tool):
@@ -271,6 +613,72 @@ class ProblemAuditTool(Tool):
             )
 
         warnings.extend(self._host_performance_bias_warnings(manifest, quality_signals))
+
+        if not standalone:
+            ws_state = inspect_workspace_state(str(problem_path))
+            if ws_state.get("platform_mismatch") or ws_state.get("stale_reasons"):
+                drift_reason = (
+                    "; ".join(ws_state.get("stale_reasons", []))
+                    or "workspace build state drift detected"
+                )
+                if ws_state.get("platform_mismatch") and mode == "full":
+                    blocking.append({"gate": "state_drift", "reason": drift_reason})
+                else:
+                    warnings.append({"gate": "state_drift", "reason": drift_reason})
+
+        # Verify exported packages (Polygon / Hydro / QOJ) if present on disk
+        has_exports = (
+            (problem_path / "problem.xml").is_file()
+            or (problem_path / "exports" / "hydro").exists()
+            or (problem_path / "exports" / "qoj").exists()
+            or (problem_path / "exports" / "hydro.zip").is_file()
+            or (problem_path / "exports" / "qoj.zip").is_file()
+        )
+        if has_exports:
+            tests_dir_for_exp = self._resolve_tests_dir(problem_path, standalone=standalone)
+            exp_test_count = (
+                len(list(tests_dir_for_exp.glob("*.in")))
+                if tests_dir_for_exp is not None
+                else None
+            )
+            raw_packaged_tl = workflow_state.get("packaged_time_limit_ms")
+            packaged_tl = (
+                int(raw_packaged_tl)
+                if isinstance(raw_packaged_tl, int)
+                and not isinstance(raw_packaged_tl, bool)
+                and raw_packaged_tl > 0
+                else None
+            )
+            expected_export_tl = packaged_tl if packaged_tl is not None else manifest.time_limit_ms
+            if packaged_tl is not None and packaged_tl != manifest.time_limit_ms:
+                warnings.append(
+                    {
+                        "gate": "exported_packages",
+                        "reason": (
+                            f"exported package uses overridden time_limit_ms={packaged_tl} "
+                            f"(manifest.time_limit_ms={manifest.time_limit_ms})"
+                        ),
+                    }
+                )
+            pkg_check = verify_exported_packages(
+                str(problem_path),
+                expected_time_limit_ms=expected_export_tl,
+                expected_memory_limit_mb=manifest.memory_limit_mb,
+                expected_test_count=exp_test_count or None,
+            )
+            quality_signals["exported_packages"] = {
+                "executed": True,
+                "passed": bool(pkg_check.get("passed")),
+                "evidence": pkg_check,
+            }
+            for w_msg in pkg_check.get("warnings", []):
+                warnings.append({"gate": "exported_packages", "reason": str(w_msg)})
+            if not pkg_check.get("passed"):
+                err_reason = "; ".join(str(e) for e in pkg_check.get("errors", [])) or "exported package verification failed"
+                if mode == "full":
+                    blocking.append({"gate": "exported_packages", "reason": err_reason})
+                else:
+                    warnings.append({"gate": "exported_packages", "reason": err_reason})
 
         decision = "go" if not blocking else "no_go"
         report = {
@@ -973,7 +1381,15 @@ class ProblemAuditTool(Tool):
         comm_needs_communicator = is_communication and (
             manifest.protocol is None or manifest.protocol.mode != "grader_linked"
         )
-        if not uses_protocol and manifest.audit_gates.require_validator_self_test:
+        if uses_protocol:
+            quality_signals["validator_self_test"] = {
+                "applicable": False,
+                "status": "not_applicable",
+                "executed": False,
+                "passed": True,
+                "evidence": {"reason": "validator self-test is not applicable for protocol problems"},
+            }
+        elif manifest.audit_gates.require_validator_self_test:
             signal = quality_signals.get("validator_self_test", {})
             if not self._signal_satisfied(signal):
                 tests_dir = problem_path / "tests"
@@ -1000,7 +1416,15 @@ class ProblemAuditTool(Tool):
                         }
                     )
 
-        if manifest_uses_testlib_checker(manifest) and manifest.audit_gates.require_checker_self_test:
+        if not manifest_uses_testlib_checker(manifest):
+            quality_signals["checker_self_test"] = {
+                "applicable": False,
+                "status": "not_applicable",
+                "executed": False,
+                "passed": True,
+                "evidence": {"reason": "checker self-test is not applicable when stress_comparison != checker"},
+            }
+        elif manifest.audit_gates.require_checker_self_test:
             raw = await verifier._check_checker_self_test(str(problem_path), 60)
             signal = self._wrap_verify_signal(raw)
             quality_signals["checker_self_test"] = signal
@@ -1017,7 +1441,15 @@ class ProblemAuditTool(Tool):
                     }
                 )
 
-        if (is_interactive or comm_needs_communicator) and manifest.audit_gates.require_interactor_self_test:
+        if not (is_interactive or comm_needs_communicator):
+            quality_signals["interactor_self_test"] = {
+                "applicable": False,
+                "status": "not_applicable",
+                "executed": False,
+                "passed": True,
+                "evidence": {"reason": "interactor self-test is not applicable for non-interactor problems"},
+            }
+        elif manifest.audit_gates.require_interactor_self_test:
             raw = await verifier._check_interactor_self_test(
                 str(problem_path), 60, manifest=manifest
             )
@@ -1040,21 +1472,106 @@ class ProblemAuditTool(Tool):
         self, problem_path: Path, manifest: AutoCodeManifest
     ) -> dict[str, Any]:
         sol_source = self._solution_source(problem_path, "sol")
-        claimed_complexity = None
+        claimed_complexity: str | None = None
+        if (
+            manifest.empirical_complexity is not None
+            and isinstance(manifest.empirical_complexity.claimed_complexity, str)
+            and manifest.empirical_complexity.claimed_complexity.strip()
+        ):
+            claimed_complexity = manifest.empirical_complexity.claimed_complexity.strip()
+
+        workflow_state = get_section(problem_path, WORKFLOW) or {}
+        if not claimed_complexity and isinstance(workflow_state, dict):
+            saved_claimed = workflow_state.get("std_claimed_complexity")
+            if isinstance(saved_claimed, str) and saved_claimed.strip():
+                claimed_complexity = saved_claimed.strip()
+
+        sol_bytes: bytes | None = None
         if sol_source and sol_source.is_file():
-            code = sol_source.read_text(encoding="utf-8", errors="replace")
-            claimed_complexity = extract_claimed_complexity(code)
-        if not claimed_complexity:
-            workflow_state = get_section(problem_path, WORKFLOW) or {}
-            if isinstance(workflow_state, dict):
-                saved_claimed = workflow_state.get("std_claimed_complexity")
-                if isinstance(saved_claimed, str) and saved_claimed.strip():
-                    claimed_complexity = saved_claimed.strip()
+            try:
+                sol_bytes = sol_source.read_bytes()
+            except OSError:
+                sol_bytes = None
+            if not claimed_complexity and sol_bytes is not None:
+                code = sol_bytes.decode("utf-8", errors="replace")
+                claimed_complexity = extract_claimed_complexity(code)
 
         constraints: dict[str, Any] = {"time_limit_ms": float(manifest.time_limit_ms)}
         n_max = extract_n_max_from_constraints(manifest.constraints)
         if n_max is not None:
             constraints["n_max"] = n_max
+
+        # Deterministic cache key: (sol/gen/protocol hashes, compiler, empirical_cfg, claimed_complexity, platform)
+        cache_key: str | None = None
+        gen_path = self._safe_file(problem_path, "files/gen.cpp")
+        if sol_bytes is not None and gen_path is not None:
+            try:
+                gen_bytes = gen_path.read_bytes()
+                proto_rels: list[str] = [
+                    "files/grader.cpp",
+                    "files/problem.h",
+                    "files/interactor.cpp",
+                    "files/communicator.cpp",
+                ]
+                if manifest.protocol is not None:
+                    for extra_rel in (
+                        manifest.protocol.grader_file,
+                        manifest.protocol.header_file,
+                        manifest.protocol.communicator_file,
+                    ):
+                        if extra_rel and extra_rel not in proto_rels:
+                            proto_rels.append(extra_rel)
+                proto_hashes: dict[str, str] = {}
+                for rel in proto_rels:
+                    pf = self._safe_file(problem_path, rel)
+                    if pf is not None:
+                        proto_hashes[rel] = hashlib.sha256(pf.read_bytes()).hexdigest()
+                cfg_json = json.dumps(
+                    {
+                        "emp": manifest.empirical_complexity.model_dump(mode="json")
+                        if manifest.empirical_complexity
+                        else {},
+                        "constraints": constraints,
+                        "claimed": claimed_complexity,
+                        "compiler": manifest.compiler,
+                        "protocol_hashes": proto_hashes,
+                        "platform": current_platform(),
+                    },
+                    sort_keys=True,
+                )
+                cache_key = hashlib.sha256(
+                    hashlib.sha256(sol_bytes).hexdigest().encode()
+                    + hashlib.sha256(gen_bytes).hexdigest().encode()
+                    + cfg_json.encode()
+                ).hexdigest()
+            except OSError:
+                cache_key = None
+
+        exe_ext = get_exe_extension()
+        gen_bin_ready = self._safe_file(problem_path, f"files/gen{exe_ext}") is not None
+        sol_bin_ready = self._safe_file(problem_path, f"solutions/sol{exe_ext}") is not None
+        if (
+            not sol_bin_ready
+            and manifest_is_communication(manifest)
+            and manifest.protocol is not None
+            and manifest.protocol.participant_solutions
+        ):
+            parts = resolve_participant_binaries(str(problem_path), manifest, None, exe_ext)
+            sol_bin_ready = bool(parts) and all(Path(p).is_file() for p in parts)
+
+        if cache_key and gen_bin_ready and sol_bin_ready and isinstance(workflow_state, dict):
+            emp_cache = workflow_state.get("empirical_cache")
+            if (
+                isinstance(emp_cache, dict)
+                and emp_cache.get("key") == cache_key
+                and isinstance(emp_cache.get("signal"), dict)
+                and bool(emp_cache["signal"].get("passed"))
+            ):
+                cached_sig = dict(emp_cache["signal"])
+                ev = cached_sig.get("evidence")
+                if isinstance(ev, dict):
+                    cached_sig["evidence"] = {**ev, "cached": True}
+                return cached_sig
 
         res = await run_empirical_verification(
             str(problem_path),
@@ -1071,11 +1588,18 @@ class ProblemAuditTool(Tool):
             }
 
         passed = bool(res.get("passed"))
-        return {
+        signal = {
             "executed": True,
             "passed": passed,
             "evidence": res,
         }
+        if cache_key and passed:
+            update_section(
+                str(problem_path),
+                WORKFLOW,
+                {"empirical_cache": {"key": cache_key, "signal": signal}},
+            )
+        return signal
 
     def _statement_consistency(
         self, problem_path: Path, manifest: AutoCodeManifest, tests_manifest: dict
@@ -1085,24 +1609,52 @@ class ProblemAuditTool(Tool):
         if statement_path is None:
             return {"passed": False, "needs_human_review": False, "message": "statement file missing"}
         content = statement_path.read_text(encoding="utf-8", errors="replace")
-        missing_terms = []
-        for key in manifest.constraints:
-            if key and key not in content:
+        stmt_bounds = _extract_statement_numeric_bounds(content)
+
+        missing_terms: list[str] = []
+        for key, val in manifest.constraints.items():
+            if not key:
+                continue
+            entry_ints = _collect_constraint_entry_ints(val)
+            if entry_ints:
+                upper = max(entry_ints)
+                if upper not in stmt_bounds:
+                    missing_terms.append(f"{key} (expected bound {upper})")
+            elif key not in content:
                 missing_terms.append(key)
+
+        val_path = self._safe_file(problem_path, "files/val.cpp")
+        val_bounds = _extract_validator_bounds(val_path) if val_path is not None else []
+        manifest_nums = set(extract_constraint_numbers(manifest.constraints))
+        validator_bound_mismatches: list[dict[str, Any]] = []
+        for item in val_bounds:
+            hi = item.get("max")
+            if isinstance(hi, int) and hi >= 10:
+                if (
+                    hi not in stmt_bounds
+                    and (hi + 1) not in stmt_bounds
+                    and (not manifest_nums or (hi not in manifest_nums and (hi + 1) not in manifest_nums))
+                ):
+                    validator_bound_mismatches.append(item)
+
         has_samples = "样例" in content or "sample" in content.lower()
         has_tests_manifest = bool(tests_manifest.get("tests"))
         tutorial_ready = tutorial_path is not None and len(
             tutorial_path.read_text(encoding="utf-8", errors="replace").strip()
         ) > 80
         passed = has_samples and tutorial_ready
+        needs_human_review = bool(missing_terms or validator_bound_mismatches or not passed)
         return {
             "passed": passed,
-            "needs_human_review": True,
+            "needs_human_review": needs_human_review,
             "message": "" if passed else "statement samples or tutorial evidence is incomplete",
             "has_samples": has_samples,
             "tutorial_ready": tutorial_ready,
             "tests_manifest_present": has_tests_manifest,
             "constraint_terms_missing_from_statement": missing_terms,
+            "statement_numeric_bounds": sorted(stmt_bounds)[:50],
+            "validator_bounds_checked": len(val_bounds),
+            "validator_bound_mismatches": validator_bound_mismatches,
         }
 
     def _difficulty_signals(
@@ -1226,7 +1778,7 @@ class ProblemAuditTool(Tool):
             "decision": report["decision"],
             "mode": report["mode"],
             "generated_at": report["generated_at"],
-            "report_path": report.get("report_path"),
+            "report_path": _rel_posix(problem_path, report.get("report_path")),
             "blocking_issue_count": len(report["blocking_issues"]),
             "quality_signals": report["quality_signals"],
         }
@@ -1249,7 +1801,15 @@ class ProblemAuditTool(Tool):
         tests = manifest.get("tests", [])
         if not isinstance(tests, list) or not tests:
             return None
-        limit = sum(1 for item in tests if isinstance(item, dict) and str(item.get("type_param")) in {"3", "4"})
+        limit = sum(
+            1
+            for item in tests
+            if isinstance(item, dict)
+            and (
+                str(item.get("type_param")) in {"3", "4"}
+                or str(item.get("group", "")).lower() in {"limit", "extreme", "tle"}
+            )
+        )
         return limit / len(tests)
 
     def _constraint_numbers(self, constraints: dict) -> list[int]:

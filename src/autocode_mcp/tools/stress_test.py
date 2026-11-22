@@ -7,20 +7,34 @@ Stress Test 工具 - 对拍测试。
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import ValidationError
 
+from .. import TEMPLATES_DIR
 from ..runtime_store import WORKFLOW, get_section
 from ..utils.checker_judge import checker_exe_path, run_testlib_checker
 from ..utils.communication_runner import (
     CommunicationRunner,
+    is_safe_stem,
     resolve_communicator_binary,
+    resolve_grader_source_existing,
     resolve_participant_binaries,
+    safe_resolve_under_root,
 )
-from ..utils.compiler import run_batch, run_binary, run_binary_with_args
+from ..utils.compiler import (
+    compile_cpp,
+    probe_sanitizer_support_async,
+    resolve_effective_compiler,
+    run_batch,
+    run_binary,
+    run_binary_with_args,
+)
 from ..utils.judge_runner import InteractiveRunner
+from ..utils.logs import safe_prepare_autocode_subdir, safe_spill_json
 from ..utils.platform import get_exe_extension
 from ..workflow import (
     AutoCodeManifest,
@@ -32,6 +46,33 @@ from ..workflow import (
 )
 from .base import Tool, ToolResult, input_schema_from_model
 from .schemas import StressTestRunInput
+
+_STRESS_PREVIEW_LIMIT = 4096
+_GENERATOR_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+
+def _truncate_stress_field(text: str | None, limit: int = _STRESS_PREVIEW_LIMIT) -> tuple[str | None, bool]:
+    if text is None or len(text) <= limit:
+        return text, False
+    return f"{text[:limit]}... [truncated {len(text) - limit} chars]", True
+
+
+def _spill_stress_payload(problem_dir: str, round_no: int, payload: dict[str, Any]) -> str | None:
+    return safe_spill_json(problem_dir, f"stress_failure_r{round_no}", payload)
+
+
+def _has_sanitizer_diagnostic(stderr: str) -> bool:
+    if not stderr:
+        return False
+    return any(
+        marker in stderr
+        for marker in (
+            "AddressSanitizer",
+            "UndefinedBehaviorSanitizer",
+            "runtime error:",
+            "ERROR: LeakSanitizer",
+        )
+    )
 
 
 @dataclass
@@ -104,6 +145,8 @@ class StressTestRunTool(Tool):
         manifest_model: AutoCodeManifest | None,
         sol_name: str,
         brute_name: str,
+        san_env: dict[str, str] | None = None,
+        san_disable_as: bool = False,
     ) -> _StressRoundResult:
         """运行单轮对拍（gen→validator→sol/brute→compare 或交互题双向判题），作为并发单元。"""
         input_path = os.path.join(temp_dir, f"input_{global_round}.txt")
@@ -231,22 +274,36 @@ class StressTestRunTool(Tool):
             )
 
         # 运行 sol 和 brute/reference oracle，比较输出
-        sol_result = await run_binary(sol_exe, input_data, timeout=timeout)
+        sol_result = await run_binary(
+            sol_exe,
+            input_data,
+            timeout=timeout,
+            env=san_env,
+            disable_as_limit=san_disable_as,
+        )
         if sol_result.timed_out or not sol_result.success:
+            sol_err = sol_result.stderr or sol_result.error or ""
             return _StressRoundResult(
                 status="sol_failed",
                 global_round=global_round,
                 input_data=input_data,
                 sol_output=sol_result.stdout,
                 gen_detail={
-                    "stderr": sol_result.stderr or sol_result.error or "",
+                    "stderr": sol_err,
                     **({"error": sol_result.error} if sol_result.error else {}),
                     **({"timed_out": True} if sol_result.timed_out else {}),
+                    **({"sanitizer_error": True} if _has_sanitizer_diagnostic(sol_err) else {}),
                 },
             )
         sol_output = sol_result.stdout
 
-        brute_result = await run_binary(brute_exe, input_data, timeout=timeout)
+        brute_result = await run_binary(
+            brute_exe,
+            input_data,
+            timeout=timeout,
+            env=san_env,
+            disable_as_limit=san_disable_as,
+        )
         if brute_result.timed_out:
             return _StressRoundResult(
                 status="brute_failed",
@@ -259,14 +316,16 @@ class StressTestRunTool(Tool):
                 },
             )
         if not brute_result.success:
+            brute_err = brute_result.stderr or brute_result.error or ""
             return _StressRoundResult(
                 status="brute_failed",
                 global_round=global_round,
                 input_data=input_data,
                 sol_output=sol_output,
                 gen_detail={
-                    "stderr": brute_result.stderr or brute_result.error or "",
+                    "stderr": brute_err,
                     **({"error": brute_result.error} if brute_result.error else {}),
+                    **({"sanitizer_error": True} if _has_sanitizer_diagnostic(brute_err) else {}),
                 },
             )
         brute_output = brute_result.stdout
@@ -329,10 +388,18 @@ class StressTestRunTool(Tool):
         n_max_advisory: str,
         sol_name: str,
         brute_name: str,
+        *,
+        problem_dir: str = "",
+        sanitizer_info: dict[str, Any] | None = None,
     ) -> ToolResult:
         """gen/sol/brute 失败时构造与串行实现一致的结构化失败结果。"""
         gr = res.global_round
         statistics = self._compute_summary(round_stats)
+        in_p, in_tr = _truncate_stress_field(res.input_data)
+        san_extra: dict[str, Any] = {}
+        if sanitizer_info is not None:
+            san_extra["sanitizers_enabled"] = True
+            san_extra["sanitizer_info"] = sanitizer_info
         if res.status == "gen_failed":
             gd = res.gen_detail or {}
             error_detail = gd.get("error", "Unknown error")
@@ -340,33 +407,68 @@ class StressTestRunTool(Tool):
                 hint = "Generator may contain an infinite loop or be too slow. Try increasing the timeout parameter."
             else:
                 hint = "Generator crashed unexpectedly. Check stderr for details."
+            err_p, err_tr = _truncate_stress_field(str(gd.get("stderr", "")))
+            out_p, out_tr = _truncate_stress_field(str(gd.get("stdout", "")))
+            spill: dict[str, Any] = {}
+            if in_tr or err_tr or out_tr:
+                log_path = _spill_stress_payload(
+                    problem_dir,
+                    gr,
+                    {
+                        "status": "gen_failed",
+                        "round": gr,
+                        "input_data": res.input_data,
+                        "stderr": gd.get("stderr", ""),
+                        "stdout": gd.get("stdout", ""),
+                    },
+                )
+                spill["truncated"] = True
+                if log_path:
+                    spill["failure_log_path"] = log_path
             return ToolResult.fail(
                 f"Generator failed at round {gr}: {error_detail}. {hint}",
                 round=gr,
                 seed=gd.get("seed", gr),
-                stderr=gd.get("stderr", ""),
-                stdout=gd.get("stdout", ""),
+                stderr=err_p or "",
+                stdout=out_p or "",
                 cmd_args=gd.get("cmd_args", []),
-                last_input=res.input_data,
+                last_input=in_p,
                 statistics=statistics,
                 n_max_warning=n_max_advisory,
                 n_max_advisory=n_max_advisory,
+                **spill,
+                **san_extra,
             )
         if res.status == "sol_failed":
             gd = res.gen_detail or {}
             verdict = gd.get("verdict")
-            msg = f"{sol_name} failed at round {gr}" + (f" ({verdict})" if verdict else "")
+            is_san_err = bool(gd.get("sanitizer_error"))
+            msg = f"{sol_name} failed at round {gr}" + (
+                " (ASan/UBSan detected error)" if is_san_err else (f" ({verdict})" if verdict else "")
+            )
             extra: dict[str, object] = {}
-            for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
+            for k in ("verdict", "detail", "judge_stderr", "transcript", "error", "sanitizer_error"):
                 if k in gd:
                     extra[k] = gd[k]
+            raw_err = str(gd.get("stderr") or gd.get("error") or "")
+            err_p, err_tr = _truncate_stress_field(raw_err)
+            if in_tr or err_tr:
+                log_path = _spill_stress_payload(
+                    problem_dir,
+                    gr,
+                    {"status": "sol_failed", "round": gr, "input_data": res.input_data, "stderr": raw_err},
+                )
+                extra["truncated"] = True
+                if log_path:
+                    extra["failure_log_path"] = log_path
             return ToolResult.fail(
                 msg,
                 round=gr,
-                input_data=res.input_data,
-                stderr=gd.get("stderr") or gd.get("error") or "",
+                input_data=in_p,
+                stderr=err_p or "",
                 statistics=statistics,
                 **extra,
+                **san_extra,
             )
         if (res.gen_detail or {}).get("timed_out"):
             gd = res.gen_detail or {}
@@ -374,37 +476,56 @@ class StressTestRunTool(Tool):
             for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
                 if k in gd:
                     extra_bt[k] = gd[k]
+            if in_tr:
+                log_path = _spill_stress_payload(
+                    problem_dir, gr, {"status": "brute_timeout", "round": gr, "input_data": res.input_data}
+                )
+                extra_bt["truncated"] = True
+                if log_path:
+                    extra_bt["failure_log_path"] = log_path
             return ToolResult.fail(
                 f"{brute_name} timed out at round {gr} (N may be too large)",
                 round=gr,
-                input_data=res.input_data,
+                input_data=in_p,
                 suggestion="Try reducing n_max parameter",
                 n_max_warning=n_max_advisory,
                 n_max_advisory=n_max_advisory,
                 statistics=statistics,
                 **extra_bt,
+                **san_extra,
             )
         gd = res.gen_detail or {}
         extra_bf: dict[str, object] = {}
-        for k in ("verdict", "detail", "judge_stderr", "transcript", "error"):
+        for k in ("verdict", "detail", "judge_stderr", "transcript", "error", "sanitizer_error"):
             if k in gd:
                 extra_bf[k] = gd[k]
+        raw_err = str(gd.get("stderr") or gd.get("error") or "")
+        err_p, err_tr = _truncate_stress_field(raw_err)
+        if in_tr or err_tr:
+            log_path = _spill_stress_payload(
+                problem_dir, gr, {"status": "brute_failed", "round": gr, "input_data": res.input_data, "stderr": raw_err}
+            )
+            extra_bf["truncated"] = True
+            if log_path:
+                extra_bf["failure_log_path"] = log_path
         if gd.get("deadlock"):
             return ToolResult.fail(
                 f"{brute_name} deadlocked at round {gr} (possible missing flush or protocol mismatch)",
                 round=gr,
-                input_data=res.input_data,
-                stderr=gd.get("stderr") or gd.get("error") or "",
+                input_data=in_p,
+                stderr=err_p or "",
                 statistics=statistics,
                 **extra_bf,
+                **san_extra,
             )
         return ToolResult.fail(
             f"{brute_name} failed at round {gr}",
             round=gr,
-            input_data=res.input_data,
-            stderr=gd.get("stderr") or gd.get("error") or "",
+            input_data=in_p,
+            stderr=err_p or "",
             statistics=statistics,
             **extra_bf,
+            **san_extra,
         )
 
     async def execute(
@@ -419,11 +540,52 @@ class StressTestRunTool(Tool):
         generator_args: dict | None = None,
         stress_profiles: list[dict] | None = None,
         concurrency_limit: int = 4,
+        enable_sanitizers: bool = False,
     ) -> ToolResult:
         """执行对拍测试。"""
         exe_ext = get_exe_extension()
         effective_sol_name = sol_name or "sol"
         effective_brute_name = brute_name or "brute"
+        if not is_safe_stem(effective_sol_name):
+            return ToolResult.fail(f"invalid sol_name (must be a safe file stem): {effective_sol_name!r}")
+        if not is_safe_stem(effective_brute_name):
+            return ToolResult.fail(f"invalid brute_name (must be a safe file stem): {effective_brute_name!r}")
+
+        def _validate_types_list(tlist: Any, label: str) -> str | None:
+            if tlist is None:
+                return None
+            if not isinstance(tlist, list):
+                return f"{label} must be a list of strings"
+            for item in tlist:
+                if not isinstance(item, str) or not _GENERATOR_TYPE_RE.fullmatch(item.strip()):
+                    return (
+                        f"invalid generator type {item!r} in {label}; "
+                        "must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+                    )
+            return None
+
+        type_err = _validate_types_list(types, "types")
+        if type_err:
+            return ToolResult.fail(type_err)
+        if isinstance(generator_args, dict) and generator_args.get("type") is not None:
+            raw_gt = str(generator_args["type"]).strip()
+            if not _GENERATOR_TYPE_RE.fullmatch(raw_gt):
+                return ToolResult.fail(
+                    f"invalid generator_args.type {generator_args['type']!r}; "
+                    "must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+                )
+        for p_idx, prof in enumerate(stress_profiles or []):
+            if isinstance(prof, dict):
+                p_err = _validate_types_list(prof.get("types"), f"stress_profiles[{p_idx}].types")
+                if p_err:
+                    return ToolResult.fail(p_err)
+                p_ga = prof.get("generator_args")
+                if isinstance(p_ga, dict) and p_ga.get("type") is not None:
+                    raw_pgt = str(p_ga["type"]).strip()
+                    if not _GENERATOR_TYPE_RE.fullmatch(raw_pgt):
+                        return ToolResult.fail(
+                            f"invalid stress_profiles[{p_idx}].generator_args.type {p_ga['type']!r}"
+                        )
 
         # 检查必要文件 - 优先查找子目录，回退到根目录
         gen_exe = os.path.join(problem_dir, "files", f"gen{exe_ext}")
@@ -523,6 +685,119 @@ class StressTestRunTool(Tool):
         if not os.path.exists(val_exe):
             val_exe = os.path.join(problem_dir, f"val{exe_ext}")
 
+        # 可选：一键 ASan/UBSan 对拍模式（编译隔离至 .autocode/san_bin/，不污染正式 O2 二进制）
+        san_probe: dict[str, Any] | None = None
+        san_env: dict[str, str] | None = None
+        san_disable_as = False
+        if enable_sanitizers:
+            if is_protocol:
+                return ToolResult.fail(
+                    "enable_sanitizers=True is currently supported for standard/SPJ stress runs "
+                    "(interactive/communication runners do not forward ASan runtime environment overrides).",
+                    sanitizers_enabled=True,
+                )
+            try:
+                eff_compiler = resolve_effective_compiler(None, manifest_model)
+            except ValueError as exc:
+                return ToolResult.fail(f"invalid compiler for sanitizer stress test: {exc}")
+            san_probe = await probe_sanitizer_support_async(eff_compiler)
+            if not san_probe.get("available"):
+                return ToolResult.fail(
+                    f"Sanitizers unavailable for {eff_compiler}: {san_probe.get('reason', 'probe failed')}",
+                    sanitizers_enabled=True,
+                    sanitizer_info=san_probe,
+                )
+            if not san_probe.get("asan_verified"):
+                san_probe = {
+                    **san_probe,
+                    "warning": "ASan unavailable on this toolchain; running UBSan-only sanitizer profile.",
+                }
+            san_env = dict(san_probe.get("env", {}))
+            san_disable_as = bool(san_probe.get("asan_verified"))
+            san_dir_path = safe_prepare_autocode_subdir(problem_dir, "san_bin")
+            if san_dir_path is None:
+                return ToolResult.fail(
+                    "Unable to safely prepare .autocode/san_bin (path containment / symlink check failed)",
+                    sanitizers_enabled=True,
+                    sanitizer_info=san_probe,
+                )
+            san_dir = str(san_dir_path)
+            extra_srcs: list[str] | None = None
+            inc_dirs = [TEMPLATES_DIR]
+            if (
+                is_communication
+                and manifest_model is not None
+                and manifest_model.protocol is not None
+                and manifest_model.protocol.mode == "grader_linked"
+            ):
+                grader_rel = resolve_grader_source_existing(problem_dir, manifest_model)
+                if grader_rel:
+                    grader_resolved = safe_resolve_under_root(problem_dir, grader_rel)
+                    if grader_resolved:
+                        extra_srcs = [grader_resolved]
+                        files_inc = os.path.join(problem_dir, "files")
+                        if os.path.isdir(files_inc):
+                            inc_dirs.append(files_inc)
+
+            sol_src = safe_resolve_under_root(problem_dir, f"solutions/{effective_sol_name}.cpp")
+            if sol_src is None or not os.path.isfile(sol_src):
+                return ToolResult.fail(
+                    f"enable_sanitizers=True requires source file inside workspace: solutions/{effective_sol_name}.cpp",
+                    sanitizers_enabled=True,
+                    sanitizer_info=san_probe,
+                )
+            san_sol_exe = os.path.join(san_dir, f"{effective_sol_name}_san{exe_ext}")
+            if os.path.islink(san_sol_exe):
+                return ToolResult.fail(
+                    f"Refusing to write sanitizer binary through symlink: {san_sol_exe}",
+                    sanitizers_enabled=True,
+                    sanitizer_info=san_probe,
+                )
+            sol_comp = await compile_cpp(
+                sol_src,
+                san_sol_exe,
+                compiler=eff_compiler,
+                opt_level="O1",
+                include_dirs=inc_dirs,
+                extra_sources=extra_srcs,
+                sanitizers=True,
+            )
+            if not sol_comp.success:
+                return ToolResult.fail(
+                    f"Sanitizer compilation failed for {effective_sol_name}: {sol_comp.error}",
+                    compile_log=sol_comp.stderr,
+                    sanitizers_enabled=True,
+                    sanitizer_info=san_probe,
+                )
+            sol_exe = san_sol_exe
+
+            brute_src = safe_resolve_under_root(problem_dir, f"solutions/{effective_brute_name}.cpp")
+            if run_brute and brute_src is not None and os.path.isfile(brute_src):
+                san_brute_exe = os.path.join(san_dir, f"{effective_brute_name}_san{exe_ext}")
+                if os.path.islink(san_brute_exe):
+                    return ToolResult.fail(
+                        f"Refusing to write sanitizer binary through symlink: {san_brute_exe}",
+                        sanitizers_enabled=True,
+                        sanitizer_info=san_probe,
+                    )
+                brute_comp = await compile_cpp(
+                    brute_src,
+                    san_brute_exe,
+                    compiler=eff_compiler,
+                    opt_level="O1",
+                    include_dirs=inc_dirs,
+                    extra_sources=extra_srcs,
+                    sanitizers=True,
+                )
+                if not brute_comp.success:
+                    return ToolResult.fail(
+                        f"Sanitizer compilation failed for {effective_brute_name}: {brute_comp.error}",
+                        compile_log=brute_comp.stderr,
+                        sanitizers_enabled=True,
+                        sanitizer_info=san_probe,
+                    )
+                brute_exe = san_brute_exe
+
         profiles = stress_profiles or [
             {"name": "default", "trials": trials, "types": types, "generator_args": generator_args}
         ]
@@ -606,6 +881,8 @@ class StressTestRunTool(Tool):
                             manifest_model=manifest_model,
                             sol_name=effective_sol_name,
                             brute_name=effective_brute_name,
+                            san_env=san_env,
+                            san_disable_as=san_disable_as,
                         )
 
                     results = await run_batch(batch, _worker, limit=concurrency_limit)
@@ -622,6 +899,8 @@ class StressTestRunTool(Tool):
                                 n_max_advisory,
                                 effective_sol_name,
                                 effective_brute_name,
+                                problem_dir=problem_dir,
+                                sanitizer_info=san_probe,
                             )
                         # validator_failed / mismatch：记录并停止后续批次
                         failed_round = res.global_round
@@ -658,6 +937,8 @@ class StressTestRunTool(Tool):
             validator_failure_detail,
             n_max_advisory,
             complexity_context,
+            problem_dir=problem_dir,
+            sanitizer_info=san_probe,
         )
 
     async def _generate_input(
@@ -836,19 +1117,45 @@ class StressTestRunTool(Tool):
         validator_failure_detail: dict[str, object] | None = None,
         n_max_advisory: str | None = None,
         complexity_context: dict[str, object] | None = None,
+        *,
+        problem_dir: str = "",
+        sanitizer_info: dict[str, Any] | None = None,
     ) -> ToolResult:
         """格式化测试结果。"""
         statistics = self._compute_summary(round_stats or [])
+        san_extra: dict[str, Any] = {}
+        if sanitizer_info is not None:
+            san_extra["sanitizers_enabled"] = True
+            san_extra["sanitizer_info"] = sanitizer_info
 
         if failed_round:
+            in_p, in_tr = _truncate_stress_field(last_input)
+            sol_p, sol_tr = _truncate_stress_field(sol_output)
+            br_p, br_tr = _truncate_stress_field(brute_output)
+            spill_extra: dict[str, Any] = {}
+            if in_tr or sol_tr or br_tr:
+                log_path = _spill_stress_payload(
+                    problem_dir,
+                    failed_round,
+                    {
+                        "status": "validator_failed" if validator_failed else "mismatch",
+                        "round": failed_round,
+                        "input_data": last_input,
+                        "sol_output": sol_output,
+                        "brute_output": brute_output,
+                    },
+                )
+                spill_extra["truncated"] = True
+                if log_path:
+                    spill_extra["mismatch_log_path"] = log_path
             return ToolResult.fail(
                 f"Output mismatch at round {failed_round}"
                 if not validator_failed
                 else f"Validator failed at round {failed_round}",
                 round=failed_round,
-                input_data=last_input,
-                sol_output=sol_output,
-                brute_output=brute_output,
+                input_data=in_p,
+                sol_output=sol_p,
+                brute_output=br_p,
                 completed_rounds=failed_round - 1,
                 total_rounds=total_rounds,
                 statistics=statistics,
@@ -857,6 +1164,8 @@ class StressTestRunTool(Tool):
                 n_max_warning=n_max_advisory,
                 n_max_advisory=n_max_advisory,
                 complexity_context=complexity_context or {},
+                **spill_extra,
+                **san_extra,
             )
 
         return ToolResult.ok(
@@ -869,6 +1178,7 @@ class StressTestRunTool(Tool):
             n_max_advisory=n_max_advisory,
             complexity_context=complexity_context or {},
             message=f"All {total_rounds} rounds passed",
+            **san_extra,
         )
 
     def _build_n_max_advisory(self, n_max: int, complexity_context: dict[str, object] | None) -> str:

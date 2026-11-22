@@ -605,10 +605,38 @@ def recommend_time_limit_ms(
 
 
 def extract_claimed_complexity(code: str) -> str | None:
-    match = re.search(r"\bO\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)", code)
-    if not match:
-        return None
-    return match.group(0)
+    comment_blocks = re.findall(r"//[^\n]*|/\*.*?\*/", code, re.DOTALL)
+    o_pat = r"\b(O\([^()\n]*(?:\([^()\n]*\)[^()\n]*)*\))"
+    # 1. Explicit time complexity label takes highest priority
+    for blk in comment_blocks:
+        for line in blk.splitlines():
+            m = re.search(
+                r"(?:time\s*complexity|时间复杂度)[^\n]*?" + o_pat,
+                line,
+                re.IGNORECASE,
+            )
+            if m:
+                return m.group(1)
+    # 2. Generic complexity label, excluding explicit space complexity lines
+    for blk in comment_blocks:
+        for line in blk.splitlines():
+            if re.search(r"space\s*complexity|空间复杂度", line, re.IGNORECASE):
+                continue
+            m = re.search(
+                r"(?:complexity|复杂度)[^\n]*?" + o_pat,
+                line,
+                re.IGNORECASE,
+            )
+            if m:
+                return m.group(1)
+    # 3. Fallback: first O(...) outside explicit space-complexity lines
+    for line in code.splitlines():
+        if re.search(r"space\s*complexity|空间复杂度", line, re.IGNORECASE):
+            continue
+        m = re.search(o_pat, line)
+        if m:
+            return m.group(1)
+    return None
 
 
 def build_risk_notes(
@@ -702,6 +730,14 @@ async def run_empirical_verification(
     claimed_complexity: str | None,
     constraints: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    if solution_type == "brute":
+        return {
+            "status": "by_design_slow",
+            "passed": True,
+            "skipped": True,
+            "message": "Skipping full-scale empirical complexity fitting for brute solution (slow by design).",
+        }
+
     exe_ext = get_exe_extension()
     gen_path = os.path.join(problem_dir, "files", f"gen{exe_ext}")
     sol_path = os.path.join(problem_dir, "solutions", f"{solution_type}{exe_ext}")
@@ -716,6 +752,15 @@ async def run_empirical_verification(
             "passed": False,
             "message": f"invalid or unreadable manifest.json: {exc}",
         }
+
+    if (
+        not claimed_complexity
+        and manifest_model is not None
+        and manifest_model.empirical_complexity is not None
+        and isinstance(manifest_model.empirical_complexity.claimed_complexity, str)
+        and manifest_model.empirical_complexity.claimed_complexity.strip()
+    ):
+        claimed_complexity = manifest_model.empirical_complexity.claimed_complexity.strip()
 
     has_sol = os.path.isfile(sol_path)
     if (
@@ -1087,15 +1132,33 @@ class SolutionAnalyzeTool(Tool):
 
         final_complexity, patterns = estimate_static_complexity(code)
 
-        if claimed_complexity:
-            norm_claimed = normalize_complexity_expression(claimed_complexity)
+        manifest_claimed: str | None = None
+        m_loaded = None
+        if problem_dir:
+            try:
+                m_loaded = load_manifest(problem_dir)
+            except (OSError, ValueError):
+                m_loaded = None
+            if (
+                m_loaded is not None
+                and m_loaded.empirical_complexity is not None
+                and isinstance(m_loaded.empirical_complexity.claimed_complexity, str)
+                and m_loaded.empirical_complexity.claimed_complexity.strip()
+            ):
+                manifest_claimed = m_loaded.empirical_complexity.claimed_complexity.strip()
+        if constraints is None and m_loaded is not None and m_loaded.constraints:
+            constraints = dict(m_loaded.constraints)
+
+        explicit_or_manifest_claimed = claimed_complexity or manifest_claimed
+        if explicit_or_manifest_claimed:
+            norm_claimed = normalize_complexity_expression(explicit_or_manifest_claimed)
             final_complexity = norm_claimed
 
         space_complexity, memory_mb = estimate_memory_usage(code)
 
         recommended_n_max = COMPLEXITY_TO_N_MAX.get(final_complexity, 10000)
         recommended_time_ms = recommend_time_limit_ms(final_complexity, constraints)
-        detected_claimed = extract_claimed_complexity(code)
+        detected_claimed = explicit_or_manifest_claimed or extract_claimed_complexity(code)
 
         warnings: list[str] = []
         constraint_n_max = extract_n_max_from_constraints(constraints)
@@ -1174,15 +1237,19 @@ class SolutionAnalyzeTool(Tool):
         recommended_n_max: int,
         constraints: dict | None,
     ) -> list[dict]:
-        n_cap = constraints.get("n_max", recommended_n_max) if constraints else recommended_n_max
+        constraint_n = extract_n_max_from_constraints(constraints) if constraints else None
+        n_cap = constraint_n if constraint_n is not None else recommended_n_max
         brute_n = min(max(20, n_cap // 50), 2000)
+        if constraint_n is not None:
+            brute_n = min(brute_n, max(1, constraint_n))
+        tiny_n = min(8, max(1, constraint_n)) if constraint_n is not None else 8
         trials = 300 if final_complexity in {ComplexityLevel.QUADRATIC, ComplexityLevel.CUBIC} else 1000
         return [
             {
                 "name": "tiny_exhaustive",
                 "trials": min(200, trials),
                 "types": ["1"],
-                "generator_args": {"type": "1", "n_min": 1, "n_max": 8, "t_min": 1, "t_max": 1},
+                "generator_args": {"type": "1", "n_min": 1, "n_max": tiny_n, "t_min": 1, "t_max": 1},
             },
             {
                 "name": "random_small",

@@ -9,11 +9,16 @@ All 19 tools are migrated (tasks 7.2 / 7.3 pilot + 7.4 remainder).
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
 from ..workflow.models import OracleMode, ProblemType, ProtocolMode
+
+GeneratorTypeStr = Annotated[
+    str,
+    Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"),
+]
 
 # --------------------------------------------------------------------------- #
 # Pilot tools (7.2 / 7.3)
@@ -238,6 +243,10 @@ class SolutionBuildInput(BaseModel):
         default=None,
         description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
     )
+    enable_sanitizers: bool = Field(
+        default=False,
+        description="Build with AddressSanitizer/UBSan (auto-probes runtime and static fallback on Linux)",
+    )
 
 
 class SolutionRunInput(BaseModel):
@@ -258,6 +267,7 @@ class ProblemVerifyTestsInput(BaseModel):
     tests_dir: str | None = None
     verify_types: list[
         Literal[
+            "all",
             "file_count",
             "answer_consistency",
             "validator",
@@ -268,6 +278,7 @@ class ProblemVerifyTestsInput(BaseModel):
             "duplicate_inputs",
             "scale_distribution",
             "purpose_coverage",
+            "boundary_coverage",
             "validator_self_test",
             "checker_self_test",
             "interactor_self_test",
@@ -308,7 +319,7 @@ class StressGeneratorArgs(BaseModel):
 class StressProfile(BaseModel):
     name: str | None = None
     trials: int | None = None
-    types: list[Literal["1", "2", "3", "4"]] | None = None
+    types: list[GeneratorTypeStr] | None = None
     generator_args: dict | None = None
 
 
@@ -319,10 +330,14 @@ class StressTestRunInput(BaseModel):
     timeout: int = 30
     sol_name: str | None = None
     brute_name: str | None = None
-    types: list[Literal["1", "2", "3", "4"]] | None = None
+    types: list[GeneratorTypeStr] | None = None
     generator_args: StressGeneratorArgs | None = None
     stress_profiles: list[StressProfile] | None = None
     concurrency_limit: int = 4
+    enable_sanitizers: bool = Field(
+        default=False,
+        description="Compile instrumented binaries into .autocode/san_bin/ with ASan/UBSan and run stress rounds under sanitizers",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -368,7 +383,10 @@ class GenerateConstraints(BaseModel):
 
 class GenerateTestConfig(BaseModel):
     seed_offset: int = 0
-    type: Literal["1", "2", "3", "4"]
+    type: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$",
+        description="Generator strategy type (standard '1'..'4' or custom hack types like '5', '6', 'hack')",
+    )
     n_min: int
     n_max: int
     t_min: int
@@ -390,6 +408,14 @@ class ProblemGenerateTestsInput(BaseModel):
     oversample_ratio: float = 1.5
     answer_ext: str = ".ans"
     resume: bool = False
+    mode: Literal["replace", "append", "register_existing"] = Field(
+        default="replace",
+        description=(
+            "'replace' (default, preserves locked/tests/hack cases), "
+            "'append' (keeps existing tests/ and appends new cases), or "
+            "'register_existing' (indexes existing tests/ without deleting or regenerating)."
+        ),
+    )
     hard_timeout_seconds: int | None = None
     checkpoint_every: int = 10
     concurrency_limit: int = 4
@@ -411,6 +437,10 @@ class ProblemPackPolygonInput(BaseModel):
         default=None,
         ge=1,
         description="Optional time limit in MILLISECONDS (e.g., 1000 or 2000). Overrides manifest.time_limit_ms.",
+    )
+    allow_time_limit_override: bool = Field(
+        default=False,
+        description="Set true to explicitly allow time_limit > 60s or >10x deviation from manifest.time_limit_ms.",
     )
     memory_limit: int | None = Field(
         default=None,

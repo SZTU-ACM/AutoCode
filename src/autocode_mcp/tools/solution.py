@@ -4,7 +4,7 @@ Solution 工具组 - 解法构建和运行。
 
 import os
 import shutil
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -19,6 +19,7 @@ from ..utils.compiler import (
     resolve_effective_compiler,
 )
 from ..utils.judge_runner import InteractiveRunner
+from ..utils.logs import safe_prepare_autocode_subdir
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_is_communication, manifest_is_interactive
 from .base import Tool, ToolResult, input_schema_from_model
@@ -69,6 +70,7 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         code: str | None = None,
         source_path: str | None = None,
         compiler: str | None = None,
+        enable_sanitizers: bool = False,
     ) -> ToolResult:
         """执行解法构建。"""
         if solution_type not in {"sol", "brute", "wrong", "reference"}:
@@ -122,18 +124,33 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         solutions_dir = os.path.join(problem_dir, "solutions")
         os.makedirs(solutions_dir, exist_ok=True)
 
-        # 确定文件名（wrong/reference 绝不覆盖 sol.cpp / brute.cpp）
+        # 确定文件名（wrong/reference 绝不覆盖 sol.cpp / brute.cpp；
+        # enable_sanitizers=True 隔离输出到 .autocode/san_bin/，不覆盖生产 -O2 二进制）
         exe_ext = get_exe_extension()
         canonical_path = os.path.join(solutions_dir, f"{effective_name}.cpp")
-        binary_path = os.path.join(solutions_dir, f"{effective_name}{exe_ext}")
-        standard_source_path = (
-            os.path.join(solutions_dir, f"{solution_type}.cpp") if is_primary else canonical_path
-        )
-        standard_binary_path = (
-            os.path.join(solutions_dir, f"{solution_type}{exe_ext}") if is_primary else binary_path
-        )
-
-        remove_targets = (binary_path, standard_binary_path) if is_primary else (binary_path,)
+        if enable_sanitizers:
+            san_dir_path = safe_prepare_autocode_subdir(problem_dir, "san_bin")
+            if san_dir_path is None:
+                return ToolResult.fail(
+                    "Unable to safely prepare .autocode/san_bin (path containment / symlink check failed)"
+                )
+            binary_path = os.path.join(str(san_dir_path), f"{effective_name}_san{exe_ext}")
+            if os.path.islink(binary_path):
+                return ToolResult.fail(f"Refusing to write sanitizer binary through symlink: {binary_path}")
+            standard_source_path = (
+                os.path.join(solutions_dir, f"{solution_type}.cpp") if is_primary else canonical_path
+            )
+            standard_binary_path = binary_path
+            remove_targets: tuple[str, ...] = (binary_path,)
+        else:
+            binary_path = os.path.join(solutions_dir, f"{effective_name}{exe_ext}")
+            standard_source_path = (
+                os.path.join(solutions_dir, f"{solution_type}.cpp") if is_primary else canonical_path
+            )
+            standard_binary_path = (
+                os.path.join(solutions_dir, f"{solution_type}{exe_ext}") if is_primary else binary_path
+            )
+            remove_targets = (binary_path, standard_binary_path) if is_primary else (binary_path,)
         for p in remove_targets:
             if os.path.isfile(p):
                 try:
@@ -194,21 +211,20 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         )
 
         include_dirs = include_dirs_list or None
+        build_kwargs: dict[str, Any] = {
+            "compiler": effective_compiler,
+            "include_dirs": include_dirs,
+        }
         if extra_sources:
-            result = await self.build(
-                compile_source,
-                binary_path,
-                compiler=effective_compiler,
-                include_dirs=include_dirs,
-                extra_sources=extra_sources,
-            )
-        else:
-            result = await self.build(
-                compile_source,
-                binary_path,
-                compiler=effective_compiler,
-                include_dirs=include_dirs,
-            )
+            build_kwargs["extra_sources"] = extra_sources
+        if enable_sanitizers:
+            build_kwargs["opt_level"] = "O1"
+            build_kwargs["sanitizers"] = True
+        result = await self.build(
+            compile_source,
+            binary_path,
+            **build_kwargs,
+        )
 
         if not result.success:
             fail_kwargs: dict[str, object] = {
@@ -217,6 +233,10 @@ class SolutionBuildTool(Tool, BuildToolMixin):
                 "compile_log": result.stderr,
                 "compiler": effective_compiler,
             }
+            if enable_sanitizers:
+                fail_kwargs["sanitizers_enabled"] = True
+                if result.sanitizer_info:
+                    fail_kwargs["sanitizer_info"] = result.sanitizer_info
             if result.hint:
                 fail_kwargs["compiler_hint"] = result.hint
             elif compiler_warning and has_bits_stdcpp_include(resolved.code):
@@ -247,6 +267,11 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             "effective_name": effective_name,
             "message": f"Successfully built {effective_name}",
         }
+        if enable_sanitizers:
+            ok_kwargs["sanitizers_enabled"] = True
+            ok_kwargs["sanitized_only"] = True
+            if result.sanitizer_info:
+                ok_kwargs["sanitizer_info"] = result.sanitizer_info
         if compiler_warning:
             ok_kwargs["compiler_warning"] = compiler_warning
         return ToolResult.ok(**ok_kwargs)

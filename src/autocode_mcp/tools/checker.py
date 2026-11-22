@@ -33,7 +33,7 @@ class CheckerBuildTool(Tool, BuildToolMixin):
 
         基于论文 Algorithm 3 实现:
         1. 保存代码到 problem_dir/files/checker.cpp
-        2. 编译生成 files/checker.exe
+        2. 编译生成 files/checker（Windows 下为 files/checker.exe）
         3. 运行测试场景验证准确性
         4. 返回准确率和详细结果
 

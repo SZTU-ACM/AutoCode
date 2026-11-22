@@ -90,6 +90,8 @@ class BuildToolMixin:
         timeout: int = 30,
         include_dirs: list[str] | None = None,
         extra_sources: list[str] | None = None,
+        sanitizers: bool = False,
+        extra_flags: list[str] | None = None,
     ) -> CompileResult:
         return await compile_cpp(
             source_path,
@@ -100,6 +102,8 @@ class BuildToolMixin:
             opt_level=opt_level,
             include_dirs=include_dirs,
             extra_sources=extra_sources,
+            sanitizers=sanitizers,
+            extra_flags=extra_flags,
         )
 
     async def build_all(

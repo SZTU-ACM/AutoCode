@@ -9,10 +9,12 @@ from pydantic import ValidationError
 
 from ..utils.platform import get_exe_extension
 from ..workflow import (
+    inspect_workspace_state,
     load_manifest,
     manifest_is_communication,
     manifest_is_interactive,
     manifest_uses_testlib_checker,
+    reconcile_workspace_state,
 )
 
 
@@ -55,6 +57,21 @@ def main() -> int:
                 pass
     parser = argparse.ArgumentParser(description="Verify AutoCode workspace contract quickly.")
     parser.add_argument("problem_dir", help="Problem directory")
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Include full unified MCP workflow gate status and binary freshness summary.",
+    )
+    parser.add_argument(
+        "--strict-gates",
+        action="store_true",
+        help="Exit non-zero if MCP workflow quality/pack gates or platform parity checks fail.",
+    )
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Reconcile .autocode/runtime.json against disk binaries/platform without fabricating passes.",
+    )
     args = parser.parse_args()
 
     problem_dir = Path(args.problem_dir).resolve()
@@ -119,8 +136,20 @@ def main() -> int:
                     f"communication problem ({protocol_mode}) missing {comm_rel} (or files/interactor.cpp)"
                 )
 
+    reconcile_report = None
+    if args.reconcile:
+        reconcile_report = reconcile_workspace_state(str(problem_dir))
+        workspace_inspection = reconcile_report["inspection"]
+    else:
+        workspace_inspection = inspect_workspace_state(str(problem_dir))
+
+    base_ok = len(missing) == 0 and len(spj_warnings) == 0 and len(protocol_warnings) == 0
+    gate_summary = workspace_inspection["gate_summary"]
+    gates_ok = bool(gate_summary.get("pack_ready", False))
+    overall_ok = base_ok and (gates_ok if args.strict_gates else True)
+
     result = {
-        "success": len(missing) == 0 and len(spj_warnings) == 0 and len(protocol_warnings) == 0,
+        "success": overall_ok,
         "problem_dir": str(problem_dir),
         "problem_type": manifest_model.problem_type,
         "oracle_mode": manifest_model.oracle_mode,
@@ -133,7 +162,44 @@ def main() -> int:
         "missing_paths": missing,
         "spj_warnings": spj_warnings,
         "protocol_warnings": protocol_warnings,
+        "workflow_state_present": workspace_inspection["workflow_state_present"],
+        "build_platform": workspace_inspection["build_platform"],
+        "current_platform": workspace_inspection["current_platform"],
+        "platform_mismatch": workspace_inspection["platform_mismatch"],
+        "binary_status": workspace_inspection["binary_status"],
+        "stale_reasons": workspace_inspection["stale_reasons"],
+        "gate_summary": gate_summary,
     }
+    if args.status:
+        from ..workflow import load_workflow_state
+
+        wf_state = load_workflow_state(str(problem_dir))
+        result["workflow_flags"] = {
+            k: wf_state.get(k)
+            for k in (
+                "created",
+                "sol_built",
+                "brute_built",
+                "solution_analyzed",
+                "std_audited",
+                "brute_audited",
+                "validator_ready",
+                "generator_built",
+                "checker_ready",
+                "interactor_ready",
+                "stress_passed",
+                "validation_passed",
+                "tests_generated",
+                "generated_test_count",
+                "tests_verified",
+                "packaged",
+            )
+        }
+    if reconcile_report is not None:
+        result["reconcile"] = {
+            "reconciled": reconcile_report["reconciled"],
+            "actions": reconcile_report["actions"],
+        }
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["success"] else 1
 

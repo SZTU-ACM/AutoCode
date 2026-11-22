@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from ..utils.ratio_analyzer import normalize_complexity_expression
+from ..workflow import load_manifest
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import (
     ComplexityLevel,
@@ -49,6 +50,19 @@ class SolutionAuditStdTool(Tool):
             return err
         assert resolved is not None
         code = resolved.code
+
+        if not claimed_complexity and problem_dir:
+            try:
+                m_loaded = load_manifest(problem_dir)
+            except (OSError, ValueError):
+                m_loaded = None
+            if (
+                m_loaded is not None
+                and m_loaded.empirical_complexity is not None
+                and isinstance(m_loaded.empirical_complexity.claimed_complexity, str)
+                and m_loaded.empirical_complexity.claimed_complexity.strip()
+            ):
+                claimed_complexity = m_loaded.empirical_complexity.claimed_complexity.strip()
 
         raw_claimed = claimed_complexity
         if claimed_complexity:
@@ -193,6 +207,16 @@ class SolutionAuditBruteTool(Tool):
             recommended_n_max = 40
         elif brute_complexity == ComplexityLevel.QUADRATIC:
             recommended_n_max = 80
+        problem_n_max = extract_n_max_from_constraints(constraints)
+        if problem_n_max is None and problem_dir:
+            try:
+                m_loaded = load_manifest(problem_dir)
+            except (OSError, ValueError):
+                m_loaded = None
+            if m_loaded is not None and m_loaded.constraints:
+                problem_n_max = extract_n_max_from_constraints(m_loaded.constraints)
+        if problem_n_max is not None:
+            recommended_n_max = max(1, min(recommended_n_max, problem_n_max))
         recommended_trials = 1200 if recommended_n_max >= 100 else 600
 
         empirical_verification: dict = {"status": "skipped"}

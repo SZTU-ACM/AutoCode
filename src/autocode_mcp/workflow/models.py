@@ -55,13 +55,29 @@ def _validate_safe_stem(value: Any, field_name: str) -> str:
     return cleaned
 
 
+_GENERATOR_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+
 class CasePlanItem(BaseModel):
     name: str
-    type: Literal["1", "2", "3", "4"]
+    type: str = Field(
+        description="生成器类型参数（标准 1=tiny/2=random/3=extreme/4=tle，也支持自定义如 5/6/hack）",
+    )
     seed: int = Field(default=1, ge=0)
     group: str = "default"
     purpose: str | None = None
     check_with: list[str] = Field(default_factory=list)
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def validate_case_type(cls, value: Any) -> str:
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str) or not _GENERATOR_TYPE_RE.fullmatch(value.strip()):
+            raise ValueError(
+                f"case_plan.type must match ^[A-Za-z0-9][A-Za-z0-9_-]{{0,31}}$, got {value!r}"
+            )
+        return value.strip()
 
 
 class SolutionEntry(BaseModel):
@@ -178,6 +194,11 @@ class SubtaskSpec(BaseModel):
 class EmpiricalComplexityConfig(BaseModel):
     """Optional empirical complexity sampling and verification settings."""
 
+    claimed_complexity: str | None = Field(
+        default=None,
+        max_length=128,
+        description="可选显式声明时间复杂度（如 O(n log n) / O(2^n) / O(T)），优先级高于代码注释正则",
+    )
     dominant_var: str = Field(
         default="n",
         description="主导复杂度的规模变量名（如 n / T / k / m）",

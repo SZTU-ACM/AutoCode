@@ -35,11 +35,11 @@ class WinJobObject:
         job_handle: Job Object 句柄
     """
 
-    def __init__(self, memory_mb: int | float, timeout_sec: int | float):
+    def __init__(self, memory_mb: int | float | None, timeout_sec: int | float):
         """初始化 Job Object。
 
         Args:
-            memory_mb: 内存限制（MB）
+            memory_mb: 内存限制（MB），为 None 时仅启用时间限制与 KILL_ON_JOB_CLOSE（如 Sanitizer 模式）
             timeout_sec: CPU 时间限制（秒，支持 int 或 float）
 
         Raises:
@@ -48,7 +48,7 @@ class WinJobObject:
         if not _IS_WINDOWS:
             raise RuntimeError("WinJobObject is only available on Windows")
 
-        self.memory_mb: int | float = memory_mb
+        self.memory_mb: int | float | None = memory_mb
         self.timeout_sec: int | float = timeout_sec
         self.job_handle: int | None = None
         self._create_job_object()
@@ -61,9 +61,12 @@ class WinJobObject:
 
         limit_flags = (
             win32job.JOB_OBJECT_LIMIT_PROCESS_TIME
-            | win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
             | win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         )
+        job_memory_limit = 0
+        if self.memory_mb is not None:
+            limit_flags |= win32job.JOB_OBJECT_LIMIT_JOB_MEMORY
+            job_memory_limit = self._set_memory_limit()
 
         extended_limit = {
             "BasicLimitInformation": {
@@ -86,7 +89,7 @@ class WinJobObject:
                 "OtherTransferCount": 0,
             },
             "ProcessMemoryLimit": 0,
-            "JobMemoryLimit": self._set_memory_limit(),
+            "JobMemoryLimit": job_memory_limit,
             "PeakProcessMemoryUsed": 0,
             "PeakJobMemoryUsed": 0,
         }
@@ -103,6 +106,7 @@ class WinJobObject:
         Returns:
             int: 内存限制（字节）
         """
+        assert self.memory_mb is not None
         return max(1, int(round(float(self.memory_mb) * 1024 * 1024)))
 
     def _set_time_limit(self) -> int:

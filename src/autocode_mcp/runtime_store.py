@@ -48,17 +48,23 @@ def save_runtime(problem_dir: str | os.PathLike[str], data: dict[str, Any]) -> N
     """Write the full runtime document, creating ``.autocode/`` as needed.
 
     Best-effort: a blocked/unwritable ``.autocode`` (e.g. a regular file where the
-    directory should be) must not break the caller, mirroring the previous
-    ``.autocode-workflow/state.json`` write semantics.
+    directory should be) or a symlink escaping ``problem_dir`` must not break
+    the caller or write outside the workspace.
     """
+    root = Path(problem_dir)
     path = runtime_file(problem_dir)
     try:
+        real_root = root.resolve()
+        if path.parent.is_symlink() or path.is_symlink():
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
+        path.parent.resolve().relative_to(real_root)
+    except (OSError, ValueError):
         return
     try:
+        path.resolve().relative_to(real_root)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         pass
 
 
