@@ -78,3 +78,31 @@ def test_generate_scale_input_file_failure(tmp_path: os.PathLike[str]) -> None:
     with pytest.raises(RuntimeError) as exc_info:
         MultiScaleSampler.generate_scale_input_file(cmd, out_file)
     assert "exit code 1" in str(exc_info.value)
+
+
+def test_compute_scale_points_log_and_exponential_modes() -> None:
+    log_pts = MultiScaleSampler.compute_scale_points(10**18, "O(log n)", scale_mode="log")
+    assert len(log_pts) == 5
+    assert log_pts[-1] == 10**18
+    assert log_pts[0] < 10**6
+    for i in range(len(log_pts) - 1):
+        assert log_pts[i] < log_pts[i + 1]
+
+    exp_pts = MultiScaleSampler.compute_scale_points(20, "O(2^n)", scale_mode="exponential")
+    assert exp_pts == [12, 14, 16, 18, 20]
+
+
+def test_format_generator_command_dominant_var_t_and_template() -> None:
+    cmd_default = MultiScaleSampler.format_generator_command(
+        "gen.exe", 5000, 42, extra_vars={"n_min": 10**9, "n_max": 10**9}, dominant_var="T"
+    )
+    assert cmd_default == ["gen.exe", "42", "2", "1000000000", "1000000000", "5000", "5000"]
+
+    cmd_tpl = MultiScaleSampler.format_generator_command(
+        "gen.exe",
+        250,
+        42,
+        template="{seed} 4 1000000000 1000000000 100000 100000 k={k}",
+        dominant_var="k",
+    )
+    assert cmd_tpl == ["gen.exe", "42", "4", "1000000000", "1000000000", "100000", "100000", "k=250"]

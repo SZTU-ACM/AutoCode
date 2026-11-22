@@ -162,13 +162,13 @@ AutoCode 当前暴露 22 个 MCP 工具：
 7. `checker_build` 与 `stress_test_run`：非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`。交互题通过 `InteractiveRunner` 真实双向管道运行；通信题通过 `CommunicationRunner` 按 `run_twice`（独立进程隔离多阶段）/ `grader_linked` / `multi_process` 运行并校验通信预算。
 8. `problem_validate(validation_passed)`（交互/通信题自动验证协议与实跑样例）
 9. `problem_generate_tests(generated_test_count > 0)`
-10. `problem_verify_tests(passed)`（SPJ 用 checker；交互/通信题用 `InteractiveRunner`/`CommunicationRunner` 校验答案一致性、通信预算指标与错解杀伤）
-11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、经验复杂度、`communication_metrics` 与难度证据；支持 `standalone=True` / `autocode-audit --standalone` 对任意外部题包只读审计）
-12. `problem_pack_polygon`（支持 `export_formats=["polygon", "hydro", "qoj"]` 多 OJ 导出，并自动同步 `subtasks` 到 Polygon `<groups>`/`<tests>`、Hydro `testdata/config.yaml` 与 QOJ `problem.conf`）
+10. `problem_verify_tests(passed)`（SPJ 用 checker；交互/通信题用 `InteractiveRunner`/`CommunicationRunner` 校验答案一致性、通信预算指标与错解杀伤；输出每个错解与标程的耗时倍数比 `wrong_ms / std_ms` 与测试点耗时分布，支持配置 `tle_kill_factor` / `slowdown_kill_ratio`）
+11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、经验复杂度、`communication_metrics`、`host_performance_bias` 风险与难度证据；交互题优先拟合查询次数随 $\log_2 n$ 增长曲线；支持 `standalone=True` / `autocode-audit --standalone` 对任意外部题包只读审计）
+12. `problem_pack_polygon`（支持 `export_formats=["polygon", "hydro", "qoj"]` 多 OJ 导出与 `export_data_mode="hardlink"|"copy"|"zip"` 去重存储，交互题自动清理空 `.ans` 并校验平台交互配置字段，自动同步 `subtasks` 到 Polygon `<groups>`/`<tests>`、Hydro `testdata/config.yaml` 与 QOJ `problem.conf`）
 
 关键门禁：
 
-- `brute` 必须在 `sol` 之后构建（除非 `oracle_mode != "brute"`）。
+- `brute` 必须在 `sol` 之后构建（除非 `oracle_mode != "brute"`）。`workflow` 门禁按文件 SHA-256 细粒度缓存：仅修改/重编 `sol.cpp` 只失效 `sol` 侧门禁（`solution_analyze` / `solution_audit_std`），不失效未改动的 `solution_audit_brute`。
 - `validator_build` 没有有效 `accuracy` 不算通过。
 - 交互题/通信题不可运行 `checker_build`；允许可选运行 `validator_build` 校验 `.in` 文件；`interactive` 与 `run_twice`/`multi_process` 使用 `interactor_build`。
 - 交互题题面必须完整写明协议：谁先输出、隐藏参数范围、查询/最终答案格式、judge 响应含义、查询上限、flush 要求、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞和额外输出的判定。样例必须是 transcript，不能伪装成普通 stdin/stdout。
@@ -213,6 +213,9 @@ AutoCode 当前暴露 22 个 MCP 工具：
 - `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
 - `load_manifest` 若遇 `manifest.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误信息，杜绝未捕获的裸 traceback。
 - `audit_gates` 控制 full audit、validator/checker/interactor 自测、题面一致性与难度置信度等发布前门禁。
+- `compiler`（可选）：配置自定义 C++ 编译器路径/命令（如 macOS Homebrew `g++-14`）；所有构建工具默认按 `显式 compiler 参数 > manifest.compiler > g++` 解析，`problem_create` 与 `solution_build` 会自动检测 Apple Clang 并提前提示避免 `<bits/stdc++.h>`。
+- `empirical_complexity`（可选）：为多参数题、状压题或交互题显式配置 `dominant_var`、`scale_points`、`generator_args_template`、`extra_vars`、`scale_mode`（`auto`/`linear`/`exponential`/`log`）与 `metric`（`auto`/`cpu_time_ms`/`queries`）。
+- `quality_gates.wrong_tle_kill_factor`（默认 `1.0`）与 `quality_gates.wrong_slowdown_kill_ratio`（可选）：控制 `wrong_solution_kill` 的逻辑 TLE 阈值与相对标程倍率击杀策略。
 - `difficulty` 记录规则/LLM 难度评级的结果字段；`problem_audit(include_difficulty=true)` 会先产出确定性 signals。
 
 快速校验：
@@ -237,5 +240,5 @@ uv run autocode-audit <external_problem_dir> --standalone
 - 默认主路径是远程 plugin 安装；本地模式只用于开发、测试、验证。
 - `hooks/` 只放 hook 配置，hook 逻辑脚本放在 `scripts/`。
 - 模板资源统一放在 `src/autocode_mcp/templates/`。
-- C++ 标准使用 C++20（需要 GCC 10+）。
+- C++ 标准使用 C++20（需要 GCC 10+ 或兼容 Clang；macOS 默认 Apple Clang 不支持 `<bits/stdc++.h>`，请优先使用标准头文件或在 `manifest.json` 中配置 `compiler` 如 `g++-14`）。
 - 本项目会编译并执行 AI 生成代码，只能在本地可信环境使用。

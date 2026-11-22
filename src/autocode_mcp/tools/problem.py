@@ -36,8 +36,14 @@ from ..utils.communication_runner import (
     resolve_participant_binaries,
     safe_resolve_under_root,
 )
-from ..utils.compiler import RunResult, run_batch, run_binary, run_binary_with_args
-from ..utils.exporters import export_hydro, export_qoj, map_tests_to_subtasks
+from ..utils.compiler import (
+    RunResult,
+    detect_compiler_info_async,
+    run_batch,
+    run_binary,
+    run_binary_with_args,
+)
+from ..utils.exporters import ExportDataMode, export_hydro, export_qoj, map_tests_to_subtasks
 from ..utils.judge_runner import InteractiveRunner
 from ..utils.platform import get_exe_extension
 from ..utils.process import filter_alive_pids, is_pid_alive, terminate_pid_tree
@@ -323,6 +329,10 @@ class ProblemCreateTool(Tool):
                 )
 
         manifest_file = save_manifest(problem_dir, manifest)
+        compiler_info = await detect_compiler_info_async(manifest.compiler or "g++")
+        extra_meta: dict[str, Any] = {"compiler_info": compiler_info}
+        if compiler_info.get("is_apple_clang") and compiler_info.get("warning"):
+            extra_meta["compiler_warning"] = str(compiler_info["warning"])
 
         return ToolResult.ok(
             problem_dir=problem_dir,
@@ -333,6 +343,7 @@ class ProblemCreateTool(Tool):
             interactive=manifest.interactive,
             manifest_path=str(manifest_file),
             created_directories=created_dirs,
+            **extra_meta,
             message=f"Created problem directory: {problem_dir}",
         )
 
@@ -1643,10 +1654,17 @@ class ProblemPackPolygonTool(Tool):
         time_limit_ms: int | None = None,
         memory_limit: int | None = None,
         export_formats: list[Literal["polygon", "hydro", "qoj"]] | None = None,
+        export_data_mode: ExportDataMode = "hardlink",
     ) -> ToolResult:
         """执行 Polygon / Hydro / QOJ 打包导出。"""
         if not os.path.exists(problem_dir):
             return ToolResult.fail(f"Problem directory not found: {problem_dir}")
+
+        allowed_data_modes = {"copy", "hardlink", "zip"}
+        if not isinstance(export_data_mode, str) or export_data_mode not in allowed_data_modes:
+            return ToolResult.fail(
+                f"unsupported export_data_mode {export_data_mode!r}; expected one of: copy, hardlink, zip"
+            )
 
         allowed_formats = {"polygon", "hydro", "qoj"}
         if export_formats is None:
@@ -1684,17 +1702,6 @@ class ProblemPackPolygonTool(Tool):
         if isinstance(_test_manifest, dict):
             answer_ext = normalize_answer_ext(str(_test_manifest.get("answer_ext", ".ans"))) or ".ans"
 
-        missing_answers = [
-            in_file for in_file in in_files if not os.path.exists(
-                os.path.join(tests_dir, f"{os.path.splitext(in_file)[0]}{answer_ext}")
-            )
-        ]
-        if missing_answers:
-            return ToolResult.fail(
-                "missing answer files for some tests",
-                missing_answer_inputs=missing_answers,
-            )
-
         statement_path = os.path.join(problem_dir, "statements", "README.md")
         if not os.path.exists(statement_path):
             return ToolResult.fail("statement file missing: statements/README.md")
@@ -1712,6 +1719,19 @@ class ProblemPackPolygonTool(Tool):
             )
         if manifest_model is None:
             manifest_model = default_manifest(os.path.basename(os.path.normpath(problem_dir)))
+
+        # 交互题允许无 .ans 文件（或由 Hydro/QOJ 导出器忽略空 .ans）；非交互题强制要求成对答案文件
+        if not manifest_is_interactive(manifest_model):
+            missing_answers = [
+                in_file for in_file in in_files if not os.path.exists(
+                    os.path.join(tests_dir, f"{os.path.splitext(in_file)[0]}{answer_ext}")
+                )
+            ]
+            if missing_answers:
+                return ToolResult.fail(
+                    "missing answer files for some tests",
+                    missing_answer_inputs=missing_answers,
+                )
 
         sol_source = os.path.join(problem_dir, "solutions", "sol.cpp")
         root_sol_source = os.path.join(problem_dir, "sol.cpp")
@@ -1978,6 +1998,7 @@ class ProblemPackPolygonTool(Tool):
                     in_files=in_files,
                     answer_ext=answer_ext,
                     tests_manifest=tests_manifest_dict,
+                    data_mode=export_data_mode,
                 )
             except (ValueError, OSError) as exc:
                 return ToolResult.fail(f"Hydro export failed: {exc}")
@@ -1992,6 +2013,7 @@ class ProblemPackPolygonTool(Tool):
                     in_files=in_files,
                     answer_ext=answer_ext,
                     tests_manifest=tests_manifest_dict,
+                    data_mode=export_data_mode,
                 )
             except (ValueError, OSError) as exc:
                 return ToolResult.fail(f"QOJ export failed: {exc}")
@@ -2005,5 +2027,6 @@ class ProblemPackPolygonTool(Tool):
             results=results,
             exports=exports,
             export_formats=formats,
+            export_data_mode=export_data_mode,
             message=msg,
         )

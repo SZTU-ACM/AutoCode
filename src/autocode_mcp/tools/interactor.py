@@ -21,7 +21,7 @@ from ..utils.communication_runner import (
     resolve_communicator_source_rel,
     safe_resolve_under_root,
 )
-from ..utils.compiler import compile_cpp, run_binary_with_args
+from ..utils.compiler import compile_cpp, resolve_effective_compiler, run_binary_with_args
 from ..utils.judge_runner import InteractiveRunner, JudgeResult
 from ..utils.platform import get_exe_extension
 from ..utils.process import terminate_pid_tree
@@ -48,6 +48,7 @@ class InteractorBuildTool(Tool):
         2. 编译生成 files/interactor.exe
         3. 可用 interaction_scenarios 按 testlib registerInteraction 约定验证协议判定
         4. 可用 reference_solution_path / mutant_solutions + test_inputs 走真实双向管道验证区分能力
+           （reference_solution_path 应指向已编译可执行文件如 solutions/sol；若传入 .cpp 源码路径会自动映射或编译为二进制；若传入 test_inputs 且省略 reference_solution_path，会自动解析已编译的 solutions/sol）
         5. 返回 scenario accuracy、pass_rate、fail_rate 与交互 transcript 证据
 
         注意：此工具不生成代码，代码由 Client LLM 生成后传入。
@@ -67,13 +68,18 @@ class InteractorBuildTool(Tool):
         mutant_solutions: list[str] | None = None,
         interaction_scenarios: list[dict] | None = None,
         test_inputs: list[str] | None = None,
-        compiler: str = "g++",
+        compiler: str | None = None,
     ) -> ToolResult:
         """执行 Interactor / Communicator 构建。"""
         try:
             manifest = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+
+        try:
+            effective_compiler = resolve_effective_compiler(compiler, manifest)
+        except ValueError as exc:
+            return ToolResult.fail(f"invalid compiler: {exc}")
 
         is_communication = manifest is not None and manifest_is_communication(manifest)
         if (
@@ -127,7 +133,7 @@ class InteractorBuildTool(Tool):
         compile_source = resolved.original_source_path or canonical_path
         include_dirs = [resolved.include_dir] if resolved.include_dir else None
         compile_result = await compile_cpp(
-            compile_source, binary_path, compiler=compiler, include_dirs=include_dirs
+            compile_source, binary_path, compiler=effective_compiler, include_dirs=include_dirs
         )
 
         if not compile_result.success:
@@ -168,8 +174,33 @@ class InteractorBuildTool(Tool):
             with open(os.path.join(autocode_dir, scen_name), "w", encoding="utf-8", newline="\n") as sf:
                 json.dump(interaction_scenarios, sf, ensure_ascii=False, indent=2)
 
+        # 若调用方提供了 test_inputs 但未指定 reference_solution_path，
+        # 自动探测默认已编译参考解 solutions/sol{exe_ext}（避免与 mutant_solutions 冲突，含 .cpp 衍生二进制路径）。
+        resolved_ref_arg = reference_solution_path
+        if not resolved_ref_arg and test_inputs:
+            exe_ext = get_exe_extension()
+            default_sol_bin = safe_resolve_under_root(
+                problem_dir, f"solutions/sol{exe_ext}"
+            )
+            if (
+                default_sol_bin
+                and os.path.isfile(default_sol_bin)
+                and (os.name == "nt" or os.access(default_sol_bin, os.X_OK))
+            ):
+                mutant_real: set[str] = set()
+                for m in mutant_solutions or []:
+                    if not isinstance(m, str) or not m.strip() or "\x00" in m:
+                        continue
+                    raw_m = m if os.path.isabs(m) else os.path.join(problem_dir, m)
+                    mutant_real.add(os.path.normcase(os.path.realpath(raw_m)))
+                    mutant_real.add(os.path.normcase(os.path.realpath(os.path.splitext(raw_m)[0] + exe_ext)))
+                    if exe_ext:
+                        mutant_real.add(os.path.normcase(os.path.realpath(raw_m + exe_ext)))
+                if os.path.normcase(os.path.realpath(default_sol_bin)) not in mutant_real:
+                    resolved_ref_arg = default_sol_bin
+
         # 如果没有提供任何解法验证，直接返回成功（pass_rate 为 0）
-        if not reference_solution_path and not mutant_solutions:
+        if not resolved_ref_arg and not mutant_solutions:
             message = "Communicator built successfully" if is_communication else "Interactor built successfully"
             if scenario_report is None:
                 message += " (no validation performed)"
@@ -216,18 +247,25 @@ class InteractorBuildTool(Tool):
         pass_count = 0
         pass_total = 0
         reference_details: list[dict] = []
+        resolved_reference_binary: str | None = None
 
-        if reference_solution_path:
-            if not os.path.exists(reference_solution_path):
+        if resolved_ref_arg:
+            resolved_reference_binary, ref_err = await self._resolve_solution_binary(
+                problem_dir,
+                resolved_ref_arg,
+                compiler=effective_compiler,
+                role_label="Reference solution",
+            )
+            if ref_err is not None or resolved_reference_binary is None:
                 return ToolResult.fail(
-                    f"Reference solution not found: {reference_solution_path}",
+                    ref_err or f"Reference solution not found: {resolved_ref_arg}",
                     source_path=compile_source,
                     canonical_path=canonical_path,
                     binary_path=binary_path,
                 )
             pass_total = len(live_inputs)
             for idx, input_data in enumerate(live_inputs, 1):
-                judge_res = await _run_live(reference_solution_path, input_data)
+                judge_res = await _run_live(resolved_reference_binary, input_data)
                 if judge_res.accepted:
                     pass_count += 1
                 reference_details.append(
@@ -248,9 +286,20 @@ class InteractorBuildTool(Tool):
 
         if mutant_solutions:
             for mutant_path in mutant_solutions:
-                if not os.path.exists(mutant_path):
+                resolved_mutant, mutant_err = await self._resolve_solution_binary(
+                    problem_dir,
+                    mutant_path,
+                    compiler=effective_compiler,
+                    role_label="Mutant solution",
+                )
+                if mutant_err is not None or resolved_mutant is None:
                     mutant_details.append(
-                        {"path": mutant_path, "killed": False, "verdict": "MISSING"}
+                        {
+                            "path": mutant_path,
+                            "killed": False,
+                            "verdict": "MISSING",
+                            "detail": mutant_err or "mutant solution binary not found",
+                        }
                     )
                     continue
                 killed = False
@@ -258,7 +307,7 @@ class InteractorBuildTool(Tool):
                 last_verdict = "AC"
                 last_detail = ""
                 for input_data in live_inputs:
-                    judge_res = await _run_live(mutant_path, input_data)
+                    judge_res = await _run_live(resolved_mutant, input_data)
                     last_verdict = judge_res.verdict
                     last_detail = judge_res.detail
                     if judge_res.verdict == "FAIL":
@@ -272,6 +321,7 @@ class InteractorBuildTool(Tool):
                     fail_count += 1
                 mutant_entry: dict[str, object] = {
                     "path": mutant_path,
+                    "resolved_binary": resolved_mutant,
                     "killed": killed,
                     "verdict": last_verdict,
                     "detail": last_detail,
@@ -291,6 +341,7 @@ class InteractorBuildTool(Tool):
             compile_log=compile_result.stderr,
             interaction_scenarios=scenario_report,
             scenario_accuracy=scenario_report["accuracy"] if scenario_report else None,
+            reference_solution_binary=resolved_reference_binary,
             pass_rate=pass_rate,
             fail_rate=fail_rate,
             pass_count=pass_count,
@@ -303,6 +354,108 @@ class InteractorBuildTool(Tool):
                 f"{'Communicator' if is_communication else 'Interactor'} built, "
                 f"pass_rate={pass_rate:.2%}, fail_rate={fail_rate:.2%}"
             ),
+        )
+
+    @staticmethod
+    def _is_under_root(real_root: str, target_path: str) -> bool:
+        real_target = os.path.realpath(target_path)
+        try:
+            common = os.path.commonpath([real_root, real_target])
+        except ValueError:
+            return False
+        return os.path.normcase(common) == os.path.normcase(real_root)
+
+    @classmethod
+    async def _resolve_solution_binary(
+        cls,
+        problem_dir: str,
+        raw_path: str,
+        *,
+        compiler: str,
+        role_label: str = "Reference solution",
+    ) -> tuple[str | None, str | None]:
+        """Resolve a solution path (relative/absolute, binary or .cpp) strictly under ``problem_dir``.
+
+        If a C++ source file (.cpp/.cc/.cxx/.c++) is supplied, maps to its compiled sibling binary
+        when up to date or compiles it automatically instead of executing the source text directly.
+        """
+        if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+            return None, f"Invalid {role_label.lower()} path: {raw_path!r}"
+
+        exe_ext = get_exe_extension()
+        source_exts = (".cpp", ".cc", ".cxx", ".c++")
+        real_root = os.path.realpath(problem_dir)
+
+        if os.path.isabs(raw_path):
+            if not cls._is_under_root(real_root, raw_path):
+                return None, f"{role_label} path escapes problem_dir: {raw_path}"
+            candidate = os.path.realpath(raw_path)
+        else:
+            candidate_under = safe_resolve_under_root(problem_dir, raw_path)
+            if candidate_under is None:
+                return None, f"{role_label} path escapes problem_dir: {raw_path}"
+            candidate = candidate_under
+
+        if candidate.lower().endswith(source_exts):
+            binary_candidate = os.path.splitext(candidate)[0] + exe_ext
+            if os.path.islink(binary_candidate) or not cls._is_under_root(real_root, binary_candidate):
+                return (
+                    None,
+                    f"Derived {role_label.lower()} binary path escapes problem_dir or is a symlink: "
+                    f"{binary_candidate}",
+                )
+            src_exists = os.path.isfile(candidate)
+            bin_exists = os.path.isfile(binary_candidate)
+            bin_exec = bin_exists and (os.name == "nt" or os.access(binary_candidate, os.X_OK))
+            if bin_exec and (
+                not src_exists or os.path.getmtime(binary_candidate) >= os.path.getmtime(candidate)
+            ):
+                return binary_candidate, None
+            if src_exists:
+                comp = await compile_cpp(
+                    candidate,
+                    binary_candidate,
+                    compiler=compiler,
+                    include_dirs=[os.path.dirname(candidate)],
+                )
+                if comp.success and os.path.isfile(binary_candidate):
+                    return binary_candidate, None
+                return (
+                    None,
+                    f"Failed to compile {role_label.lower()} source '{raw_path}' to executable "
+                    f"binary '{binary_candidate}': {comp.error}",
+                )
+            return (
+                None,
+                f"{role_label} not found: {raw_path} "
+                f"(pass a compiled executable binary such as solutions/sol{exe_ext}, "
+                "or an existing .cpp source file; run solution_build first)",
+            )
+
+        candidates = [candidate]
+        if exe_ext and not candidate.lower().endswith(exe_ext.lower()):
+            candidates.append(candidate + exe_ext)
+
+        for path in candidates:
+            if os.path.islink(path) and not cls._is_under_root(real_root, path):
+                return None, f"{role_label} path escapes problem_dir via symlink: {raw_path}"
+            if not cls._is_under_root(real_root, path):
+                continue
+            if os.path.isfile(path):
+                if os.name != "nt" and not os.access(path, os.X_OK):
+                    return (
+                        None,
+                        f"{role_label} is not executable: {raw_path}. "
+                        f"Pass a compiled executable binary (e.g. solutions/sol{exe_ext}) "
+                        "rather than a non-executable or .cpp source file.",
+                    )
+                return os.path.realpath(path), None
+
+        return (
+            None,
+            f"{role_label} not found: {raw_path} "
+            f"(expected a compiled executable binary such as solutions/sol{exe_ext}, "
+            "not a missing path or uncompiled .cpp source; run solution_build first)",
         )
 
     @staticmethod

@@ -40,7 +40,7 @@ class WinJobObject:
 
         Args:
             memory_mb: 内存限制（MB）
-            timeout_sec: CPU 时间限制（秒）
+            timeout_sec: CPU 时间限制（秒，支持 int 或 float）
 
         Raises:
             RuntimeError: 在非 Windows 平台上调用
@@ -109,7 +109,7 @@ class WinJobObject:
         """设置 CPU 时间限制。
 
         Returns:
-            int: 时间限制（100ns 单位，SetInformationJobObject 要求为 int）
+            int: 时间限制（100ns 单位，严格返回 int 满足 Win32 LARGE_INTEGER 契约）
         """
         return max(1, int(round(float(self.timeout_sec) * 10_000_000)))
 

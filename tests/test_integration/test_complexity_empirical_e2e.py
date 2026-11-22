@@ -253,3 +253,170 @@ async def test_solution_without_claimed_complexity_skips_verification():
         empirical = result.data.get("empirical_verification", {})
         assert empirical.get("status") == "skipped"
         assert empirical.get("passed") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_log_n_query_curve_empirical_e2e():
+    """交互题 O(log n)（n <= 1e18）应使用查询次数随 log2(n) 曲线拟合，而非误判为 O(1)。"""
+    from autocode_mcp.utils.compiler import compile_cpp
+    from autocode_mcp.workflow import default_manifest, save_manifest
+
+    gen_interactive_cpp = """
+#include <iostream>
+#include <cstdlib>
+int main(int argc, char* argv[]) {
+    long long n = (argc >= 5) ? std::atoll(argv[4]) : 1000LL;
+    long long target = (n * 7) / 10;
+    if (target < 1) target = 1;
+    std::cout << n << " " << target << "\\n";
+    return 0;
+}
+"""
+    interactor_log_cpp = """
+#include <iostream>
+#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerInteraction(argc, argv);
+    long long n = inf.readLong();
+    long long target = inf.readLong();
+    std::cout << n << std::endl;
+    int queries = 0;
+    while (true) {
+        std::string cmd = ouf.readWord();
+        if (cmd == "?") {
+            long long x = ouf.readLong(1LL, n);
+            ++queries;
+            if (queries > 120) quitf(_wa, "too many queries=%d", queries);
+            if (x < target) std::cout << "<" << std::endl;
+            else if (x > target) std::cout << ">" << std::endl;
+            else std::cout << "=" << std::endl;
+        } else if (cmd == "!") {
+            long long ans = ouf.readLong(1LL, n);
+            if (ans == target) quitf(_ok, "OK queries=%d", queries);
+            quitf(_wa, "wrong answer");
+        } else {
+            quitf(_pe, "bad cmd");
+        }
+    }
+}
+"""
+    sol_bsearch_cpp = """
+#include <iostream>
+#include <string>
+int main() {
+    long long n;
+    if (!(std::cin >> n)) return 0;
+    long long lo = 1, hi = n;
+    while (lo <= hi) {
+        long long mid = lo + (hi - lo) / 2;
+        std::cout << "? " << mid << std::endl;
+        std::string resp;
+        if (!(std::cin >> resp)) return 0;
+        if (resp == "=") {
+            std::cout << "! " << mid << std::endl;
+            return 0;
+        }
+        if (resp == "<") lo = mid + 1;
+        else hi = mid - 1;
+    }
+    std::cout << "! " << lo << std::endl;
+    return 0;
+}
+"""
+    exe_ext = get_exe_extension()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest = default_manifest(
+            "Interactive LogN", problem_type="interactive", oracle_mode="interactor_only"
+        )
+        manifest.constraints = {"n_max": 10**18}
+        assert manifest.protocol is not None
+        manifest.protocol.max_queries = 80
+        save_manifest(tmpdir, manifest)
+
+        gen_src = os.path.join(tmpdir, "files", "gen.cpp")
+        int_src = os.path.join(tmpdir, "files", "interactor.cpp")
+        sol_src = os.path.join(tmpdir, "solutions", "sol.cpp")
+        os.makedirs(os.path.dirname(gen_src), exist_ok=True)
+        os.makedirs(os.path.dirname(sol_src), exist_ok=True)
+        with open(gen_src, "w", encoding="utf-8") as f:
+            f.write(gen_interactive_cpp)
+        with open(int_src, "w", encoding="utf-8") as f:
+            f.write(interactor_log_cpp)
+        with open(sol_src, "w", encoding="utf-8") as f:
+            f.write(sol_bsearch_cpp)
+
+        assert (await compile_cpp(gen_src, os.path.join(tmpdir, "files", f"gen{exe_ext}"))).success
+        assert (await compile_cpp(int_src, os.path.join(tmpdir, "files", f"interactor{exe_ext}"))).success
+        assert (await compile_cpp(sol_src, os.path.join(tmpdir, "solutions", f"sol{exe_ext}"))).success
+
+        result = await SolutionAnalyzeTool().execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            claimed_complexity="O(log n)",
+        )
+        assert result.success, result.error
+        empirical = result.data["empirical_verification"]
+        assert empirical["passed"] is True
+        assert empirical["fit_metric"] == "queries"
+        assert empirical["verdict"] == "verified_query_curve"
+        assert empirical["fitted_complexity"] == "O(log n)"
+        assert empirical["scale_mode"] == "log"
+        assert empirical["query_curve"]["queries_per_log2_n"] > 0.3
+
+
+@pytest.mark.asyncio
+async def test_multi_param_manifest_empirical_complexity_template_e2e():
+    """多参数题（主导变量 T 而非 n）通过 manifest.empirical_complexity 显式模板应正确拟合。"""
+    from autocode_mcp.workflow import EmpiricalComplexityConfig, default_manifest, save_manifest
+
+    gen_multi_cpp = """
+#include <iostream>
+#include <cstdlib>
+int main(int argc, char* argv[]) {
+    long long n = (argc >= 5) ? std::atoll(argv[4]) : 1000000000LL;
+    int T = (argc >= 7) ? std::atoi(argv[6]) : 100;
+    std::cout << n << " " << T << "\\n";
+    return 0;
+}
+"""
+    sol_multi_cpp = """
+#include <iostream>
+int main() {
+    long long n;
+    int T;
+    if (!(std::cin >> n >> T)) return 0;
+    long long acc = 0;
+    for (int i = 1; i <= T; ++i) {
+        acc ^= (n + i * 1315423911LL);
+        for (int j = 0; j < 200; ++j) {
+            acc = (acc * 1103515245LL + 12345LL + j) & 0x7fffffffLL;
+        }
+    }
+    std::cout << acc << "\\n";
+    return 0;
+}
+"""
+    exe_ext = get_exe_extension()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest = default_manifest("MultiParam Problem")
+        manifest.constraints = {"n_max": 10**9, "T_max": 200000}
+        manifest.empirical_complexity = EmpiricalComplexityConfig(
+            dominant_var="T",
+            scale_points=[10000, 30000, 60000, 120000, 200000],
+            generator_args_template="{seed} 2 1000000000 1000000000 {T} {T}",
+        )
+        save_manifest(tmpdir, manifest)
+        _compile_cpp(gen_multi_cpp, os.path.join(tmpdir, "files", f"gen{exe_ext}"))
+        _compile_cpp(sol_multi_cpp, os.path.join(tmpdir, "solutions", f"sol{exe_ext}"))
+
+        result = await SolutionAnalyzeTool().execute(
+            problem_dir=tmpdir,
+            solution_type="sol",
+            claimed_complexity="O(T)",
+        )
+        assert result.success, result.error
+        empirical = result.data["empirical_verification"]
+        assert empirical["passed"] is True
+        assert empirical["dominant_var"] == "T"
+        assert empirical["claimed_complexity"] == "O(n)"
+        assert [s["n"] for s in empirical["samples"]] == [10000, 30000, 60000, 120000, 200000]

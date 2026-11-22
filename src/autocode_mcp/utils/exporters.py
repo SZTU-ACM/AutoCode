@@ -12,8 +12,10 @@ import math
 import os
 import re
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -30,6 +32,10 @@ from .communication_runner import (
     resolve_grader_source_existing,
     safe_resolve_under_root,
 )
+
+ExportDataMode = Literal["copy", "hardlink", "zip"]
+_ALLOWED_DATA_MODES = frozenset({"copy", "hardlink", "zip"})
+_RESERVED_DIRS = frozenset({"tests", "files", "solutions", "statements", ".autocode", "scripts"})
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
@@ -160,15 +166,11 @@ def _toposort_subtasks(subtasks: list[SubtaskSpec]) -> list[SubtaskSpec]:
     return ordered
 
 
-def _prepare_clean_export_dir(problem_dir: str, rel_export_dir: str) -> str:
-    """Resolve and cleanly recreate an export subdirectory strictly inside ``problem_dir``.
-
-    Rejects traversal, root deletion, non-directory targets, and any symlink component
-    along the path (both external and internal symlinks) before calling ``shutil.rmtree``.
-    """
+def _validate_export_rel_parts(rel_export_dir: str) -> list[str]:
+    """Parse and validate a relative export directory path inside ``problem_dir``."""
     if not isinstance(rel_export_dir, str) or not rel_export_dir.strip() or "\x00" in rel_export_dir:
         raise ValueError(f"Invalid export directory: {rel_export_dir!r}")
-    normalized = rel_export_dir.replace("\\", "/").strip()
+    normalized = rel_export_dir.replace("\\", "/").strip().rstrip("/")
     if normalized.startswith("/") or _WINDOWS_DRIVE_RE.match(normalized) or Path(normalized).is_absolute():
         raise ValueError(f"Export directory escapes problem_dir: {rel_export_dir}")
     parts = [p for p in Path(normalized).parts if p not in ("", ".")]
@@ -176,7 +178,16 @@ def _prepare_clean_export_dir(problem_dir: str, rel_export_dir: str) -> str:
         raise ValueError("Export directory cannot be problem_dir root")
     if any(p == ".." for p in parts):
         raise ValueError(f"Export directory escapes problem_dir: {rel_export_dir}")
+    if parts[0].lower() in _RESERVED_DIRS:
+        raise ValueError(
+            f"Export directory targets reserved problem subdirectory {parts[0]!r}: {rel_export_dir}"
+        )
+    return parts
 
+
+def _resolve_safe_export_dir(problem_dir: str, rel_export_dir: str) -> str:
+    """Validate and resolve an export subdirectory strictly inside ``problem_dir`` without deleting it yet."""
+    parts = _validate_export_rel_parts(rel_export_dir)
     real_root = os.path.realpath(problem_dir)
     cur = real_root
     for part in parts:
@@ -191,10 +202,140 @@ def _prepare_clean_export_dir(problem_dir: str, rel_export_dir: str) -> str:
         raise ValueError("Export directory cannot be problem_dir root")
     if os.path.exists(target) and not os.path.isdir(target):
         raise ValueError(f"Export target exists and is not a directory: {rel_export_dir}")
+    return target
+
+
+def _prepare_clean_export_dir(problem_dir: str, rel_export_dir: str) -> str:
+    """Resolve and cleanly recreate an export subdirectory strictly inside ``problem_dir``.
+
+    Rejects traversal, root deletion, reserved problem subdirectories, non-directory targets,
+    and any symlink component along the path before calling ``shutil.rmtree``.
+    """
+    target = _resolve_safe_export_dir(problem_dir, rel_export_dir)
     if os.path.exists(target):
         shutil.rmtree(target)
     os.makedirs(target, exist_ok=True)
     return target
+
+
+def _commit_staged_export_dir(stage_dir: str, target_dir: str) -> None:
+    """Atomically swap a validated staging directory into ``target_dir``."""
+    if os.path.islink(target_dir):
+        raise ValueError(f"Export target is a symlink: {target_dir}")
+    if os.path.exists(target_dir):
+        if not os.path.isdir(target_dir):
+            raise ValueError(f"Export target exists and is not a directory: {target_dir}")
+        shutil.rmtree(target_dir)
+    os.rename(stage_dir, target_dir)
+
+
+def _cleanup_stale_sibling(target_path: str, *, is_zip: bool) -> None:
+    """Remove stale sibling export artifact left from a previous export_data_mode."""
+    if is_zip:
+        if target_path.endswith(".zip"):
+            sibling_dir = target_path[:-4]
+            if os.path.isdir(sibling_dir) and not os.path.islink(sibling_dir):
+                shutil.rmtree(sibling_dir, ignore_errors=True)
+    else:
+        sibling_zip = f"{target_path}.zip"
+        if os.path.isfile(sibling_zip) and not os.path.islink(sibling_zip):
+            try:
+                os.unlink(sibling_zip)
+            except OSError:
+                pass
+
+
+def _prepare_safe_zip_path(problem_dir: str, rel_export_dir: str) -> str:
+    """Validate and resolve ``<problem_dir>/<rel_export_dir>.zip`` strictly under ``problem_dir``."""
+    parts = _validate_export_rel_parts(rel_export_dir)
+    zip_parts = [*parts[:-1], f"{parts[-1]}.zip"]
+    real_root = os.path.realpath(problem_dir)
+    cur = real_root
+    for part in zip_parts:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise ValueError(f"Export archive path contains a symlink: {rel_export_dir}")
+
+    target = safe_resolve_under_root(problem_dir, "/".join(zip_parts))
+    if target is None:
+        raise ValueError(f"Export archive escapes problem_dir: {rel_export_dir}")
+    if os.path.normcase(target) == os.path.normcase(real_root):
+        raise ValueError("Export archive cannot be problem_dir root")
+    if os.path.exists(target) and os.path.isdir(target):
+        raise ValueError(f"Export archive target exists and is a directory: {target}")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    return target
+
+
+def _zip_directory(src_dir: str, zip_path: str) -> None:
+    """Atomically create a deterministic deflated zip archive of ``src_dir`` at ``zip_path``."""
+    src_root = Path(src_dir)
+    all_entries = sorted(src_root.rglob("*"))
+    all_files: list[Path] = []
+    for entry in all_entries:
+        if entry.is_symlink():
+            raise ValueError(f"Refusing to archive symlink inside export staging dir: {entry}")
+        if entry.is_file():
+            all_files.append(entry)
+
+    parent_dir = os.path.dirname(zip_path) or "."
+    os.makedirs(parent_dir, exist_ok=True)
+    tmp_zip: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=parent_dir,
+            prefix=".tmp_export_",
+            suffix=".zip",
+            delete=False,
+        ) as tmp_f:
+            tmp_zip = tmp_f.name
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for file_path in all_files:
+                arcname = file_path.relative_to(src_root).as_posix()
+                zinfo = zipfile.ZipInfo(filename=arcname, date_time=(2020, 1, 1, 0, 0, 0))
+                zinfo.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(zinfo, file_path.read_bytes())
+        os.replace(tmp_zip, zip_path)
+        tmp_zip = None
+    finally:
+        if tmp_zip is not None and os.path.lexists(tmp_zip):
+            try:
+                os.unlink(tmp_zip)
+            except OSError:
+                pass
+
+
+def _is_effectively_empty_file(path: str) -> bool:
+    """Return True if file is 0 bytes or whitespace-only."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return True
+    if size == 0:
+        return True
+    if size > 64:
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return not f.read().strip()
+    except OSError:
+        return False
+
+
+def _stage_data_file(src: str, dst: str, data_mode: ExportDataMode) -> str:
+    """Stage a test data file via hardlink (with copy fallback) or copy."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if data_mode == "hardlink":
+        if os.path.lexists(dst):
+            os.unlink(dst)
+        try:
+            os.link(src, dst)
+            return "hardlink"
+        except OSError:
+            shutil.copy2(src, dst)
+            return "copy"
+    shutil.copy2(src, dst)
+    return "copy"
 
 
 def _copy_if_safe_file(problem_dir: str, rel_src: str, dest_path: str) -> bool:
@@ -210,13 +351,15 @@ def _collect_safe_test_pairs(
     problem_dir: str,
     in_files: list[str],
     answer_ext: str,
-) -> list[tuple[str, str, str, str]]:
+    *,
+    allow_missing_answer: bool = False,
+) -> list[tuple[str, str | None, str, str | None]]:
     """Validate and resolve ``(in_name, ans_name, src_in_abs, src_ans_abs)`` pairs strictly under ``problem_dir``."""
     norm_ext = normalize_answer_ext(answer_ext)
     if norm_ext is None:
         raise ValueError(f"Invalid answer_ext: {answer_ext!r}")
 
-    pairs: list[tuple[str, str, str, str]] = []
+    pairs: list[tuple[str, str | None, str, str | None]] = []
     for in_file in in_files:
         if (
             not isinstance(in_file, str)
@@ -236,9 +379,119 @@ def _collect_safe_test_pairs(
         if src_ans is None:
             raise ValueError(f"Test answer escapes problem_dir: {ans_file}")
 
-        if os.path.isfile(src_in) and os.path.isfile(src_ans):
+        if not os.path.isfile(src_in):
+            continue
+        if os.path.isfile(src_ans):
             pairs.append((in_file, ans_file, src_in, src_ans))
+        elif allow_missing_answer:
+            pairs.append((in_file, None, src_in, None))
     return pairs
+
+
+def _validate_hydro_export_config(
+    config: dict[str, Any],
+    testdata_dir: str,
+    *,
+    is_interactive: bool,
+    is_communication: bool,
+    comm_mode: str | None,
+    answer_ext: str = ".ans",
+) -> dict[str, Any]:
+    """Validate platform-specific Hydro config.yaml fields and interactive cleanliness."""
+    checked_fields: list[str] = ["type", "time", "memory", "subtasks"]
+    errors: list[str] = []
+
+    if is_interactive:
+        if config.get("type") != "interactive":
+            errors.append(f"Hydro interactive export must set type='interactive', got {config.get('type')!r}")
+        checked_fields.append("interactor")
+        interactor_name = config.get("interactor")
+        if not isinstance(interactor_name, str) or not interactor_name:
+            errors.append("Hydro interactive export requires 'interactor' field in testdata/config.yaml")
+        elif not os.path.isfile(os.path.join(testdata_dir, interactor_name)):
+            errors.append(f"Hydro interactive export missing interactor file: testdata/{interactor_name}")
+        norm_ext = normalize_answer_ext(answer_ext) or ".ans"
+        answer_exts = tuple(sorted({".ans", ".out", norm_ext}))
+        empty_answers = [
+            fname
+            for fname in sorted(os.listdir(testdata_dir))
+            if fname.endswith(answer_exts)
+            and os.path.isfile(os.path.join(testdata_dir, fname))
+            and _is_effectively_empty_file(os.path.join(testdata_dir, fname))
+        ]
+        if empty_answers:
+            errors.append(f"Hydro interactive export contains empty answer files: {empty_answers[:10]}")
+    elif is_communication:
+        checked_fields.append("protocol")
+        if config.get("type") != "communication":
+            errors.append(f"Hydro communication export must set type='communication', got {config.get('type')!r}")
+        if not isinstance(config.get("protocol"), dict) or not config["protocol"].get("mode"):
+            errors.append("Hydro communication export requires protocol.mode in testdata/config.yaml")
+        if comm_mode == "grader_linked":
+            checked_fields.append("grader")
+            if config.get("grader") and not os.path.isfile(os.path.join(testdata_dir, str(config["grader"]))):
+                errors.append(f"Hydro communication export missing grader file: testdata/{config['grader']}")
+        else:
+            checked_fields.append("interactor")
+            if config.get("interactor") and not os.path.isfile(os.path.join(testdata_dir, str(config["interactor"]))):
+                errors.append(f"Hydro communication export missing communicator file: testdata/{config['interactor']}")
+
+    if errors:
+        raise ValueError("; ".join(errors))
+    return {"passed": True, "checked_fields": checked_fields}
+
+
+def _validate_qoj_export_config(
+    conf_lines: list[str],
+    out_dir: str,
+    data_dir: str,
+    *,
+    is_interactive: bool,
+    is_communication: bool,
+    expected_tests: int,
+) -> dict[str, Any]:
+    """Validate platform-specific QOJ/UOJ problem.conf fields and interactive cleanliness."""
+    parsed: dict[str, str] = {}
+    for line in conf_lines:
+        parts = line.split(" ", 1)
+        if len(parts) == 2:
+            parsed[parts[0]] = parts[1]
+
+    checked_fields: list[str] = ["use_builtin_judger", "n_tests", "time_limit", "memory_limit"]
+    errors: list[str] = []
+    if parsed.get("use_builtin_judger") != "on":
+        errors.append("QOJ export requires 'use_builtin_judger on'")
+    if parsed.get("n_tests") != str(expected_tests):
+        errors.append(f"QOJ export n_tests={parsed.get('n_tests')!r} != {expected_tests}")
+
+    if is_interactive:
+        checked_fields.extend(["interaction_mode", "interactor"])
+        if parsed.get("interaction_mode") != "on":
+            errors.append("QOJ interactive export requires 'interaction_mode on'")
+        interactor_name = parsed.get("interactor")
+        if not interactor_name:
+            errors.append("QOJ interactive export requires 'interactor <file>' in problem.conf")
+        elif not os.path.isfile(os.path.join(out_dir, interactor_name)):
+            errors.append(f"QOJ interactive export missing interactor file: {interactor_name}")
+        if "use_builtin_checker" in parsed:
+            errors.append("QOJ interactive export must not set use_builtin_checker")
+        empty_answers = [
+            fname
+            for fname in sorted(os.listdir(data_dir))
+            if not fname.endswith(".in")
+            and os.path.isfile(os.path.join(data_dir, fname))
+            and _is_effectively_empty_file(os.path.join(data_dir, fname))
+        ]
+        if empty_answers:
+            errors.append(f"QOJ interactive export contains empty answer files: {empty_answers[:10]}")
+    elif is_communication:
+        checked_fields.append("communication_mode")
+        if not parsed.get("communication_mode"):
+            errors.append("QOJ communication export requires 'communication_mode'")
+
+    if errors:
+        raise ValueError("; ".join(errors))
+    return {"passed": True, "checked_fields": checked_fields}
 
 
 def export_hydro(
@@ -251,12 +504,11 @@ def export_hydro(
     answer_ext: str,
     tests_manifest: dict[str, Any] | None = None,
     output_rel_dir: str = "exports/hydro",
+    data_mode: ExportDataMode = "hardlink",
 ) -> dict[str, Any]:
-    """Export problem package to Hydro OJ format under ``exports/hydro/``."""
-    safe_pairs = _collect_safe_test_pairs(problem_dir, in_files, answer_ext)
-    out_dir = _prepare_clean_export_dir(problem_dir, output_rel_dir)
-    testdata_dir = os.path.join(out_dir, "testdata")
-    os.makedirs(testdata_dir, exist_ok=True)
+    """Export problem package to Hydro OJ format under ``exports/hydro/`` (or ``exports/hydro.zip``)."""
+    if data_mode not in _ALLOWED_DATA_MODES:
+        raise ValueError(f"Unsupported data_mode: {data_mode!r}; expected one of: copy, hardlink, zip")
 
     is_interactive = manifest_is_interactive(manifest)
     is_communication = manifest_is_communication(manifest)
@@ -267,161 +519,243 @@ def export_hydro(
         else None
     )
 
-    # 1. problem.yaml
-    tags: list[str] = ["autocode"]
-    if is_interactive:
-        tags.append("interactive")
-    elif is_communication:
-        tags.append("communication")
-        if comm_mode:
-            tags.append(comm_mode)
-    elif spj_checker:
-        tags.append("special-judge")
-    if manifest.subtasks:
-        tags.append("subtasks")
-
-    problem_yaml: dict[str, Any] = {
-        "title": manifest.problem_name,
-        "tag": tags,
-    }
-    Path(out_dir, "problem.yaml").write_text(
-        yaml.safe_dump(problem_yaml, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
+    safe_pairs = _collect_safe_test_pairs(
+        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
     )
 
-    # 2. problem_zh.md (statement)
-    exported_files: list[str] = ["problem.yaml"]
-    if _copy_if_safe_file(
-        problem_dir, manifest.statement_path, os.path.join(out_dir, "problem_zh.md")
-    ) or _copy_if_safe_file(
-        problem_dir, "statements/README.md", os.path.join(out_dir, "problem_zh.md")
-    ):
-        exported_files.append("problem_zh.md")
+    zip_target: str | None = None
+    target_dir: str | None = None
+    temp_ctx: tempfile.TemporaryDirectory[str] | None = None
+    stage_dir: str | None = None
+    if data_mode == "zip":
+        zip_target = _prepare_safe_zip_path(problem_dir, output_rel_dir)
+        temp_ctx = tempfile.TemporaryDirectory()
+        out_dir = temp_ctx.name
+    else:
+        target_dir = _resolve_safe_export_dir(problem_dir, output_rel_dir)
+        parent_dir = os.path.dirname(target_dir)
+        os.makedirs(parent_dir, exist_ok=True)
+        stage_dir = tempfile.mkdtemp(prefix=".tmp_export_", dir=parent_dir)
+        out_dir = stage_dir
 
-    # 3. Copy validated (input, answer) test data pairs
-    case_pairs: list[tuple[str, str]] = []
-    for in_file, ans_file, src_in, src_ans in safe_pairs:
-        shutil.copy2(src_in, os.path.join(testdata_dir, in_file))
-        shutil.copy2(src_ans, os.path.join(testdata_dir, ans_file))
-        case_pairs.append((in_file, ans_file))
-    valid_in_files = [pair[0] for pair in case_pairs]
+    try:
+        testdata_dir = os.path.join(out_dir, "testdata")
+        os.makedirs(testdata_dir, exist_ok=True)
 
-    # 4. Copy judge assets (testlib.h, checker / interactor / communicator / grader / header)
-    if _copy_if_safe_file(problem_dir, "files/testlib.h", os.path.join(testdata_dir, "testlib.h")):
-        exported_files.append("testdata/testlib.h")
+        # 1. problem.yaml
+        tags: list[str] = ["autocode"]
+        if is_interactive:
+            tags.append("interactive")
+        elif is_communication:
+            tags.append("communication")
+            if comm_mode:
+                tags.append(comm_mode)
+        elif spj_checker:
+            tags.append("special-judge")
+        if manifest.subtasks:
+            tags.append("subtasks")
 
-    config: dict[str, Any] = {
-        "time": f"{time_limit_ms}ms",
-        "memory": f"{memory_limit_mb}m",
-    }
+        problem_yaml: dict[str, Any] = {
+            "title": manifest.problem_name,
+            "tag": tags,
+        }
+        Path(out_dir, "problem.yaml").write_text(
+            yaml.safe_dump(problem_yaml, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
 
-    if is_interactive:
-        config["type"] = "interactive"
+        # 2. problem_zh.md (statement)
+        exported_files: list[str] = ["problem.yaml"]
         if _copy_if_safe_file(
-            problem_dir, "files/interactor.cpp", os.path.join(testdata_dir, "interactor.cpp")
+            problem_dir, manifest.statement_path, os.path.join(out_dir, "problem_zh.md")
         ) or _copy_if_safe_file(
-            problem_dir, "interactor.cpp", os.path.join(testdata_dir, "interactor.cpp")
+            problem_dir, "statements/README.md", os.path.join(out_dir, "problem_zh.md")
         ):
-            config["interactor"] = "interactor.cpp"
-            exported_files.append("testdata/interactor.cpp")
-    elif is_communication:
-        config["type"] = "communication"
-        protocol_meta: dict[str, Any] = {"mode": comm_mode or "run_twice"}
-        if manifest.protocol is not None:
-            if comm_mode == "run_twice":
-                protocol_meta["passes"] = manifest.protocol.passes
-                protocol_meta["pass_headers"] = list(manifest.protocol.pass_headers)
-            for k in ("max_bits", "max_bytes", "max_rounds", "max_queries"):
-                val = getattr(manifest.protocol, k, None)
-                if val is not None:
-                    protocol_meta[k] = val
-            if manifest.protocol.participant_solutions:
-                protocol_meta["participant_solutions"] = list(
-                    manifest.protocol.participant_solutions
-                )
-        config["protocol"] = protocol_meta
+            exported_files.append("problem_zh.md")
 
-        if comm_mode == "grader_linked":
-            grader_rel = resolve_grader_source_existing(problem_dir, manifest)
-            if grader_rel:
-                grader_name = os.path.basename(grader_rel)
-                if _copy_if_safe_file(
-                    problem_dir, grader_rel, os.path.join(testdata_dir, grader_name)
-                ):
-                    config["grader"] = grader_name
-                    exported_files.append(f"testdata/{grader_name}")
-            hdr_rel = (
-                manifest.protocol.header_file
-                if (manifest.protocol and manifest.protocol.header_file)
-                else "files/problem.h"
+        # 3. Stage validated test data (omit empty .ans files for interactive problems)
+        case_pairs: list[tuple[str, str | None]] = []
+        omitted_empty_answers: list[str] = []
+        stage_mode_used: set[str] = set()
+        effective_stage_arg: ExportDataMode = "copy" if data_mode == "zip" else data_mode
+
+        for in_file, ans_file, src_in, src_ans in safe_pairs:
+            stage_mode_used.add(
+                _stage_data_file(src_in, os.path.join(testdata_dir, in_file), effective_stage_arg)
             )
-            if hdr_rel:
-                hdr_name = os.path.basename(hdr_rel)
-                if _copy_if_safe_file(problem_dir, hdr_rel, os.path.join(testdata_dir, hdr_name)):
-                    config["header"] = hdr_name
-                    exported_files.append(f"testdata/{hdr_name}")
+            if is_interactive and (src_ans is None or _is_effectively_empty_file(src_ans)):
+                if ans_file is not None:
+                    omitted_empty_answers.append(ans_file)
+                case_pairs.append((in_file, None))
+            elif src_ans is not None and ans_file is not None:
+                stage_mode_used.add(
+                    _stage_data_file(
+                        src_ans, os.path.join(testdata_dir, ans_file), effective_stage_arg
+                    )
+                )
+                case_pairs.append((in_file, ans_file))
+            else:
+                case_pairs.append((in_file, None))
+        valid_in_files = [pair[0] for pair in case_pairs]
+
+        # 4. Copy judge assets (testlib.h, checker / interactor / communicator / grader / header)
+        if _copy_if_safe_file(problem_dir, "files/testlib.h", os.path.join(testdata_dir, "testlib.h")):
+            exported_files.append("testdata/testlib.h")
+
+        config: dict[str, Any] = {
+            "time": f"{time_limit_ms}ms",
+            "memory": f"{memory_limit_mb}m",
+        }
+
+        if is_interactive:
+            config["type"] = "interactive"
+            if _copy_if_safe_file(
+                problem_dir, "files/interactor.cpp", os.path.join(testdata_dir, "interactor.cpp")
+            ) or _copy_if_safe_file(
+                problem_dir, "interactor.cpp", os.path.join(testdata_dir, "interactor.cpp")
+            ):
+                config["interactor"] = "interactor.cpp"
+                exported_files.append("testdata/interactor.cpp")
+        elif is_communication:
+            config["type"] = "communication"
+            protocol_meta: dict[str, Any] = {"mode": comm_mode or "run_twice"}
+            if manifest.protocol is not None:
+                if comm_mode == "run_twice":
+                    protocol_meta["passes"] = manifest.protocol.passes
+                    protocol_meta["pass_headers"] = list(manifest.protocol.pass_headers)
+                for k in ("max_bits", "max_bytes", "max_rounds", "max_queries"):
+                    val = getattr(manifest.protocol, k, None)
+                    if val is not None:
+                        protocol_meta[k] = val
+                if manifest.protocol.participant_solutions:
+                    protocol_meta["participant_solutions"] = list(
+                        manifest.protocol.participant_solutions
+                    )
+            config["protocol"] = protocol_meta
+
+            if comm_mode == "grader_linked":
+                grader_rel = resolve_grader_source_existing(problem_dir, manifest)
+                if grader_rel:
+                    grader_name = os.path.basename(grader_rel)
+                    if _copy_if_safe_file(
+                        problem_dir, grader_rel, os.path.join(testdata_dir, grader_name)
+                    ):
+                        config["grader"] = grader_name
+                        exported_files.append(f"testdata/{grader_name}")
+                hdr_rel = (
+                    manifest.protocol.header_file
+                    if (manifest.protocol and manifest.protocol.header_file)
+                    else "files/problem.h"
+                )
+                if hdr_rel:
+                    hdr_name = os.path.basename(hdr_rel)
+                    if _copy_if_safe_file(problem_dir, hdr_rel, os.path.join(testdata_dir, hdr_name)):
+                        config["header"] = hdr_name
+                        exported_files.append(f"testdata/{hdr_name}")
+            else:
+                comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
+                if comm_rel:
+                    comm_name = os.path.basename(comm_rel)
+                    if _copy_if_safe_file(
+                        problem_dir, comm_rel, os.path.join(testdata_dir, comm_name)
+                    ):
+                        config["interactor"] = comm_name
+                        exported_files.append(f"testdata/{comm_name}")
         else:
-            comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
-            if comm_rel:
-                comm_name = os.path.basename(comm_rel)
-                if _copy_if_safe_file(
-                    problem_dir, comm_rel, os.path.join(testdata_dir, comm_name)
-                ):
-                    config["interactor"] = comm_name
-                    exported_files.append(f"testdata/{comm_name}")
-    else:
-        config["type"] = "default"
-        if spj_checker and _copy_if_safe_file(
-            problem_dir, "files/checker.cpp", os.path.join(testdata_dir, "checker.cpp")
-        ):
-            config["checker_type"] = "testlib"
-            config["checker"] = "checker.cpp"
-            exported_files.append("testdata/checker.cpp")
+            config["type"] = "default"
+            if spj_checker and _copy_if_safe_file(
+                problem_dir, "files/checker.cpp", os.path.join(testdata_dir, "checker.cpp")
+            ):
+                config["checker_type"] = "testlib"
+                config["checker"] = "checker.cpp"
+                exported_files.append("testdata/checker.cpp")
 
-    # 5. Subtasks in config.yaml
-    if manifest.subtasks:
-        st_map = map_tests_to_subtasks(valid_in_files, manifest.subtasks, tests_manifest)
-        hydro_subtasks: list[dict[str, Any]] = []
-        for st in manifest.subtasks:
-            indices = st_map.get(st.id, [])
-            st_cases = [
-                {"input": case_pairs[i - 1][0], "output": case_pairs[i - 1][1]}
-                for i in indices
-                if 1 <= i <= len(case_pairs)
+        def _hydro_case_item(inp: str, out: str | None) -> dict[str, str]:
+            return {"input": inp, "output": out} if out is not None else {"input": inp}
+
+        # 5. Subtasks in config.yaml
+        if manifest.subtasks:
+            st_map = map_tests_to_subtasks(valid_in_files, manifest.subtasks, tests_manifest)
+            hydro_subtasks: list[dict[str, Any]] = []
+            for st in manifest.subtasks:
+                indices = st_map.get(st.id, [])
+                st_cases = [
+                    _hydro_case_item(case_pairs[i - 1][0], case_pairs[i - 1][1])
+                    for i in indices
+                    if 1 <= i <= len(case_pairs)
+                ]
+                entry: dict[str, Any] = {
+                    "id": st.id,
+                    "score": st.score,
+                    "cases": st_cases,
+                }
+                if st.name:
+                    entry["name"] = st.name
+                if st.dependencies:
+                    entry["if"] = list(st.dependencies)
+                hydro_subtasks.append(entry)
+            config["subtasks"] = hydro_subtasks
+        else:
+            config["subtasks"] = [
+                {
+                    "id": 1,
+                    "score": 100,
+                    "cases": [_hydro_case_item(inp, out) for inp, out in case_pairs],
+                }
             ]
-            entry: dict[str, Any] = {
-                "id": st.id,
-                "score": st.score,
-                "cases": st_cases,
-            }
-            if st.name:
-                entry["name"] = st.name
-            if st.dependencies:
-                entry["if"] = list(st.dependencies)
-            hydro_subtasks.append(entry)
-        config["subtasks"] = hydro_subtasks
-    else:
-        config["subtasks"] = [
-            {
-                "id": 1,
-                "score": 100,
-                "cases": [{"input": inp, "output": out} for inp, out in case_pairs],
-            }
-        ]
 
-    Path(testdata_dir, "config.yaml").write_text(
-        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-    exported_files.append("testdata/config.yaml")
+        config_validation = _validate_hydro_export_config(
+            config,
+            testdata_dir,
+            is_interactive=is_interactive,
+            is_communication=is_communication,
+            comm_mode=comm_mode,
+            answer_ext=answer_ext,
+        )
 
-    return {
-        "format": "hydro",
-        "output_dir": out_dir,
-        "test_count": len(case_pairs),
-        "subtask_count": len(config["subtasks"]),
-        "files": exported_files,
-    }
+        Path(testdata_dir, "config.yaml").write_text(
+            yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        exported_files.append("testdata/config.yaml")
+
+        if data_mode == "zip" and zip_target is not None:
+            _zip_directory(out_dir, zip_target)
+            _cleanup_stale_sibling(zip_target, is_zip=True)
+            effective_data_mode = "zip"
+            final_output_dir = zip_target
+        else:
+            assert stage_dir is not None and target_dir is not None
+            _commit_staged_export_dir(stage_dir, target_dir)
+            stage_dir = None
+            _cleanup_stale_sibling(target_dir, is_zip=False)
+            final_output_dir = target_dir
+            if stage_mode_used == {"hardlink"}:
+                effective_data_mode = "hardlink"
+            elif "hardlink" in stage_mode_used:
+                effective_data_mode = "mixed"
+            else:
+                effective_data_mode = "copy"
+
+        result_dict: dict[str, Any] = {
+            "format": "hydro",
+            "output_dir": final_output_dir,
+            "data_mode": data_mode,
+            "effective_data_mode": effective_data_mode,
+            "test_count": len(case_pairs),
+            "subtask_count": len(config["subtasks"]),
+            "omitted_empty_answers": omitted_empty_answers,
+            "config_validation": config_validation,
+            "files": exported_files,
+        }
+        if zip_target is not None:
+            result_dict["archive_path"] = zip_target
+        return result_dict
+    finally:
+        if temp_ctx is not None:
+            temp_ctx.cleanup()
+        if stage_dir is not None and os.path.exists(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def export_qoj(
@@ -434,9 +768,24 @@ def export_qoj(
     answer_ext: str,
     tests_manifest: dict[str, Any] | None = None,
     output_rel_dir: str = "exports/qoj",
+    data_mode: ExportDataMode = "hardlink",
 ) -> dict[str, Any]:
-    """Export problem package to QOJ / UOJ format under ``exports/qoj/``."""
-    safe_pairs = _collect_safe_test_pairs(problem_dir, in_files, answer_ext)
+    """Export problem package to QOJ / UOJ format under ``exports/qoj/`` (or ``exports/qoj.zip``)."""
+    if data_mode not in _ALLOWED_DATA_MODES:
+        raise ValueError(f"Unsupported data_mode: {data_mode!r}; expected one of: copy, hardlink, zip")
+
+    is_interactive = manifest_is_interactive(manifest)
+    is_communication = manifest_is_communication(manifest)
+    spj_checker = manifest_uses_testlib_checker(manifest)
+    comm_mode = (
+        (manifest.protocol.mode if manifest.protocol else "run_twice")
+        if is_communication
+        else None
+    )
+
+    safe_pairs = _collect_safe_test_pairs(
+        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
+    )
     norm_ext = normalize_answer_ext(answer_ext)
     assert norm_ext is not None
     ext_no_dot = norm_ext.lstrip(".") or "ans"
@@ -497,145 +846,206 @@ def export_qoj(
 
         ordered_indices = reordered
 
-    # Prepare clean output directory only after all validation/toposort succeeded.
-    out_dir = _prepare_clean_export_dir(problem_dir, output_rel_dir)
-    data_dir = os.path.join(out_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
-
-    is_interactive = manifest_is_interactive(manifest)
-    is_communication = manifest_is_communication(manifest)
-    spj_checker = manifest_uses_testlib_checker(manifest)
-    comm_mode = (
-        (manifest.protocol.mode if manifest.protocol else "run_twice")
-        if is_communication
-        else None
-    )
-
-    copied_count = 0
-    for new_idx, orig_idx in enumerate(ordered_indices, 1):
-        _, _, src_in, src_ans = safe_pairs[orig_idx - 1]
-        shutil.copy2(src_in, os.path.join(data_dir, f"{new_idx}.in"))
-        shutil.copy2(src_ans, os.path.join(data_dir, f"{new_idx}.{ext_no_dot}"))
-        copied_count += 1
-
-    exported_files: list[str] = ["problem.conf"]
-    if _copy_if_safe_file(
-        problem_dir, manifest.statement_path, os.path.join(out_dir, "statement.md")
-    ) or _copy_if_safe_file(
-        problem_dir, "statements/README.md", os.path.join(out_dir, "statement.md")
-    ):
-        exported_files.append("statement.md")
-
-    if _copy_if_safe_file(problem_dir, "files/testlib.h", os.path.join(out_dir, "testlib.h")):
-        exported_files.append("testlib.h")
-
-    tl_sec = max(1, math.ceil(time_limit_ms / 1000.0))
-    # Omit empty input_pre/output_pre (UOJ/QOJ defaults omitted prefixes to "";
-    # writing bare keys with trailing space breaks whitespace-tokenized load_config).
-    conf_lines: list[str] = [
-        "use_builtin_judger on",
-        f"n_tests {copied_count}",
-        "n_ex_tests 0",
-        "n_sample_tests 0",
-        "input_suf in",
-        f"output_suf {ext_no_dot}",
-        f"time_limit {tl_sec}",
-        f"time_limit_ms {time_limit_ms}",
-        f"memory_limit {memory_limit_mb}",
-        "output_limit 64",
-    ]
-
-    if is_interactive:
-        conf_lines.append("interaction_mode on")
-        if _copy_if_safe_file(
-            problem_dir, "files/interactor.cpp", os.path.join(out_dir, "interactor.cpp")
-        ) or _copy_if_safe_file(
-            problem_dir, "interactor.cpp", os.path.join(out_dir, "interactor.cpp")
-        ):
-            conf_lines.append("interactor interactor.cpp")
-            exported_files.append("interactor.cpp")
-    elif is_communication:
-        conf_lines.append(f"communication_mode {comm_mode or 'run_twice'}")
-        if comm_mode == "grader_linked":
-            conf_lines.append("with_implementer on")
-            grader_rel = resolve_grader_source_existing(problem_dir, manifest)
-            if grader_rel:
-                grader_name = os.path.basename(grader_rel)
-                if _copy_if_safe_file(problem_dir, grader_rel, os.path.join(out_dir, grader_name)):
-                    conf_lines.append(f"implementer {grader_name}")
-                    exported_files.append(grader_name)
-            hdr_rel = (
-                manifest.protocol.header_file
-                if (manifest.protocol and manifest.protocol.header_file)
-                else "files/problem.h"
-            )
-            if hdr_rel:
-                hdr_name = os.path.basename(hdr_rel)
-                if _copy_if_safe_file(problem_dir, hdr_rel, os.path.join(out_dir, hdr_name)):
-                    conf_lines.append(f"header {hdr_name}")
-                    exported_files.append(hdr_name)
-        elif comm_mode == "multi_process":
-            n_parts = max(
-                2,
-                len(manifest.protocol.participant_solutions) if manifest.protocol else 2,
-            )
-            conf_lines.append(f"n_participants {n_parts}")
-            comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
-            if comm_rel:
-                comm_name = os.path.basename(comm_rel)
-                if _copy_if_safe_file(problem_dir, comm_rel, os.path.join(out_dir, comm_name)):
-                    conf_lines.append(f"communicator {comm_name}")
-                    exported_files.append(comm_name)
-        else:
-            # run_twice (QOJ two-stage communication)
-            passes = manifest.protocol.passes if manifest.protocol else 2
-            if passes == 2:
-                conf_lines.append("two_stage on")
-            conf_lines.append(f"n_passes {passes}")
-            comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
-            if comm_rel:
-                comm_name = os.path.basename(comm_rel)
-                if _copy_if_safe_file(problem_dir, comm_rel, os.path.join(out_dir, comm_name)):
-                    conf_lines.append(f"communicator {comm_name}")
-                    exported_files.append(comm_name)
-
-        if manifest.protocol is not None:
-            for k in ("max_bits", "max_bytes", "max_rounds", "max_queries"):
-                val = getattr(manifest.protocol, k, None)
-                if val is not None:
-                    conf_lines.append(f"{k} {val}")
-    elif spj_checker and _copy_if_safe_file(
-        problem_dir, "files/checker.cpp", os.path.join(out_dir, "chk.cpp")
-    ):
-        conf_lines.append("checker chk.cpp")
-        exported_files.append("chk.cpp")
+    # Prepare clean output directory / zip destination only after all validation/toposort succeeded.
+    zip_target: str | None = None
+    target_dir: str | None = None
+    temp_ctx: tempfile.TemporaryDirectory[str] | None = None
+    stage_dir: str | None = None
+    if data_mode == "zip":
+        zip_target = _prepare_safe_zip_path(problem_dir, output_rel_dir)
+        temp_ctx = tempfile.TemporaryDirectory()
+        out_dir = temp_ctx.name
     else:
-        conf_lines.append("use_builtin_checker lcmp")
+        target_dir = _resolve_safe_export_dir(problem_dir, output_rel_dir)
+        parent_dir = os.path.dirname(target_dir)
+        os.makedirs(parent_dir, exist_ok=True)
+        stage_dir = tempfile.mkdtemp(prefix=".tmp_export_", dir=parent_dir)
+        out_dir = stage_dir
 
-    if ordered_subtasks:
-        conf_lines.append(f"n_subtasks {len(ordered_subtasks)}")
-        # Map SubtaskSpec.id -> 1-based QOJ topological subtask position (dep_pos < pos guaranteed)
-        id_to_pos = {st.id: pos for pos, st in enumerate(ordered_subtasks, 1)}
-        for pos, (st, end_idx) in enumerate(subtask_ends, 1):
-            conf_lines.append(f"subtask_end_{pos} {end_idx}")
-            conf_lines.append(f"subtask_score_{pos} {st.score}")
-            if st.dependencies:
-                dep_positions = [
-                    str(id_to_pos[d]) for d in st.dependencies if d in id_to_pos
-                ]
-                if len(dep_positions) == 1:
-                    conf_lines.append(f"subtask_dependence_{pos} {dep_positions[0]}")
-                elif len(dep_positions) > 1:
-                    conf_lines.append(f"subtask_dependence_{pos} many")
-                    for dep_i, dep_pos in enumerate(dep_positions, 1):
-                        conf_lines.append(f"subtask_dependence_{pos}_{dep_i} {dep_pos}")
+    try:
+        data_dir = os.path.join(out_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
 
-    Path(out_dir, "problem.conf").write_text("\n".join(conf_lines) + "\n", encoding="utf-8")
+        copied_count = 0
+        omitted_empty_answers: list[str] = []
+        stage_mode_used: set[str] = set()
+        effective_stage_arg: ExportDataMode = "copy" if data_mode == "zip" else data_mode
 
-    return {
-        "format": "qoj",
-        "output_dir": out_dir,
-        "test_count": copied_count,
-        "subtask_count": len(ordered_subtasks),
-        "files": exported_files,
-    }
+        for new_idx, orig_idx in enumerate(ordered_indices, 1):
+            _, orig_ans_name, src_in, src_ans = safe_pairs[orig_idx - 1]
+            stage_mode_used.add(
+                _stage_data_file(src_in, os.path.join(data_dir, f"{new_idx}.in"), effective_stage_arg)
+            )
+            if is_interactive and (src_ans is None or _is_effectively_empty_file(src_ans)):
+                if orig_ans_name is not None:
+                    omitted_empty_answers.append(orig_ans_name)
+            elif src_ans is not None:
+                stage_mode_used.add(
+                    _stage_data_file(
+                        src_ans,
+                        os.path.join(data_dir, f"{new_idx}.{ext_no_dot}"),
+                        effective_stage_arg,
+                    )
+                )
+            copied_count += 1
+
+        exported_files: list[str] = ["problem.conf"]
+        if _copy_if_safe_file(
+            problem_dir, manifest.statement_path, os.path.join(out_dir, "statement.md")
+        ) or _copy_if_safe_file(
+            problem_dir, "statements/README.md", os.path.join(out_dir, "statement.md")
+        ):
+            exported_files.append("statement.md")
+
+        if _copy_if_safe_file(problem_dir, "files/testlib.h", os.path.join(out_dir, "testlib.h")):
+            exported_files.append("testlib.h")
+
+        tl_sec = max(1, math.ceil(time_limit_ms / 1000.0))
+        # Omit empty input_pre/output_pre (UOJ/QOJ defaults omitted prefixes to "";
+        # writing bare keys with trailing space breaks whitespace-tokenized load_config).
+        conf_lines: list[str] = [
+            "use_builtin_judger on",
+            f"n_tests {copied_count}",
+            "n_ex_tests 0",
+            "n_sample_tests 0",
+            "input_suf in",
+            f"output_suf {ext_no_dot}",
+            f"time_limit {tl_sec}",
+            f"time_limit_ms {time_limit_ms}",
+            f"memory_limit {memory_limit_mb}",
+            "output_limit 64",
+        ]
+
+        if is_interactive:
+            conf_lines.append("interaction_mode on")
+            if _copy_if_safe_file(
+                problem_dir, "files/interactor.cpp", os.path.join(out_dir, "interactor.cpp")
+            ) or _copy_if_safe_file(
+                problem_dir, "interactor.cpp", os.path.join(out_dir, "interactor.cpp")
+            ):
+                conf_lines.append("interactor interactor.cpp")
+                exported_files.append("interactor.cpp")
+        elif is_communication:
+            conf_lines.append(f"communication_mode {comm_mode or 'run_twice'}")
+            if comm_mode == "grader_linked":
+                conf_lines.append("with_implementer on")
+                grader_rel = resolve_grader_source_existing(problem_dir, manifest)
+                if grader_rel:
+                    grader_name = os.path.basename(grader_rel)
+                    if _copy_if_safe_file(problem_dir, grader_rel, os.path.join(out_dir, grader_name)):
+                        conf_lines.append(f"implementer {grader_name}")
+                        exported_files.append(grader_name)
+                hdr_rel = (
+                    manifest.protocol.header_file
+                    if (manifest.protocol and manifest.protocol.header_file)
+                    else "files/problem.h"
+                )
+                if hdr_rel:
+                    hdr_name = os.path.basename(hdr_rel)
+                    if _copy_if_safe_file(problem_dir, hdr_rel, os.path.join(out_dir, hdr_name)):
+                        conf_lines.append(f"header {hdr_name}")
+                        exported_files.append(hdr_name)
+            elif comm_mode == "multi_process":
+                n_parts = max(
+                    2,
+                    len(manifest.protocol.participant_solutions) if manifest.protocol else 2,
+                )
+                conf_lines.append(f"n_participants {n_parts}")
+                comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
+                if comm_rel:
+                    comm_name = os.path.basename(comm_rel)
+                    if _copy_if_safe_file(problem_dir, comm_rel, os.path.join(out_dir, comm_name)):
+                        conf_lines.append(f"communicator {comm_name}")
+                        exported_files.append(comm_name)
+            else:
+                # run_twice (QOJ two-stage communication)
+                passes = manifest.protocol.passes if manifest.protocol else 2
+                if passes == 2:
+                    conf_lines.append("two_stage on")
+                conf_lines.append(f"n_passes {passes}")
+                comm_rel = resolve_communicator_source_existing(problem_dir, manifest)
+                if comm_rel:
+                    comm_name = os.path.basename(comm_rel)
+                    if _copy_if_safe_file(problem_dir, comm_rel, os.path.join(out_dir, comm_name)):
+                        conf_lines.append(f"communicator {comm_name}")
+                        exported_files.append(comm_name)
+
+            if manifest.protocol is not None:
+                for k in ("max_bits", "max_bytes", "max_rounds", "max_queries"):
+                    val = getattr(manifest.protocol, k, None)
+                    if val is not None:
+                        conf_lines.append(f"{k} {val}")
+        elif spj_checker and _copy_if_safe_file(
+            problem_dir, "files/checker.cpp", os.path.join(out_dir, "chk.cpp")
+        ):
+            conf_lines.append("checker chk.cpp")
+            exported_files.append("chk.cpp")
+        else:
+            conf_lines.append("use_builtin_checker lcmp")
+
+        if ordered_subtasks:
+            conf_lines.append(f"n_subtasks {len(ordered_subtasks)}")
+            # Map SubtaskSpec.id -> 1-based QOJ topological subtask position (dep_pos < pos guaranteed)
+            id_to_pos = {st.id: pos for pos, st in enumerate(ordered_subtasks, 1)}
+            for pos, (st, end_idx) in enumerate(subtask_ends, 1):
+                conf_lines.append(f"subtask_end_{pos} {end_idx}")
+                conf_lines.append(f"subtask_score_{pos} {st.score}")
+                if st.dependencies:
+                    dep_positions = [
+                        str(id_to_pos[d]) for d in st.dependencies if d in id_to_pos
+                    ]
+                    if len(dep_positions) == 1:
+                        conf_lines.append(f"subtask_dependence_{pos} {dep_positions[0]}")
+                    elif len(dep_positions) > 1:
+                        conf_lines.append(f"subtask_dependence_{pos} many")
+                        for dep_i, dep_pos in enumerate(dep_positions, 1):
+                            conf_lines.append(f"subtask_dependence_{pos}_{dep_i} {dep_pos}")
+
+        config_validation = _validate_qoj_export_config(
+            conf_lines,
+            out_dir,
+            data_dir,
+            is_interactive=is_interactive,
+            is_communication=is_communication,
+            expected_tests=copied_count,
+        )
+
+        Path(out_dir, "problem.conf").write_text("\n".join(conf_lines) + "\n", encoding="utf-8")
+
+        if data_mode == "zip" and zip_target is not None:
+            _zip_directory(out_dir, zip_target)
+            _cleanup_stale_sibling(zip_target, is_zip=True)
+            effective_data_mode = "zip"
+            final_output_dir = zip_target
+        else:
+            assert stage_dir is not None and target_dir is not None
+            _commit_staged_export_dir(stage_dir, target_dir)
+            stage_dir = None
+            _cleanup_stale_sibling(target_dir, is_zip=False)
+            final_output_dir = target_dir
+            if stage_mode_used == {"hardlink"}:
+                effective_data_mode = "hardlink"
+            elif "hardlink" in stage_mode_used:
+                effective_data_mode = "mixed"
+            else:
+                effective_data_mode = "copy"
+
+        result_dict: dict[str, Any] = {
+            "format": "qoj",
+            "output_dir": final_output_dir,
+            "data_mode": data_mode,
+            "effective_data_mode": effective_data_mode,
+            "test_count": copied_count,
+            "subtask_count": len(ordered_subtasks),
+            "omitted_empty_answers": omitted_empty_answers,
+            "config_validation": config_validation,
+            "files": exported_files,
+        }
+        if zip_target is not None:
+            result_dict["archive_path"] = zip_target
+        return result_dict
+    finally:
+        if temp_ctx is not None:
+            temp_ctx.cleanup()
+        if stage_dir is not None and os.path.exists(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)

@@ -603,3 +603,213 @@ async def test_verify_tests_surfaces_infra_error_and_marks_wrong_kill_fail_not_r
     assert "simulated WinJobObject TypeError" in detail["reason"]
     assert detail.get("killing_verdict") != "RE"
 
+
+async def test_wrong_solution_kill_timing_ratios_configurable_tle_and_audit_host_bias_warning(
+    monkeypatch, tmp_path
+):
+    """wrong_solution_kill 应输出 wrong/std 耗时倍率与分布、支持配置 TLE 阈值/相对倍率，并在 audit 提示主机算力偏差。"""
+    from autocode_mcp.utils.compiler import RunResult
+    from autocode_mcp.utils.platform import get_exe_extension
+    from autocode_mcp.workflow.models import QualityGates, SolutionEntry
+
+    pdir = _write_basic_problem(tmp_path)
+    exe_ext = get_exe_extension()
+    (pdir / "solutions" / f"wrong_slow{exe_ext}").write_text("fake", encoding="utf-8")
+
+    # Scenario 1: slow wrong solution on fast host (902ms vs std 50ms -> 18.04x slower) with TL=3000ms
+    manifest = default_manifest("BitmaskDP")
+    manifest.time_limit_ms = 3000
+    manifest.solutions.append(
+        SolutionEntry(name="wrong_slow", role="wrong", path="solutions/wrong_slow.cpp", expected="fail")
+    )
+    manifest.quality_gates = QualityGates(wrong_tle_kill_factor=1.0, wrong_slowdown_kill_ratio=None)
+    save_manifest(str(pdir), manifest)
+
+    async def fake_run_902ms(_bin, _stdin, **_kw):
+        return RunResult(success=True, return_code=0, stdout="1\n", time_ms=902)
+
+    # Make all answers match "1\n" so only timing distinguishes wrong_slow
+    for i in range(1, 5):
+        (pdir / "tests" / f"{i:02d}.ans").write_text("1\n", encoding="utf-8")
+
+    monkeypatch.setattr(tv, "run_binary", fake_run_902ms)
+    verifier = ProblemVerifyTestsTool()
+    std_timings = {f"{i:02d}.in": 50.0 for i in range(1, 5)}
+
+    res_survive = await verifier._check_wrong_solution_kill(
+        str(pdir),
+        str(pdir / "tests"),
+        ["wrong_slow"],
+        ".ans",
+        30,
+        manifest=manifest,
+        std_timings=std_timings,
+    )
+    assert res_survive["passed"] is False
+    detail = res_survive["details"][0]
+    assert detail["killed"] is False
+    assert detail["max_time_ms"] == 902.0
+    assert detail["std_max_time_ms"] == 50.0
+    assert detail["max_ratio_to_std"] == pytest.approx(18.04, abs=0.05)
+    assert len(detail["per_test_timings"]) == 4
+    assert detail["suspect_slow_tests"]
+    assert "host_speed_warning" in detail
+
+    # Persist into workflow verify_signals and verify problem_audit emits host_performance_bias warning
+    set_section(
+        str(pdir),
+        "workflow",
+        {
+            "tests_verified": True,
+            "verify_signals": {
+                "limit_semantics": {"executed": True, "passed": True},
+                "validator_check": {"executed": True, "passed": True},
+                "wrong_solution_kill": {"executed": True, "passed": False, "evidence": res_survive},
+                "answer_consistency": {"executed": True, "passed": True},
+            },
+        },
+    )
+    audit_res = await ProblemAuditTool().execute(problem_dir=str(pdir), mode="full")
+    assert audit_res.success
+    assert any(
+        w["gate"] == "host_performance_bias" for w in audit_res.data["risk_report"]["warnings"]
+    )
+
+    # Scenario 2: wrong_slowdown_kill_ratio=10.0 kills the 18x slower wrong solution as TLE
+    res_rel_kill = await verifier._check_wrong_solution_kill(
+        str(pdir),
+        str(pdir / "tests"),
+        ["wrong_slow"],
+        ".ans",
+        30,
+        manifest=manifest,
+        std_timings=std_timings,
+        slowdown_kill_ratio=10.0,
+    )
+    assert res_rel_kill["passed"] is True
+    assert res_rel_kill["details"][0]["killing_verdict"] == "TLE"
+    assert res_rel_kill["details"][0]["killing_tle_reason"] == "relative_slowdown"
+
+    # Scenario 3: 3200ms vs TL=3000ms (1.07x TL, below legacy 1.5x=4500ms) is killed under default 1.0x factor,
+    # and survives if caller explicitly relaxes tle_kill_factor=1.5
+    async def fake_run_3200ms(_bin, _stdin, **_kw):
+        return RunResult(success=True, return_code=0, stdout="1\n", time_ms=3200)
+
+    monkeypatch.setattr(tv, "run_binary", fake_run_3200ms)
+    res_1x = await verifier._check_wrong_solution_kill(
+        str(pdir),
+        str(pdir / "tests"),
+        ["wrong_slow"],
+        ".ans",
+        30,
+        manifest=manifest,
+        std_timings=std_timings,
+    )
+    assert res_1x["passed"] is True
+    assert res_1x["details"][0]["killing_verdict"] == "TLE"
+    assert res_1x["details"][0]["killing_tle_reason"] == "exceeded_tle_threshold"
+
+    res_1_5x = await verifier._check_wrong_solution_kill(
+        str(pdir),
+        str(pdir / "tests"),
+        ["wrong_slow"],
+        ".ans",
+        30,
+        manifest=manifest,
+        std_timings=std_timings,
+        tle_kill_factor=1.5,
+    )
+    assert res_1_5x["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_wrong_solution_expected_pass_policy_validation_std_cache_and_interactive_empty_ans(
+    monkeypatch, tmp_path
+):
+    """回归：expected=pass 不被相对倍率或 factor<1 误杀、非法 TLE 参数阻断、缺失 std 耗时补测、交互题无/空 .ans 通过检查。"""
+    from pydantic import ValidationError
+
+    from autocode_mcp.utils.compiler import RunResult
+    from autocode_mcp.utils.platform import get_exe_extension
+    from autocode_mcp.workflow.models import QualityGates, SolutionEntry
+
+    pdir = _write_basic_problem(tmp_path)
+    exe_ext = get_exe_extension()
+    (pdir / "solutions" / f"sol{exe_ext}").write_text("fake", encoding="utf-8")
+    (pdir / "solutions" / f"alt_pass{exe_ext}").write_text("fake", encoding="utf-8")
+    for i in range(1, 5):
+        (pdir / "tests" / f"{i:02d}.ans").write_text("1\n", encoding="utf-8")
+
+    # 1. QualityGates rejects NaN/Inf/bool
+    for bad_q in (
+        {"wrong_tle_kill_factor": True},
+        {"wrong_tle_kill_factor": float("nan")},
+        {"wrong_tle_kill_factor": float("inf")},
+        {"wrong_slowdown_kill_ratio": True},
+        {"wrong_slowdown_kill_ratio": float("nan")},
+        {"wrong_slowdown_kill_ratio": 1.0},
+    ):
+        with pytest.raises(ValidationError):
+            QualityGates(**bad_q)
+
+    # 2. Runtime validation in ProblemVerifyTestsTool rejects invalid parameters
+    verifier = ProblemVerifyTestsTool()
+    for bad_kw in (
+        {"tle_kill_factor": 0.0},
+        {"tle_kill_factor": float("nan")},
+        {"tle_kill_factor": True},
+        {"slowdown_kill_ratio": 0.5},
+        {"slowdown_kill_ratio": float("inf")},
+        {"slowdown_kill_ratio": True},
+    ):
+        r = await verifier.execute(problem_dir=str(pdir), **bad_kw)
+        assert not r.success
+
+    # 3. expected="pass" solution running at 600ms (with TL=1000ms, factor=0.5 -> 500ms, slowdown_ratio=3.0 vs std=20ms)
+    # must NOT be falsely killed!
+    manifest = default_manifest("PassProtection")
+    manifest.time_limit_ms = 1000
+    manifest.solutions.append(
+        SolutionEntry(name="alt_pass", role="wrong", path="solutions/alt_pass.cpp", expected="pass")
+    )
+    manifest.quality_gates = QualityGates(wrong_tle_kill_factor=0.5, wrong_slowdown_kill_ratio=3.0)
+    save_manifest(str(pdir), manifest)
+
+    async def fake_run(exe, _stdin, **_kw):
+        if exe.endswith(f"sol{exe_ext}"):
+            return RunResult(success=True, return_code=0, stdout="1\n", time_ms=20)
+        return RunResult(success=True, return_code=0, stdout="1\n", time_ms=600)
+
+    monkeypatch.setattr(tv, "run_binary", fake_run)
+    # Pass partial std_timings (only 01.in) -> missing 02..04.in must be measured automatically
+    res_pass = await verifier._check_wrong_solution_kill(
+        str(pdir),
+        str(pdir / "tests"),
+        ["alt_pass"],
+        ".ans",
+        30,
+        manifest=manifest,
+        std_timings={"01.in": 20.0},
+    )
+    assert res_pass["passed"] is True
+    detail = res_pass["details"][0]
+    assert detail["killed"] is True  # expected="pass" satisfied (all AC)
+    assert len(detail["per_test_timings"]) == 4
+    assert all(item.get("std_time_ms") == 20.0 for item in detail["per_test_timings"])
+
+    # 4. Interactive problem with omitted or empty .ans passes file_count & no_empty, while empty .in still fails
+    itests = tmp_path / "inter_tests"
+    itests.mkdir()
+    (itests / "01.in").write_text("10\n", encoding="utf-8")
+    (itests / "02.in").write_text("20\n", encoding="utf-8")
+    (itests / "02.ans").write_text("", encoding="utf-8")
+    fc = verifier._check_file_count(str(itests), ".ans", is_interactive=True)
+    assert fc["passed"] is True
+    ne = verifier._check_no_empty(str(itests), is_interactive=True, answer_ext=".ans")
+    assert ne["passed"] is True
+    (itests / "03.in").write_text("", encoding="utf-8")
+    ne_bad = verifier._check_no_empty(str(itests), is_interactive=True, answer_ext=".ans")
+    assert ne_bad["passed"] is False
+    assert "03.in" in ne_bad["empty_files"]
+
+

@@ -78,7 +78,10 @@ class CheckerBuildInput(BaseModel):
     code: str | None = None
     source_path: str | None = None
     test_scenarios: list[CheckerScenario] | None = None
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +91,10 @@ class CheckerBuildInput(BaseModel):
 
 class ProblemBuildAllInput(BaseModel):
     problem_dir: str
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
     max_concurrent: int = 4
     include_extra_dirs: list[str] = []
 
@@ -111,11 +117,28 @@ class InteractorBuildInput(BaseModel):
     problem_dir: str
     code: str | None = None
     source_path: str | None = None
-    reference_solution_path: str | None = None
-    mutant_solutions: list[str] | None = None
+    reference_solution_path: str | None = Field(
+        default=None,
+        description=(
+            "Compiled reference solution executable path (e.g. 'solutions/sol' or 'solutions/sol.exe'). "
+            "Relative paths are resolved under problem_dir; passing a .cpp source path automatically "
+            "maps to or compiles its executable binary. When omitted with test_inputs, auto-resolves "
+            "solutions/sol if built."
+        ),
+    )
+    mutant_solutions: list[str] | None = Field(
+        default=None,
+        description=(
+            "List of mutant/wrong solution paths (compiled executables or .cpp source files, "
+            "absolute or relative to problem_dir)."
+        ),
+    )
     interaction_scenarios: list[InteractionScenario] | None = None
     test_inputs: list[str] | None = None
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +150,10 @@ class GeneratorBuildInput(BaseModel):
     problem_dir: str
     code: str | None = None
     source_path: str | None = None
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
     enable_semantic_check: bool = True
     strict_semantic_check: bool = False
 
@@ -160,7 +186,10 @@ class ValidatorBuildInput(BaseModel):
     code: str | None = None
     source_path: str | None = None
     test_cases: list[ValidatorTestCase] | None = None
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
 
 
 class ValidatorCandidate(BaseModel):
@@ -205,7 +234,10 @@ class SolutionBuildInput(BaseModel):
     name: str | None = None
     code: str | None = None
     source_path: str | None = None
-    compiler: str = "g++"
+    compiler: str | None = Field(
+        default=None,
+        description="C++ compiler command/path; defaults to manifest.compiler or 'g++'",
+    )
 
 
 class SolutionRunInput(BaseModel):
@@ -246,6 +278,17 @@ class ProblemVerifyTestsInput(BaseModel):
     answer_ext: str | None = None
     timeout: int = 60
     wrong_solution_names: list[str] | None = None
+    tle_kill_factor: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=5.0,
+        description="Override logical TLE threshold multiplier for wrong_solution_kill (defaults to manifest.quality_gates.wrong_tle_kill_factor, default 1.0)",
+    )
+    slowdown_kill_ratio: float | None = Field(
+        default=None,
+        gt=1.0,
+        description="Optional override: kill wrong solution as TLE when wrong_ms/std_ms >= this ratio (with wrong_ms >= 50ms)",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -375,3 +418,11 @@ class ProblemPackPolygonInput(BaseModel):
         description="Memory limit in MB (e.g., 256 or 512).",
     )
     export_formats: list[Literal["polygon", "hydro", "qoj"]] = ["polygon"]
+    export_data_mode: Literal["copy", "hardlink", "zip"] = Field(
+        default="hardlink",
+        description=(
+            "How Hydro/QOJ exporters stage test data files: "
+            "'hardlink' (default, avoids 3x disk duplication with automatic copy fallback), "
+            "'copy' (independent physical copies), or 'zip' (compressed archive under exports/<fmt>.zip)."
+        ),
+    )

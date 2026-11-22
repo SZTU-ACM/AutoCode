@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from .. import TEMPLATES_DIR
 from ..utils.communication_runner import is_safe_stem, safe_resolve_under_root
-from ..utils.compiler import BuildSpec, compile_all
+from ..utils.compiler import BuildSpec, compile_all, resolve_effective_compiler
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_is_communication
 from .base import Tool, ToolResult, input_schema_from_model
@@ -59,7 +59,7 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
     async def execute(
         self,
         problem_dir: str,
-        compiler: str = "g++",
+        compiler: str | None = None,
         max_concurrent: int = 4,
         include_extra_dirs: list[str] | None = None,
     ) -> ToolResult:
@@ -71,6 +71,10 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
             manifest = load_manifest(problem_dir)
         except (ValidationError, OSError, ValueError) as exc:
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
+        try:
+            effective_compiler = resolve_effective_compiler(compiler, manifest)
+        except ValueError as exc:
+            return ToolResult.fail(f"invalid compiler: {exc}")
 
         extra = [d if os.path.isabs(d) else os.path.join(problem_dir, d) for d in (include_extra_dirs or [])]
         if os.path.isdir(TEMPLATES_DIR):
@@ -170,7 +174,7 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                         source=rel,
                         include_dirs=include_dirs,
                         extra_sources=extra_sources,
-                        compiler=compiler,
+                        compiler=effective_compiler,
                     )
                 )
                 discovered.append(rel)

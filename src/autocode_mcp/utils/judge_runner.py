@@ -364,6 +364,22 @@ class InteractiveRunner:
             return JudgeResult(
                 verdict="FAIL", detail=f"Solution binary not found: {solution_exe}"
             )
+        if os.name != "nt" and not os.access(abs_int, os.X_OK):
+            return JudgeResult(
+                verdict="FAIL",
+                detail=(
+                    f"Interactor path is not executable: {interactor_exe} "
+                    "(pass a compiled binary rather than source code)"
+                ),
+            )
+        if os.name != "nt" and not os.access(abs_sol, os.X_OK):
+            return JudgeResult(
+                verdict="FAIL",
+                detail=(
+                    f"Solution path is not executable: {solution_exe} "
+                    "(pass a compiled binary such as solutions/sol rather than .cpp source code)"
+                ),
+            )
 
         effective_tl_ms = max(100.0, float(time_limit_ms))
         effective_mem_mb = max(16.0, float(memory_limit_mb))
@@ -389,17 +405,23 @@ class InteractiveRunner:
                 popen_kwargs["start_new_session"] = True
 
             wall_start = time.perf_counter()
-            interactor_proc = await asyncio.create_subprocess_exec(
-                abs_int,
-                in_path,
-                out_path,
-                ans_path,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=abs_cwd,
-                **popen_kwargs,
-            )
+            try:
+                interactor_proc = await asyncio.create_subprocess_exec(
+                    abs_int,
+                    in_path,
+                    out_path,
+                    ans_path,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=abs_cwd,
+                    **popen_kwargs,
+                )
+            except OSError as exc:
+                return JudgeResult(
+                    verdict="FAIL",
+                    detail=f"Failed to launch interactor binary {interactor_exe}: {exc}",
+                )
             try:
                 solution_proc = await asyncio.create_subprocess_exec(
                     abs_sol,
@@ -408,6 +430,16 @@ class InteractiveRunner:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=abs_cwd,
                     **popen_kwargs,
+                )
+            except OSError as exc:
+                await terminate_pid_tree(interactor_proc.pid)
+                try:
+                    await asyncio.wait_for(interactor_proc.wait(), timeout=1.0)
+                except Exception:
+                    pass
+                return JudgeResult(
+                    verdict="FAIL",
+                    detail=f"Failed to launch solution binary {solution_exe}: {exc}",
                 )
             except BaseException:
                 await terminate_pid_tree(interactor_proc.pid)
@@ -436,6 +468,7 @@ class InteractiveRunner:
             last_activity_ts = time.perf_counter()
             judge_bytes_sent = 0
             contestant_bytes_sent = 0
+            contestant_messages = 0
             transcript_events: list[tuple[str, bytes]] = []
             transcript_budget = max_transcript_bytes
             abort_reason: str | None = None
@@ -446,10 +479,12 @@ class InteractiveRunner:
                 writer: asyncio.StreamWriter | None,
                 role: str,
             ) -> None:
-                nonlocal last_activity_ts, judge_bytes_sent, contestant_bytes_sent, transcript_budget
+                nonlocal last_activity_ts, judge_bytes_sent, contestant_bytes_sent
+                nonlocal contestant_messages, transcript_budget
                 if reader is None:
                     return
                 writer_open = writer is not None
+                pending_non_ws = False
                 try:
                     while True:
                         chunk = await reader.read(4096)
@@ -460,6 +495,13 @@ class InteractiveRunner:
                             judge_bytes_sent += len(chunk)
                         else:
                             contestant_bytes_sent += len(chunk)
+                            for part in chunk.splitlines(keepends=True):
+                                if part.strip():
+                                    pending_non_ws = True
+                                if part.endswith((b"\n", b"\r")):
+                                    if pending_non_ws:
+                                        contestant_messages += 1
+                                        pending_non_ws = False
                         if transcript_budget > 0:
                             take = min(len(chunk), transcript_budget)
                             transcript_events.append((role, chunk[:take]))
@@ -477,6 +519,8 @@ class InteractiveRunner:
                 except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError, OSError):
                     pass
                 finally:
+                    if role == "contestant" and pending_non_ws:
+                        contestant_messages += 1
                     if writer_open and writer is not None:
                         try:
                             writer.close()
@@ -673,6 +717,7 @@ class InteractiveRunner:
             score, metrics = parse_judge_metrics(judge_stderr, judge_output)
             metrics.setdefault("judge_bytes_sent", judge_bytes_sent)
             metrics.setdefault("contestant_bytes_sent", contestant_bytes_sent)
+            metrics.setdefault("contestant_messages", contestant_messages)
 
             sol_rc = solution_proc.returncode
             int_rc = interactor_proc.returncode
