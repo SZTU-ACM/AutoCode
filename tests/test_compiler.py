@@ -566,6 +566,12 @@ def test_resolve_compiler_prefers_homebrew_gcc_over_apple_clang_on_macos(monkeyp
             if name == "g++-14"
             else ("/usr/bin/g++" if name == "g++" else None),
         )
+        real_isfile = compiler_module.os.path.isfile
+        monkeypatch.setattr(
+            compiler_module.os.path,
+            "isfile",
+            lambda p: False if p.startswith(("/opt/homebrew/bin/", "/usr/local/bin/")) else real_isfile(p),
+        )
         monkeypatch.setattr(
             compiler_module.subprocess,
             "run",
