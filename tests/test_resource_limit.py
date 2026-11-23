@@ -72,12 +72,12 @@ def test_get_resource_limit_sol_defaults():
         assert limit.memory_mb == 256
 
 
-def test_get_resource_limit_brute_defaults():
+def test_get_resource_limit_brute_defaults(monkeypatch):
+    monkeypatch.setattr("autocode_mcp.utils.resource_limit.get_available_memory_mb", lambda: 4096)
     with tempfile.TemporaryDirectory() as tmpdir:
-        available = get_available_memory_mb()
         limit = get_resource_limit(tmpdir, "brute")
         assert limit.timeout_sec == 60
-        assert limit.memory_mb == available
+        assert limit.memory_mb == 4096
 
 
 def test_get_resource_limit_with_config():
@@ -104,14 +104,14 @@ def test_get_resource_limit_with_params():
         assert limit.memory_mb == 1024
 
 
-def test_get_resource_limit_brute_ignores_config():
+def test_get_resource_limit_brute_ignores_config(monkeypatch):
+    monkeypatch.setattr("autocode_mcp.utils.resource_limit.get_available_memory_mb", lambda: 4096)
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = Path(tmpdir)
         config_path = problem_dir / "problem.yaml"
         config_data = {"time_limit": 5, "memory_limit": 512}
         config_path.write_text(yaml.dump(config_data), encoding="utf-8")
 
-        available = get_available_memory_mb()
         limit = get_resource_limit(str(problem_dir), "brute")
         assert limit.timeout_sec == 60
-        assert limit.memory_mb == available
+        assert limit.memory_mb == 4096

@@ -526,7 +526,7 @@ class _ProblemGenerateHelpersMixin:
         t_limit = constraints.get("t_max", 1) if constraints else 1
         sum_n_limit = constraints.get("sum_n_max", n_limit) if constraints else n_limit
 
-        configs = []
+        configs: list[tuple[str, str, str, str, str, str, list[str]]] = []
 
         # 1. 边界情况 (type=1 tiny) - 最小值和极小值
         configs.extend(

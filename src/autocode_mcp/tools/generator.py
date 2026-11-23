@@ -749,7 +749,7 @@ class GeneratorRunTool(Tool):
         if val_exe and not os.path.exists(val_exe):
             val_exe = None
 
-        generated_inputs = []
+        generated_inputs: list[dict[str, object]] = []
         signatures = set()  # 用于去重
         generator_failures: list[dict[str, object]] = []
 

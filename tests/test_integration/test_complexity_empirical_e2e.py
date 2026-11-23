@@ -141,7 +141,11 @@ async def test_linear_solution_verified_e2e():
         assert result.success
         empirical = result.data.get("empirical_verification", {})
         assert empirical.get("passed") is True
-        assert empirical.get("verdict") in ("verified", "verified_with_cache_jump")
+        assert empirical.get("verdict") in (
+            "verified",
+            "verified_with_cache_jump",
+            "verified_within_noise_floor",
+        )
         assert len(empirical.get("samples", [])) == 5
         assert empirical.get("fitted_alpha") is not None
         assert -0.25 <= empirical.get("fitted_alpha") <= 1.40

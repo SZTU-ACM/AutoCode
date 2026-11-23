@@ -92,7 +92,7 @@ def _timing_cache_fingerprint(
     manifest: AutoCodeManifest | None = None,
 ) -> str:
     """Compute a compact fingerprint for std per-test timing cache validation."""
-    exe_ext = get_exe_extension()
+    exe_ext = _tv_facade_attr("get_exe_extension", get_exe_extension)()
     sol_mtimes: list[tuple[str, int]] = []
     for cand in (
         os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}"),

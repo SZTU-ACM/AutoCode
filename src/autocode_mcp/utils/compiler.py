@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -1449,7 +1449,7 @@ async def run_batch(
 
 async def compile_all(
     problem_dir: str,
-    specs: list[str | BuildSpec],
+    specs: Sequence[str | BuildSpec],
     max_concurrent: int = 4,
 ) -> dict[str, CompileResult]:
     """

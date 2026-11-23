@@ -431,9 +431,9 @@ class _VerifyLiveChecksMixin(_VerifyHelpersMixin):
             }
         valid_result = await self._check_validator(problem_dir, tests_dir, timeout)
         invalid_fixtures = self._collect_invalid_fixtures(problem_dir, tests_dir)
-        rejected = []
-        accepted = []
-        fixture_errors = []
+        rejected: list[str] = []
+        accepted: list[str] = []
+        fixture_errors: list[dict[str, str]] = []
         for fixture in invalid_fixtures:
             try:
                 if "path" in fixture:

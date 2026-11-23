@@ -331,7 +331,12 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             self._difficulty_signals(problem_path, manifest, quality_signals) if include_difficulty else {}
         )
         if include_difficulty and mode == "full":
-            confidence = float(difficulty_signals.get("confidence", 0.0))
+            raw_conf = difficulty_signals.get("confidence", 0.0)
+            confidence = (
+                float(raw_conf)
+                if isinstance(raw_conf, int | float) and not isinstance(raw_conf, bool)
+                else 0.0
+            )
             if confidence < manifest.audit_gates.min_difficulty_confidence:
                 warnings.append(
                     {
