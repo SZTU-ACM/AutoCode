@@ -400,9 +400,18 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
 
 
 def _stress_rounds_complete(data: dict[str, Any]) -> bool:
+    raw_completed = data.get("completed_rounds")
+    raw_total = data.get("total_rounds")
+    if (
+        isinstance(raw_completed, bool)
+        or isinstance(raw_total, bool)
+        or not isinstance(raw_completed, int | float | str)
+        or not isinstance(raw_total, int | float | str)
+    ):
+        return False
     try:
-        completed = int(data.get("completed_rounds"))
-        total = int(data.get("total_rounds"))
+        completed = int(raw_completed)
+        total = int(raw_total)
     except (TypeError, ValueError):
         return False
     return total > 0 and completed == total

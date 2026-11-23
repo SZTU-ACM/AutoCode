@@ -106,7 +106,7 @@ async def test_stress_test_sanitizer_catches_vector_oob(tmp_path):
             "    return 0;\n"
             "}\n"
         ),
-        test_cases=[{"input": "5\n", "valid": True}, {"input": "0\n", "valid": False}],
+        test_cases=[{"input": "5\n", "expected_valid": True}, {"input": "0\n", "expected_valid": False}],
     )
     await GeneratorBuildTool().execute(
         problem_dir=str(prob_dir),

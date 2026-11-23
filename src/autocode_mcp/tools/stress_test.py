@@ -893,7 +893,8 @@ class StressTestRunTool(Tool):
 
                     for res in results:  # 按轮序遍历，保证与串行一致的失败传播
                         if res.status == "ok":
-                            round_stats.append(res.stats)
+                            if res.stats is not None:
+                                round_stats.append(res.stats)
                             continue
                         if res.status in ("gen_failed", "sol_failed", "brute_failed"):
                             # 这些失败在串行实现中直接返回，此处同样立即返回。

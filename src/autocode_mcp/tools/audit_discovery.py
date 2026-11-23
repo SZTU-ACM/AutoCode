@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,7 @@ from ..workflow.models import (
     QualityGates,
     SolutionEntry,
 )
+from .complexity import _strip_cpp_comments_and_strings
 
 
 class _AuditDiscoveryMixin:
@@ -126,11 +128,12 @@ class _AuditDiscoveryMixin:
                 continue
             try:
                 with cand.open("r", encoding="utf-8", errors="replace") as f:
-                    snippet = f.read(65536)
+                    snippet = f.read(262144)
             except OSError:
                 continue
+            cleaned = _strip_cpp_comments_and_strings(snippet)
             kind: Literal["interactive", "spj"] = (
-                "interactive" if "registerInteraction" in snippet else "spj"
+                "interactive" if re.search(r"\bregisterInteraction\s*\(", cleaned) else "spj"
             )
             return kind, cand
         return None
@@ -228,10 +231,12 @@ class _AuditDiscoveryMixin:
                         tl_n = root.find(".//judging/testset/time-limit")
                         ml_n = root.find(".//judging/testset/memory-limit")
                         res_tl, res_ml = tl_ms, ml_mb
+                        found_any = False
                         if tl_n is not None and tl_n.text and tl_n.text.strip().isdigit():
                             v = int(tl_n.text.strip())
                             if 100 <= v <= 60_000:
                                 res_tl = v
+                                found_any = True
                         if ml_n is not None and ml_n.text and ml_n.text.strip().isdigit():
                             raw_bytes = int(ml_n.text.strip())
                             if raw_bytes % 1_000_000 == 0 and raw_bytes % (1024 * 1024) != 0:
@@ -240,7 +245,9 @@ class _AuditDiscoveryMixin:
                                 v = raw_bytes // (1024 * 1024)
                             if 16 <= v <= 16_384:
                                 res_ml = v
-                        return res_tl, res_ml
+                                found_any = True
+                        if found_any:
+                            return res_tl, res_ml
             except (ET.ParseError, OSError, ValueError):
                 pass
             return None
@@ -254,13 +261,17 @@ class _AuditDiscoveryMixin:
                     parsed = yaml.safe_load(h_cfg.read_text(encoding="utf-8", errors="replace"))
                     if isinstance(parsed, dict):
                         res_tl, res_ml = tl_ms, ml_mb
+                        found_any = False
                         ptl = _parse_hydro_time_ms(parsed.get("time"))
                         pml = _parse_hydro_mem_mb(parsed.get("memory"))
                         if ptl and 100 <= ptl <= 60_000:
                             res_tl = ptl
+                            found_any = True
                         if pml and 16 <= pml <= 16_384:
                             res_ml = pml
-                        return res_tl, res_ml
+                            found_any = True
+                        if found_any:
+                            return res_tl, res_ml
             except (yaml.YAMLError, OSError, ValueError):
                 pass
             return None
@@ -277,22 +288,27 @@ class _AuditDiscoveryMixin:
                         if len(parts) == 2:
                             kv[parts[0]] = parts[1].strip()
                     res_tl, res_ml = tl_ms, ml_mb
+                    found_any = False
                     if kv.get("time_limit_ms", "").isdigit() and len(kv["time_limit_ms"]) <= 9:
                         v = int(kv["time_limit_ms"])
                         if 100 <= v <= 60_000:
                             res_tl = v
+                            found_any = True
                     elif "time_limit" in kv and len(kv["time_limit"]) <= 12:
                         try:
                             fv = float(kv["time_limit"]) * 1000.0
                             if math.isfinite(fv) and 100 <= fv <= 60_000:
                                 res_tl = int(round(fv))
+                                found_any = True
                         except ValueError:
                             pass
                     if kv.get("memory_limit", "").isdigit() and len(kv["memory_limit"]) <= 6:
                         v = int(kv["memory_limit"])
                         if 16 <= v <= 16_384:
                             res_ml = v
-                    return res_tl, res_ml
+                            found_any = True
+                    if found_any:
+                        return res_tl, res_ml
             except OSError:
                 pass
             return None
@@ -449,7 +465,7 @@ class _AuditDiscoveryMixin:
             solutions.append(
                 SolutionEntry(name="brute", path=brute_rel, role="brute", expected="pass")
             )
-        seen_wrong_names: set[str] = set()
+        seen_wrong_names: set[str] = {"sol", "brute"}
         for sol_dir_rel, patterns in (
             ("solutions", ("wrong_*.cpp", "wa_*.cpp")),
             ("solution", ("wrong_*.cpp", "wa_*.cpp")),

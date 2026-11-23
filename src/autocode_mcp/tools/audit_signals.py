@@ -162,22 +162,26 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
             exp = str(item.get("expected") or "fail")
             max_ms = item.get("max_time_ms")
             max_ratio = item.get("max_ratio_to_std")
-            has_max_ms = isinstance(max_ms, int | float) and not isinstance(max_ms, bool)
-            has_max_ratio = isinstance(max_ratio, int | float) and not isinstance(max_ratio, bool)
             if (
                 exp == "fail"
                 and not killed
-                and has_max_ms
+                and isinstance(max_ms, int | float)
+                and not isinstance(max_ms, bool)
                 and (
                     float(max_ms) >= 0.25 * tl_ms
                     or (
-                        has_max_ratio
+                        isinstance(max_ratio, int | float)
+                        and not isinstance(max_ratio, bool)
                         and float(max_ratio) >= 3.0
                         and float(max_ms) >= 50.0
                     )
                 )
             ):
-                ratio_part = f", wrong/std={max_ratio}x" if has_max_ratio else ""
+                ratio_part = (
+                    f", wrong/std={max_ratio}x"
+                    if isinstance(max_ratio, int | float) and not isinstance(max_ratio, bool)
+                    else ""
+                )
                 out.append(
                     {
                         "gate": "host_performance_bias",

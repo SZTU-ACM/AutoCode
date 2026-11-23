@@ -24,6 +24,7 @@ from .complexity import (
     detect_complexity_conflicts,
     estimate_memory_usage,
     estimate_static_complexity,
+    extract_claimed_complexity,
     extract_n_max_from_constraints,
     has_effective_nested_loops,
     run_empirical_verification,
@@ -243,6 +244,10 @@ class SolutionAuditStdTool(Tool):
                 and m_loaded.empirical_complexity.claimed_complexity.strip()
             ):
                 claimed_complexity = m_loaded.empirical_complexity.claimed_complexity.strip()
+        if not claimed_complexity:
+            extracted = extract_claimed_complexity(code)
+            if extracted:
+                claimed_complexity = extracted
         if constraints is None and m_loaded is not None and m_loaded.constraints:
             constraints = dict(m_loaded.constraints)
 
@@ -271,7 +276,12 @@ class SolutionAuditStdTool(Tool):
             raw_tl = m_loaded.time_limit_ms
         tl_ms = (
             float(raw_tl)
-            if (isinstance(raw_tl, int | float) and not isinstance(raw_tl, bool) and raw_tl > 0)
+            if (
+                isinstance(raw_tl, int | float)
+                and not isinstance(raw_tl, bool)
+                and math.isfinite(float(raw_tl))
+                and float(raw_tl) > 0
+            )
             else 1000.0
         )
         tl_scale = max(1.0, tl_ms / 1000.0)
@@ -285,13 +295,6 @@ class SolutionAuditStdTool(Tool):
                 is_static_infeasible = n_max >= 35
             elif estimated == ComplexityLevel.FACTORIAL:
                 is_static_infeasible = n_max >= 15
-            elif n_max >= 10**6 and estimated in {
-                ComplexityLevel.QUADRATIC,
-                ComplexityLevel.CUBIC,
-                ComplexityLevel.EXPONENTIAL,
-                ComplexityLevel.FACTORIAL,
-            }:
-                is_static_infeasible = True
 
         complexity_feasible = not is_static_infeasible
         is_optimistic_lie = (

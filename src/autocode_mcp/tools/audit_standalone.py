@@ -134,7 +134,10 @@ class _AuditStandaloneMixin(_AuditSignalsMixin):
             inc_sub = self._safe_dir(problem_path, inc_rel)
             if inc_sub is not None:
                 base_includes.append(str(inc_sub))
-        base_includes.append(real_root)
+        if manifest.protocol is not None and manifest.protocol.header_file:
+            hdr_file = self._safe_file(problem_path, manifest.protocol.header_file)
+            if hdr_file is not None and str(hdr_file.parent) not in base_includes:
+                base_includes.append(str(hdr_file.parent))
         base_includes.append(TEMPLATES_DIR)
 
         with tempfile.TemporaryDirectory(

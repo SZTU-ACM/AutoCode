@@ -697,7 +697,7 @@ class EmpiricalRatioAnalyzer:
                 t_last = float(fittable_samples[-1]["cpu_time_ms"])
                 is_flat_head = (
                     abs(t1 - t0) <= 2.0
-                    and (max(t0, t1) / max(plateau, 0.1)) <= 1.25
+                    and (plateau <= 5.0 or (max(t0, t1) / max(plateau, 0.1)) <= 1.25)
                     and (t_last - plateau) >= 15.0
                 )
                 if is_flat_head:
