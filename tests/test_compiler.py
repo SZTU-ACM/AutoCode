@@ -545,6 +545,8 @@ async def test_run_binary_accepts_float_timeout_and_memory():
         comp = await compile_cpp(src, exe)
         assert comp.success, comp.stderr
 
+        # Warm up first launch so macOS Gatekeeper / Windows Defender CDHash scan is cached
+        _ = await run_binary(exe, "0\n", timeout=5.0)
         res = await run_binary(exe, "42\n", timeout=1.5, memory_mb=128.5)
         assert res.success, res.error
         assert res.stdout.strip() == "42"

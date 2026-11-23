@@ -24,3 +24,10 @@ The standalone audit SHALL support `--layout auto|autocode|standard_cn|polygon|h
 #### Scenario: CI gate integration
 - **WHEN** `autocode-audit <problem_dir> --standalone` finds blocking quality issues and emits `decision: "no_go"`
 - **THEN** the CLI prints structured JSON on stdout and exits with code `2`
+
+### Requirement: Output format selection and injection-safe Markdown reporting
+`autocode-audit` SHALL support `--format json|markdown|summary` with `--format json` as the backward-compatible default. When `--format markdown` is selected, dynamic text originating from untrusted problem files, compiler/judge stderr, or mutant snippets SHALL have ANSI/control sequences stripped and Markdown/HTML/table delimiters escaped.
+
+#### Scenario: Problem CI Step Summary output
+- **WHEN** `autocode-audit <problem_dir> --standalone --format markdown --report audit_report.json` runs
+- **THEN** the CLI writes the full JSON report to `audit_report.json`, prints an escaped Markdown audit report suitable for GitHub Actions `GITHUB_STEP_SUMMARY` to stdout, and preserves exit codes `0` (`go`), `2` (`no_go`), or `1` (`error`)

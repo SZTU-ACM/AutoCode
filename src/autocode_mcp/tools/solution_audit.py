@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -125,13 +126,29 @@ async def _probe_brute_small_scale(
                     "message": f"Brute probe generator failed at n={pt}: {exc}",
                 }
 
+            probe_tl_ms = 5000.0 if (idx == 0 and sys.platform in ("darwin", "win32")) else 1000.0
             res = await DynamicExecutionMonitor.run_monitored_process(
                 [brute_path],
                 in_file,
-                time_limit_ms=1000.0,
+                time_limit_ms=probe_tl_ms,
                 memory_limit_mb=mem_mb,
                 cwd=tmp_dir,
             )
+            if (
+                idx == 0
+                and sys.platform in ("darwin", "win32")
+                and str(res.get("status", "")) == "ok"
+                and float(res.get("wall_time_ms") or 0.0) >= 800.0
+            ):
+                # Re-verify idx == 0 under strict 1000ms limit once OS cold-start scan is cached
+                # (catches genuine 1000-5000ms hangs like hang_brute while passing fast binaries).
+                res = await DynamicExecutionMonitor.run_monitored_process(
+                    [brute_path],
+                    in_file,
+                    time_limit_ms=1000.0,
+                    memory_limit_mb=mem_mb,
+                    cwd=tmp_dir,
+                )
             status = str(res.get("status", "runtime_error"))
             rc = res.get("returncode")
             obs_mem = float(res.get("memory_mb") or 0.0)
