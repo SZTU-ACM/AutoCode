@@ -64,15 +64,19 @@ def _spill_stress_payload(problem_dir: str, round_no: int, payload: dict[str, An
 def _has_sanitizer_diagnostic(stderr: str) -> bool:
     if not stderr:
         return False
-    return any(
+    if any(
         marker in stderr
         for marker in (
             "AddressSanitizer",
             "UndefinedBehaviorSanitizer",
             "runtime error:",
             "ERROR: LeakSanitizer",
+            "__glibcxx_assert",
+            "stl_vector.h:",
         )
-    )
+    ):
+        return True
+    return "Assertion '" in stderr and "failed" in stderr
 
 
 @dataclass

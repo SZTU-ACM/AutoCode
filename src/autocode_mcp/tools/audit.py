@@ -986,6 +986,23 @@ class ProblemAuditTool(Tool):
                 return found
         return None
 
+    def _classify_tpj_source(self, problem_path: Path) -> tuple[Literal["interactive", "spj"], Path] | None:
+        """Detect standalone ``tpj.cc`` / ``tpj.cpp`` and classify as interactive or testlib checker."""
+        for rel in ("tpj.cc", "tpj.cpp", "files/tpj.cc", "files/tpj.cpp"):
+            cand = self._safe_file(problem_path, rel)
+            if cand is None:
+                continue
+            try:
+                with cand.open("r", encoding="utf-8", errors="replace") as f:
+                    snippet = f.read(65536)
+            except OSError:
+                continue
+            kind: Literal["interactive", "spj"] = (
+                "interactive" if "registerInteraction" in snippet else "spj"
+            )
+            return kind, cand
+        return None
+
     def _find_validator_source(self, problem_path: Path, *, standalone: bool = False) -> Path | None:
         candidates = (
             (
@@ -993,7 +1010,10 @@ class ProblemAuditTool(Tool):
                 "validator/val.cpp",
                 "validator/validator.cpp",
                 "files/validator.cpp",
+                "data/validator.cpp",
+                "data/val.cpp",
                 "testdata/val.cpp",
+                "validator.cpp",
                 "val.cpp",
             )
             if standalone
@@ -1021,6 +1041,10 @@ class ProblemAuditTool(Tool):
             found = self._safe_file(problem_path, rel)
             if found is not None:
                 return found
+        if standalone:
+            tpj = self._classify_tpj_source(problem_path)
+            if tpj is not None and tpj[0] == "spj":
+                return tpj[1]
         return None
 
     def _find_interactor_source(self, problem_path: Path, *, standalone: bool = False) -> Path | None:
@@ -1038,6 +1062,10 @@ class ProblemAuditTool(Tool):
             found = self._safe_file(problem_path, rel)
             if found is not None:
                 return found
+        if standalone:
+            tpj = self._classify_tpj_source(problem_path)
+            if tpj is not None and tpj[0] == "interactive":
+                return tpj[1]
         return None
 
     def _infer_standalone_limits(
@@ -1056,8 +1084,8 @@ class ProblemAuditTool(Tool):
         tl_ms = 2000
         ml_mb = 256
 
-        def _try_polygon() -> tuple[int, int] | None:
-            xml_f = self._safe_file(problem_path, "problem.xml")
+        def _try_polygon(rel: str = "problem.xml") -> tuple[int, int] | None:
+            xml_f = self._safe_file(problem_path, rel)
             if xml_f is None:
                 return None
             try:
@@ -1085,8 +1113,8 @@ class ProblemAuditTool(Tool):
                 pass
             return None
 
-        def _try_hydro() -> tuple[int, int] | None:
-            h_cfg = self._safe_file(problem_path, "testdata/config.yaml")
+        def _try_hydro(rel: str = "testdata/config.yaml") -> tuple[int, int] | None:
+            h_cfg = self._safe_file(problem_path, rel)
             if h_cfg is None:
                 return None
             try:
@@ -1105,8 +1133,8 @@ class ProblemAuditTool(Tool):
                 pass
             return None
 
-        def _try_qoj() -> tuple[int, int] | None:
-            q_cfg = self._safe_file(problem_path, "problem.conf")
+        def _try_qoj(rel: str = "problem.conf") -> tuple[int, int] | None:
+            q_cfg = self._safe_file(problem_path, rel)
             if q_cfg is None:
                 return None
             try:
@@ -1146,6 +1174,14 @@ class ProblemAuditTool(Tool):
         )
         for fn in order:
             got = fn()
+            if got is not None:
+                return got
+        for rel_fn, export_rel in (
+            (_try_qoj, "exports/qoj/problem.conf"),
+            (_try_hydro, "exports/hydro/testdata/config.yaml"),
+            (_try_polygon, "exports/polygon/problem.xml"),
+        ):
+            got = rel_fn(export_rel)
             if got is not None:
                 return got
         return tl_ms, ml_mb
@@ -1209,6 +1245,15 @@ class ProblemAuditTool(Tool):
             problem_type = "spj"
             special_judge = True
             stress_comparison = "checker"
+        elif (tpj_info := self._classify_tpj_source(problem_path)) is not None:
+            if tpj_info[0] == "interactive":
+                problem_type = "interactive"
+                interactive = True
+                oracle_mode = "interactor_only"
+            else:
+                problem_type = "spj"
+                special_judge = True
+                stress_comparison = "checker"
 
         stmt_candidates = (
             (
@@ -1258,17 +1303,31 @@ class ProblemAuditTool(Tool):
             solutions.append(
                 SolutionEntry(name="sol", path=main_rel, role="main", expected="pass")
             )
-        brute_rel = _first_existing(("solutions/brute.cpp", "solution/brute.cpp", "brute.cpp"))
+        brute_rel = _first_existing(
+            (
+                "solutions/brute.cpp",
+                "solution/brute.cpp",
+                "solution/brute_force.cpp",
+                "solutions/brute_force.cpp",
+                "brute.cpp",
+                "brute_force.cpp",
+            )
+        )
         if brute_rel is not None:
             solutions.append(
                 SolutionEntry(name="brute", path=brute_rel, role="brute", expected="pass")
             )
         seen_wrong_names: set[str] = set()
-        for sol_dir_rel in ("solutions", "solution"):
+        for sol_dir_rel, patterns in (
+            ("solutions", ("wrong_*.cpp", "wa_*.cpp")),
+            ("solution", ("wrong_*.cpp", "wa_*.cpp")),
+            ("solutions/wrong", ("*.cpp",)),
+            ("solution/wrong", ("*.cpp",)),
+        ):
             sols_dir = self._safe_dir(problem_path, sol_dir_rel)
             if sols_dir is None:
                 continue
-            for pat in ("wrong_*.cpp", "wa_*.cpp"):
+            for pat in patterns:
                 for wrong_file in sorted(sols_dir.glob(pat)):
                     if (
                         is_safe_stem(wrong_file.stem)
@@ -1643,6 +1702,8 @@ class ProblemAuditTool(Tool):
 
         verifier = ProblemVerifyTestsTool()
         is_interactive = manifest_is_interactive(manifest)
+        is_comm_flag = manifest_is_communication(manifest)
+        answers_optional = is_interactive or is_comm_flag
         answer_ext = verifier._resolve_answer_ext(str(tests_dir), None, tests_manifest or None)
         if not (isinstance(tests_manifest, dict) and tests_manifest.get("answer_ext")):
             has_ans = any(tests_dir.glob("*.ans"))
@@ -1653,7 +1714,7 @@ class ProblemAuditTool(Tool):
         file_count = verifier._check_file_count(
             str(tests_dir),
             answer_ext,
-            is_interactive=is_interactive,
+            is_interactive=answers_optional,
             allow_prefixed_names=True,
         )
         quality_signals["file_count"] = self._wrap_verify_signal(file_count)
@@ -1666,7 +1727,7 @@ class ProblemAuditTool(Tool):
             )
 
         no_empty = verifier._check_no_empty(
-            str(tests_dir), is_interactive=is_interactive, answer_ext=answer_ext
+            str(tests_dir), is_interactive=answers_optional, answer_ext=answer_ext
         )
         quality_signals["no_empty"] = self._wrap_verify_signal(no_empty)
         if not no_empty.get("passed"):
@@ -1684,10 +1745,11 @@ class ProblemAuditTool(Tool):
         compiler = resolve_effective_compiler(None, manifest)
         # Problem-local include directories come BEFORE bundled TEMPLATES_DIR so custom headers win
         base_includes: list[str] = []
-        for inc_rel in ("files", "validator", "checker", "testdata"):
+        for inc_rel in ("files", "validator", "checker", "testdata", "data"):
             inc_sub = self._safe_dir(problem_path, inc_rel)
             if inc_sub is not None:
                 base_includes.append(str(inc_sub))
+        base_includes.append(real_root)
         base_includes.append(TEMPLATES_DIR)
 
         with tempfile.TemporaryDirectory(
@@ -1768,7 +1830,31 @@ class ProblemAuditTool(Tool):
             elif is_comm:
                 comm_mode = manifest.protocol.mode if manifest.protocol else "run_twice"
                 if comm_mode != "grader_linked":
-                    judge_ready = resolve_communicator_binary(str(problem_path), manifest, exe_ext) is not None
+                    comm_rel = resolve_communicator_source_existing(str(problem_path), manifest)
+                    comm_src = self._safe_file(problem_path, comm_rel) if comm_rel else None
+                    if comm_src is not None:
+                        tmp_comm = os.path.join(tmp_bin_dir, f"communicator{exe_ext}")
+                        ccomp = await compile_cpp(
+                            str(comm_src),
+                            tmp_comm,
+                            compiler=compiler,
+                            include_dirs=[str(comm_src.parent), *base_includes],
+                            use_cache=False,
+                        )
+                        if ccomp.success:
+                            interactor_override = tmp_comm
+                        else:
+                            blocking.append(
+                                {
+                                    "gate": "communicator_compile",
+                                    "reason": f"failed to compile standalone communicator: {ccomp.error or ccomp.stderr[:200]}",
+                                }
+                            )
+                    else:
+                        comm_bin = resolve_communicator_binary(str(problem_path), manifest, exe_ext)
+                        if comm_bin:
+                            interactor_override = comm_bin
+                    judge_ready = interactor_override is not None
             elif spj_checker:
                 chk_src = self._find_checker_source(problem_path, standalone=True)
                 if chk_src is not None:
@@ -1800,6 +1886,14 @@ class ProblemAuditTool(Tool):
                 judge_ready = checker_override is not None
 
             # 2. Main solution: prefer fresh temp compilation from source (avoids stale/cross-OS binaries)
+            grader_extra_srcs: list[str] | None = None
+            if is_comm and manifest.protocol is not None and manifest.protocol.mode == "grader_linked":
+                g_rel = resolve_grader_source_existing(str(problem_path), manifest)
+                if g_rel:
+                    g_file = self._safe_file(problem_path, g_rel)
+                    if g_file is not None:
+                        grader_extra_srcs = [str(g_file)]
+
             sol_override: str | None = None
             sol_ready = False
             sol_src = self._find_main_solution_source(
@@ -1814,20 +1908,13 @@ class ProblemAuditTool(Tool):
                 sol_ready = bool(parts) and all(Path(p).is_file() for p in parts)
             if not sol_ready and sol_src is not None:
                 tmp_sol = os.path.join(tmp_bin_dir, f"sol{exe_ext}")
-                extra_sol_srcs: list[str] | None = None
-                if is_comm and manifest.protocol is not None and manifest.protocol.mode == "grader_linked":
-                    g_rel = resolve_grader_source_existing(str(problem_path), manifest)
-                    if g_rel:
-                        g_abs = safe_resolve_under_root(str(problem_path), g_rel)
-                        if g_abs and Path(g_abs).is_file():
-                            extra_sol_srcs = [g_abs]
                 sol_includes = [str(sol_src.parent), *base_includes]
                 scomp = await compile_cpp(
                     str(sol_src),
                     tmp_sol,
                     compiler=compiler,
                     include_dirs=sol_includes,
-                    extra_sources=extra_sol_srcs,
+                    extra_sources=grader_extra_srcs,
                     use_cache=False,
                 )
                 if scomp.success:
@@ -1882,7 +1969,7 @@ class ProblemAuditTool(Tool):
                             ),
                         }
                     )
-            elif not any(b.get("gate") in ("answer_consistency", "checker_compile", "interactor_compile") for b in blocking):
+            elif not any(b.get("gate") in ("answer_consistency", "checker_compile", "interactor_compile", "communicator_compile") for b in blocking):
                 warnings.append(
                     {
                         "gate": "answer_consistency",
@@ -1905,6 +1992,7 @@ class ProblemAuditTool(Tool):
                         tmp_w,
                         compiler=compiler,
                         include_dirs=[str(w_src.parent), *base_includes],
+                        extra_sources=grader_extra_srcs,
                         use_cache=False,
                     )
                     if wcomp.success:

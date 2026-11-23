@@ -1390,6 +1390,12 @@ class SolutionAnalyzeTool(Tool):
         )
         if has_conflict:
             warnings.append(f"Complexity estimate conflict: {'; '.join(conflict_details)}")
+            static_rec_n_max = COMPLEXITY_TO_N_MAX.get(static_complexity, 10000)
+            if constraint_n_max is not None and constraint_n_max > static_rec_n_max:
+                warnings.append(
+                    f"Warning: static complexity {static_complexity} is likely TLE for n_max={constraint_n_max} "
+                    f"(recommended <= {static_rec_n_max})."
+                )
         risk_notes = build_risk_notes(final_complexity, effective_constraints, warnings)
 
         return ToolResult.ok(
@@ -1397,6 +1403,7 @@ class SolutionAnalyzeTool(Tool):
             estimated_complexity=final_complexity,
             static_estimated_complexity=static_complexity,
             complexity_conflict=has_conflict,
+            complexity_match=not has_conflict,
             conflict_details=conflict_details,
             worst_case_complexity=final_complexity,
             average_case_complexity=final_complexity,

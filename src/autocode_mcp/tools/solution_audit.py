@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -18,6 +19,7 @@ from ..workflow import (
 )
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import (
+    _COMPLEXITY_ORDER,
     ComplexityLevel,
     detect_complexity_conflicts,
     estimate_memory_usage,
@@ -264,19 +266,62 @@ class SolutionAuditStdTool(Tool):
             )
 
         n_max = extract_n_max_from_constraints(constraints)
-        if n_max is not None and n_max >= 10**6 and estimated in {
-            ComplexityLevel.QUADRATIC,
-            ComplexityLevel.CUBIC,
-            ComplexityLevel.EXPONENTIAL,
-            ComplexityLevel.FACTORIAL,
-        }:
-            findings.append(
-                {
-                    "severity": "warning",
-                    "type": "high_tle_risk",
-                    "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
-                }
-            )
+        raw_tl = constraints.get("time_limit_ms") if isinstance(constraints, dict) else None
+        if (raw_tl is None or isinstance(raw_tl, bool)) and m_loaded is not None:
+            raw_tl = m_loaded.time_limit_ms
+        tl_ms = (
+            float(raw_tl)
+            if (isinstance(raw_tl, int | float) and not isinstance(raw_tl, bool) and raw_tl > 0)
+            else 1000.0
+        )
+        tl_scale = max(1.0, tl_ms / 1000.0)
+        is_static_infeasible = False
+        if n_max is not None:
+            if estimated == ComplexityLevel.QUADRATIC:
+                is_static_infeasible = n_max >= int(50_000 * math.sqrt(tl_scale))
+            elif estimated == ComplexityLevel.CUBIC:
+                is_static_infeasible = n_max >= int(2_000 * (tl_scale ** (1.0 / 3.0)))
+            elif estimated == ComplexityLevel.EXPONENTIAL:
+                is_static_infeasible = n_max >= 35
+            elif estimated == ComplexityLevel.FACTORIAL:
+                is_static_infeasible = n_max >= 15
+            elif n_max >= 10**6 and estimated in {
+                ComplexityLevel.QUADRATIC,
+                ComplexityLevel.CUBIC,
+                ComplexityLevel.EXPONENTIAL,
+                ComplexityLevel.FACTORIAL,
+            }:
+                is_static_infeasible = True
+
+        complexity_feasible = not is_static_infeasible
+        is_optimistic_lie = (
+            bool(claimed_complexity)
+            and claimed_complexity != estimated
+            and claimed_complexity in _COMPLEXITY_ORDER
+            and estimated in _COMPLEXITY_ORDER
+            and _COMPLEXITY_ORDER.index(claimed_complexity) < _COMPLEXITY_ORDER.index(estimated)
+        )
+        if not complexity_feasible:
+            if is_optimistic_lie:
+                passed = False
+                findings.append(
+                    {
+                        "severity": "error",
+                        "type": "high_tle_risk",
+                        "message": (
+                            f"static complexity {estimated} is infeasible for n_max={n_max} under "
+                            f"{tl_ms:.0f}ms while claimed={claimed_complexity}."
+                        ),
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "type": "high_tle_risk",
+                        "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
+                    }
+                )
 
         empirical_verification: dict = {"status": "skipped"}
         if problem_dir:
@@ -329,6 +374,8 @@ class SolutionAuditStdTool(Tool):
             estimated_memory_mb=estimated_memory_mb,
             detected_patterns=patterns,
             complexity_conflict=has_conflict,
+            complexity_match=not has_conflict,
+            complexity_feasible=complexity_feasible,
             conflict_details=conflict_details,
             findings=findings,
             evidence={

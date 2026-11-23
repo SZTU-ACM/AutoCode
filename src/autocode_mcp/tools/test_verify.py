@@ -452,10 +452,11 @@ class ProblemVerifyTestsTool(Tool):
         results = {}
         all_passed = True
 
-        # 1. 文件完整性检查
+        # 1. 文件完整性检查（交互题 / 通信题允许省略 .ans）
+        answers_optional = is_interactive or is_communication
         if "file_count" in verify_types:
             result = self._check_file_count(
-                tests_dir, resolved_answer_ext, is_interactive=is_interactive
+                tests_dir, resolved_answer_ext, is_interactive=answers_optional
             )
             results["file_count"] = result
             if not result["passed"]:
@@ -464,7 +465,7 @@ class ProblemVerifyTestsTool(Tool):
         # 2. 空文件检查
         if "no_empty" in verify_types:
             result = self._check_no_empty(
-                tests_dir, is_interactive=is_interactive, answer_ext=resolved_answer_ext
+                tests_dir, is_interactive=answers_optional, answer_ext=resolved_answer_ext
             )
             results["no_empty"] = result
             if not result["passed"]:
@@ -966,8 +967,11 @@ class ProblemVerifyTestsTool(Tool):
                     "mode": "interactive",
                 }
         elif is_communication and manifest is not None and comm_mode != "grader_linked":
-            comm_bin = resolve_communicator_binary(problem_dir, manifest, exe_ext)
-            if not comm_bin:
+            if interactor_exe_override and os.path.isfile(interactor_exe_override):
+                interactor_bin = interactor_exe_override
+            else:
+                interactor_bin = resolve_communicator_binary(problem_dir, manifest, exe_ext) or ""
+            if not interactor_bin:
                 return {
                     "passed": False,
                     "total": len(in_files),
@@ -1018,6 +1022,7 @@ class ProblemVerifyTestsTool(Tool):
                         time_limit_ms=test_timeout * 1000.0,
                         memory_limit_mb=mem_mb,
                         use_system_temp=use_system_temp,
+                        communicator_exe_override=interactor_bin or None,
                     )
                 else:
                     jres = await InteractiveRunner.run(
@@ -1985,6 +1990,7 @@ class ProblemVerifyTestsTool(Tool):
                     time_limit_ms=test_timeout * 1000.0,
                     memory_limit_mb=mem_mb,
                     use_system_temp=use_system_temp,
+                    communicator_exe_override=interactor_bin or None,
                 )
                 if not jres.accepted:
                     return None
@@ -2082,8 +2088,11 @@ class ProblemVerifyTestsTool(Tool):
                     "mode": "interactive",
                 }
         elif is_communication and manifest is not None and comm_mode != "grader_linked":
-            comm_bin = resolve_communicator_binary(problem_dir, manifest, exe_ext)
-            if not comm_bin:
+            if interactor_exe_override and os.path.isfile(interactor_exe_override):
+                interactor_bin = interactor_exe_override
+            else:
+                interactor_bin = resolve_communicator_binary(problem_dir, manifest, exe_ext) or ""
+            if not interactor_bin:
                 return {
                     "passed": False,
                     "validated": True,
@@ -2323,6 +2332,7 @@ class ProblemVerifyTestsTool(Tool):
                         time_limit_ms=hard_timeout_sec * 1000.0,
                         memory_limit_mb=mem_mb,
                         use_system_temp=use_system_temp,
+                        communicator_exe_override=interactor_bin or None,
                     )
                     verdict = jres.verdict
                     measured_ms = float(
