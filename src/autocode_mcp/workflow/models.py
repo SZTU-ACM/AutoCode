@@ -324,6 +324,13 @@ class AuditGates(BaseModel):
     require_interactor_self_test: bool = True
     max_duplicate_input_ratio: float = Field(default=0.2, ge=0, le=1)
     min_difficulty_confidence: float = Field(default=0.5, ge=0, le=1)
+    enable_mutation_testing: bool = False
+    mutation_budget: int = Field(default=6, ge=1, le=12)
+
+    @field_validator("mutation_budget", mode="before")
+    @classmethod
+    def reject_bool_mutation_budget(cls, value: Any) -> Any:
+        return _reject_bool_value(value, "audit_gates.mutation_budget")
 
 
 class DifficultyProfile(BaseModel):

@@ -48,6 +48,7 @@ from ..utils.compiler import (
 from ..utils.exporters import (
     ExportDataMode,
     export_hydro,
+    export_polygon,
     export_qoj,
     map_tests_to_subtasks,
     verify_exported_packages,
@@ -65,6 +66,7 @@ from ..workflow import (
     load_manifest,
     manifest_is_communication,
     manifest_is_interactive,
+    manifest_path,
     manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
     save_manifest,
@@ -134,17 +136,50 @@ class ProblemCreateTool(Tool):
         problem_type: ProblemType | None = None,
         protocol_mode: ProtocolMode | None = None,
         oracle_mode: OracleMode = "brute",
+        time_limit_ms: int | None = None,
+        memory_limit_mb: int | None = None,
+        overwrite: bool = False,
     ) -> ToolResult:
         """执行题目目录创建。"""
         if problem_type is not None and interactive and problem_type != "interactive":
             return ToolResult.fail(
                 f"conflicting arguments: problem_type={problem_type!r} cannot be combined with interactive=True"
             )
+        if not isinstance(overwrite, bool):
+            return ToolResult.fail("overwrite must be a boolean")
+        if time_limit_ms is not None and (isinstance(time_limit_ms, bool) or not isinstance(time_limit_ms, int) or time_limit_ms <= 0):
+            return ToolResult.fail("time_limit_ms must be a positive integer (milliseconds)")
+        if memory_limit_mb is not None and (isinstance(memory_limit_mb, bool) or not isinstance(memory_limit_mb, int) or memory_limit_mb <= 0):
+            return ToolResult.fail("memory_limit_mb must be a positive integer (MB)")
+        existing_manifest = manifest_path(problem_dir)
+        autocode_dir_path = os.path.join(problem_dir, ".autocode")
+        for check_p in (
+            autocode_dir_path,
+            str(existing_manifest),
+            os.path.join(autocode_dir_path, ".gitignore"),
+            os.path.join(problem_dir, "files"),
+            os.path.join(problem_dir, "files", "testlib.h"),
+        ):
+            if os.path.islink(check_p):
+                return ToolResult.fail(f"refusing to write through symlink: {check_p}")
+        if os.path.isdir(existing_manifest):
+            return ToolResult.fail(f"manifest path is a directory: {existing_manifest}")
+        existed_before = os.path.lexists(existing_manifest)
+        if existed_before and not overwrite:
+            return ToolResult.fail(
+                f"manifest.json already exists at {existing_manifest}; refusing to overwrite existing problem configuration without overwrite=true",
+                existing_manifest_path=str(existing_manifest),
+            )
         resolved_type: ProblemType = (
             problem_type if problem_type is not None else ("interactive" if interactive else "standard")
         )
         is_interactive = resolved_type == "interactive"
         is_communication = resolved_type == "communication"
+        manifest_overrides: dict[str, Any] = {}
+        if time_limit_ms is not None:
+            manifest_overrides["time_limit_ms"] = time_limit_ms
+        if memory_limit_mb is not None:
+            manifest_overrides["memory_limit_mb"] = memory_limit_mb
         try:
             manifest = default_manifest(
                 problem_name=problem_name,
@@ -152,6 +187,7 @@ class ProblemCreateTool(Tool):
                 problem_type=resolved_type,
                 protocol_mode=protocol_mode,
                 oracle_mode=oracle_mode,
+                **manifest_overrides,
             )
         except (ValidationError, ValueError) as exc:
             return ToolResult.fail(f"invalid problem configuration: {exc}")
@@ -248,8 +284,8 @@ class ProblemCreateTool(Tool):
                     f.write(
                         f"# {problem_name}\n\n"
                         "## 时间限制与空间限制\n\n"
-                        "- 时间限制：\n"
-                        "- 空间限制：\n\n"
+                        f"- 时间限制：{manifest.time_limit_ms} ms\n"
+                        f"- 空间限制：{manifest.memory_limit_mb} MB\n\n"
                         "## 题目背景（可选）\n\n"
                         "如不需要背景，可删除本节。\n\n"
                         "## 题目描述\n\n"
@@ -276,8 +312,8 @@ class ProblemCreateTool(Tool):
                     f.write(
                         f"# {problem_name}\n\n"
                         "## 时间限制与空间限制\n\n"
-                        "- 时间限制：\n"
-                        "- 空间限制：\n\n"
+                        f"- 时间限制：{manifest.time_limit_ms} ms\n"
+                        f"- 空间限制：{manifest.memory_limit_mb} MB\n\n"
                         "## 题目背景（可选）\n\n"
                         "如不需要背景，可删除本节。\n\n"
                         "## 题目描述\n\n"
@@ -304,8 +340,8 @@ class ProblemCreateTool(Tool):
                     f.write(
                         f"# {problem_name}\n\n"
                         "## 时间限制与空间限制\n\n"
-                        "- 时间限制：\n"
-                        "- 空间限制：\n\n"
+                        f"- 时间限制：{manifest.time_limit_ms} ms\n"
+                        f"- 空间限制：{manifest.memory_limit_mb} MB\n\n"
                         "## 题目背景（可选）\n\n"
                         "如不需要背景，可删除本节。\n\n"
                         "## 题目描述\n\n"
@@ -342,6 +378,9 @@ class ProblemCreateTool(Tool):
         extra_meta: dict[str, Any] = {"compiler_info": compiler_info}
         if compiler_info.get("is_apple_clang") and compiler_info.get("warning"):
             extra_meta["compiler_warning"] = str(compiler_info["warning"])
+        if existed_before:
+            extra_meta["overwritten_existing_manifest"] = True
+            extra_meta["warning"] = "Existing .autocode/manifest.json was overwritten because overwrite=true was passed"
 
         return ToolResult.ok(
             problem_dir=problem_dir,
@@ -350,6 +389,8 @@ class ProblemCreateTool(Tool):
             oracle_mode=manifest.oracle_mode,
             protocol_mode=manifest.protocol.mode if manifest.protocol else None,
             interactive=manifest.interactive,
+            time_limit_ms=manifest.time_limit_ms,
+            memory_limit_mb=manifest.memory_limit_mb,
             manifest_path=str(manifest_file),
             created_directories=created_dirs,
             **extra_meta,
@@ -1836,6 +1877,11 @@ def _build_problem_xml(
     names = ET.SubElement(problem, "names")
     ET.SubElement(names, "name", {"language": "chinese", "value": problem_name})
 
+    stmt_rel = (
+        manifest_model.statement_path.replace("\\", "/")
+        if (manifest_model is not None and manifest_model.statement_path)
+        else "statements/README.md"
+    )
     statements = ET.SubElement(problem, "statements")
     ET.SubElement(
         statements,
@@ -1844,18 +1890,36 @@ def _build_problem_xml(
             "charset": "UTF-8",
             "language": "chinese",
             "mathjax": "true",
-            "path": "statements/README.md",
+            "path": stmt_rel,
             "type": "application/x-tex",
         },
     )
+
+    in_pat = "tests/%02d.in"
+    ans_pat = f"tests/%02d{answer_ext}"
+    if in_files:
+        stems = [os.path.splitext(os.path.basename(f))[0] for f in in_files]
+        parsed_stems = [re.fullmatch(r"([A-Za-z_-]*)(\d+)", s) for s in stems]
+        if all(m is not None for m in parsed_stems):
+            prefixes = {m.group(1) for m in parsed_stems if m is not None}
+            if len(prefixes) == 1:
+                pfx = next(iter(prefixes))
+                num_strs = [m.group(2) for m in parsed_stems if m is not None]
+                nums = sorted(int(ns) for ns in num_strs)
+                if nums == list(range(1, len(nums) + 1)):
+                    first_one = next((ns for ns in num_strs if int(ns) == 1), "01")
+                    width = len(first_one) if (len(first_one) > 1 and first_one.startswith("0")) else 0
+                    fmt = f"%0{width}d" if width >= 2 else "%d"
+                    in_pat = f"tests/{pfx}{fmt}.in"
+                    ans_pat = f"tests/{pfx}{fmt}{answer_ext}"
 
     judging = ET.SubElement(problem, "judging")
     testset = ET.SubElement(judging, "testset", {"name": "tests"})
     ET.SubElement(testset, "time-limit").text = str(time_limit_ms)
     ET.SubElement(testset, "memory-limit").text = str(memory_limit_bytes)
     ET.SubElement(testset, "test-count").text = str(test_count)
-    ET.SubElement(testset, "input-path-pattern").text = "tests/%02d.in"
-    ET.SubElement(testset, "answer-path-pattern").text = f"tests/%02d{answer_ext}"
+    ET.SubElement(testset, "input-path-pattern").text = in_pat
+    ET.SubElement(testset, "answer-path-pattern").text = ans_pat
     if has_checker:
         ET.SubElement(testset, "checker", {"type": "testlib", "path": "files/checker.cpp"})
     comm_mode = (
@@ -1939,15 +2003,17 @@ def _build_problem_xml(
 
     files = ET.SubElement(problem, "files")
     resources = ET.SubElement(files, "resources")
-    ET.SubElement(resources, "file", {"path": "files/testlib.h"})
+    if os.path.isfile(os.path.join(problem_dir, "files", "testlib.h")):
+        ET.SubElement(resources, "file", {"path": "files/testlib.h"})
     if grader_rel and os.path.isfile(os.path.join(problem_dir, grader_rel)):
         ET.SubElement(resources, "file", {"path": grader_rel, "type": "cpp.g++"})
     if header_rel and os.path.isfile(os.path.join(problem_dir, header_rel)):
         ET.SubElement(resources, "file", {"path": header_rel, "type": "h.g++"})
 
     executables = ET.SubElement(files, "executables")
-    _add_executable(executables, "files/gen.cpp")
-    if include_validator:
+    if os.path.isfile(os.path.join(problem_dir, "files", "gen.cpp")):
+        _add_executable(executables, "files/gen.cpp")
+    if include_validator and os.path.isfile(os.path.join(problem_dir, "files", "val.cpp")):
         _add_executable(executables, "files/val.cpp")
     if has_checker:
         _add_executable(executables, "files/checker.cpp")
@@ -1979,6 +2045,11 @@ def _build_problem_xml(
                 and not os.path.isfile(os.path.join(problem_dir, "solutions", "sol.cpp"))
             ):
                 continue
+            if (
+                sol_entry.role == "brute"
+                and not os.path.isfile(os.path.join(problem_dir, sol_entry.path))
+            ):
+                continue
             if sol_entry.role == "wrong" and sol_entry.expected == "pass":
                 tag = "accepted"
             else:
@@ -1996,8 +2067,9 @@ def _build_problem_xml(
     else:
         main = ET.SubElement(solutions, "solution", {"tag": "main"})
         ET.SubElement(main, "source", {"path": "solutions/sol.cpp"})
-        rejected = ET.SubElement(solutions, "solution", {"tag": "rejected"})
-        ET.SubElement(rejected, "source", {"path": "solutions/brute.cpp"})
+        if os.path.isfile(os.path.join(problem_dir, "solutions", "brute.cpp")):
+            rejected = ET.SubElement(solutions, "solution", {"tag": "rejected"})
+            ET.SubElement(rejected, "source", {"path": "solutions/brute.cpp"})
 
     ET.indent(problem)
     return '<?xml version="1.0" encoding="utf-8" standalone="no"?>\n' + ET.tostring(
@@ -2376,13 +2448,17 @@ class ProblemPackPolygonTool(Tool):
             results["files_copied"].append(
                 "problem.xml (updated)" if xml_existed else "problem.xml (created)"
             )
-            exports["polygon"] = {
-                "format": "polygon",
-                "output_dir": os.path.abspath(problem_dir),
-                "problem_xml": problem_xml,
-                "test_count": actual_test_count,
-                "subtask_count": len(manifest_model.subtasks),
-            }
+            try:
+                exports["polygon"] = export_polygon(
+                    problem_dir,
+                    manifest_model,
+                    xml_content=xml_content,
+                    in_files=in_files,
+                    answer_ext=answer_ext,
+                    data_mode=export_data_mode,
+                )
+            except (ValueError, OSError) as exc:
+                return ToolResult.fail(f"Polygon export failed: {exc}")
 
         if "hydro" in formats:
             try:

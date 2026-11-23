@@ -53,9 +53,9 @@ uv run autocode-verify examples/communication-sample
 uv run autocode-verify <problem_dir> --status --strict-gates
 uv run autocode-verify <problem_dir> --reconcile
 
-# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计）
+# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计，支持布局适配与变异强度检测）
 uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
-uv run autocode-audit /path/to/external-problem --standalone
+uv run autocode-audit /path/to/external-problem --standalone --layout auto --mutation-check
 
 # 构建并检查分发包
 uv build

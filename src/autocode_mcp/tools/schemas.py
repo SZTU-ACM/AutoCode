@@ -9,9 +9,9 @@ All 19 tools are migrated (tasks 7.2 / 7.3 pilot + 7.4 remainder).
 """
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..workflow.models import OracleMode, ProblemType, ProtocolMode
 
@@ -31,6 +31,8 @@ class ProblemAuditInput(BaseModel):
     include_difficulty: bool = True
     report_path: str | None = None
     standalone: bool = False
+    layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto"
+    enable_mutation_testing: bool | None = None
 
 
 class FileReadInput(BaseModel):
@@ -373,6 +375,34 @@ class ProblemCreateInput(BaseModel):
     problem_type: ProblemType | None = None
     protocol_mode: ProtocolMode | None = None
     oracle_mode: OracleMode = "brute"
+    time_limit_ms: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional initial time limit in milliseconds (e.g. 1000 or 2000); defaults to 2000",
+    )
+    memory_limit_mb: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional initial memory limit in MB (e.g. 256 or 512); defaults to 256",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Set true to explicitly overwrite an existing .autocode/manifest.json",
+    )
+
+    @field_validator("time_limit_ms", "memory_limit_mb", mode="before")
+    @classmethod
+    def _reject_bool_limits(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("limit must be a positive integer, not boolean")
+        return v
+
+    @field_validator("overwrite", mode="before")
+    @classmethod
+    def _require_strict_bool_overwrite(cls, v: Any) -> Any:
+        if not isinstance(v, bool):
+            raise ValueError("overwrite must be a boolean")
+        return v
 
 
 class GenerateConstraints(BaseModel):
@@ -451,7 +481,7 @@ class ProblemPackPolygonInput(BaseModel):
     export_data_mode: Literal["copy", "hardlink", "zip"] = Field(
         default="hardlink",
         description=(
-            "How Hydro/QOJ exporters stage test data files: "
+            "How Polygon/Hydro/QOJ exporters stage test data files: "
             "'hardlink' (default, avoids 3x disk duplication with automatic copy fallback), "
             "'copy' (independent physical copies), or 'zip' (compressed archive under exports/<fmt>.zip)."
         ),

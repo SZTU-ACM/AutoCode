@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -561,7 +562,12 @@ class ProblemVerifyTestsTool(Tool):
                 all_passed = False
 
         if "duplicate_inputs" in verify_types:
-            result = self._check_duplicate_inputs(tests_dir)
+            max_near = (
+                float(manifest_model.audit_gates.max_duplicate_input_ratio)
+                if manifest_model is not None
+                else 0.2
+            )
+            result = self._check_duplicate_inputs(tests_dir, max_near_ratio=max_near)
             results["duplicate_inputs"] = result
             if not result["passed"]:
                 all_passed = False
@@ -758,8 +764,11 @@ class ProblemVerifyTestsTool(Tool):
         answer_ext: str,
         *,
         is_interactive: bool = False,
+        allow_prefixed_names: bool = False,
     ) -> dict:
         """检查文件完整性：每个 .in 有对应的 answer_ext（交互题允许省略 .ans），文件名连续。"""
+        import re as _re
+
         tests_path = Path(tests_dir)
         in_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
         ans_files = sorted(p.name for p in tests_path.iterdir() if p.is_file() and p.name.endswith(answer_ext))
@@ -781,19 +790,43 @@ class ProblemVerifyTestsTool(Tool):
             if in_file not in in_file_set:
                 orphan_ans.append(ans_file)
 
-        non_numeric = [f for f in in_files if not Path(f).stem.isdigit()]
-        numeric_indices = sorted(int(Path(f).stem) for f in in_files if Path(f).stem.isdigit())
+        non_numeric: list[str] = []
+        numeric_indices: list[int] = []
+        prefixes_seen: set[str] = set()
+        for f in in_files:
+            stem = Path(f).stem
+            if stem.isdigit():
+                numeric_indices.append(int(stem))
+                prefixes_seen.add("")
+            elif allow_prefixed_names:
+                m_pref = _re.fullmatch(r"([A-Za-z0-9_-]*?[-_]|[A-Za-z_][A-Za-z0-9_-]*?)(\d+)", stem)
+                if m_pref:
+                    prefixes_seen.add(m_pref.group(1))
+                    numeric_indices.append(int(m_pref.group(2)))
+                else:
+                    non_numeric.append(f)
+            else:
+                non_numeric.append(f)
+
+        numeric_indices.sort()
         numeric_index_set = set(numeric_indices)
-        expected_indices = list(range(1, max(numeric_indices) + 1)) if numeric_indices else []
+        # In standalone prefixed layouts (e.g. test1..testN, sample1..sample2), only check contiguity when a single prefix is used.
+        check_contiguous = (not allow_prefixed_names) or len(prefixes_seen) <= 1
+        expected_indices = (
+            list(range(1, max(numeric_indices) + 1)) if (numeric_indices and check_contiguous) else []
+        )
         missing_indices = [
             idx for idx in expected_indices if idx not in numeric_index_set
         ]
-        duplicate_indices = sorted(
-            idx for idx in numeric_index_set if numeric_indices.count(idx) > 1
+        duplicate_indices = (
+            sorted(idx for idx in numeric_index_set if numeric_indices.count(idx) > 1)
+            if check_contiguous
+            else []
         )
 
         passed = (
-            (is_interactive or not missing_ans)
+            bool(in_files)
+            and (is_interactive or not missing_ans)
             and not orphan_ans
             and not non_numeric
             and not missing_indices
@@ -845,6 +878,9 @@ class ProblemVerifyTestsTool(Tool):
         verify_with_checker: bool = False,
         manifest: AutoCodeManifest | None = None,
         use_system_temp: bool = False,
+        sol_exe_override: str | None = None,
+        checker_exe_override: str | None = None,
+        interactor_exe_override: str | None = None,
     ) -> dict:
         """用 sol 重新运行 .in；verify_with_checker 时用 checker(input, sol_out, jury_ans)，否则比字符串。"""
         exe_ext = get_exe_extension()
@@ -856,9 +892,12 @@ class ProblemVerifyTestsTool(Tool):
             else ""
         )
 
-        sol_exe = os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}")
-        if not os.path.exists(sol_exe):
-            sol_exe = os.path.join(problem_dir, f"{sol_name}{exe_ext}")
+        if sol_exe_override and os.path.isfile(sol_exe_override):
+            sol_exe = sol_exe_override
+        else:
+            sol_exe = os.path.join(problem_dir, "solutions", f"{sol_name}{exe_ext}")
+            if not os.path.exists(sol_exe):
+                sol_exe = os.path.join(problem_dir, f"{sol_name}{exe_ext}")
 
         if not os.path.exists(sol_exe):
             if (
@@ -887,9 +926,12 @@ class ProblemVerifyTestsTool(Tool):
                 }
 
         in_files = sorted(
-            f
-            for f in os.listdir(tests_dir)
-            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            (
+                f
+                for f in os.listdir(tests_dir)
+                if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            ),
+            key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)],
         )
 
         mismatches = []
@@ -907,9 +949,12 @@ class ProblemVerifyTestsTool(Tool):
         )
         interactor_bin = ""
         if is_interactive:
-            interactor_bin = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
-            if not os.path.isfile(interactor_bin):
-                interactor_bin = os.path.join(problem_dir, f"interactor{exe_ext}")
+            if interactor_exe_override and os.path.isfile(interactor_exe_override):
+                interactor_bin = interactor_exe_override
+            else:
+                interactor_bin = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
+                if not os.path.isfile(interactor_bin):
+                    interactor_bin = os.path.join(problem_dir, f"interactor{exe_ext}")
             if not os.path.isfile(interactor_bin):
                 return {
                     "passed": False,
@@ -935,7 +980,11 @@ class ProblemVerifyTestsTool(Tool):
 
         checker_bin = ""
         if not is_interactive and not is_communication and verify_with_checker:
-            checker_bin = checker_exe_path(problem_dir, exe_ext)
+            checker_bin = (
+                checker_exe_override
+                if (checker_exe_override and os.path.isfile(checker_exe_override))
+                else checker_exe_path(problem_dir, exe_ext)
+            )
             if not os.path.isfile(checker_bin):
                 return {
                     "passed": False,
@@ -1136,11 +1185,20 @@ class ProblemVerifyTestsTool(Tool):
         return out
 
     async def _check_validator(
-        self, problem_dir: str, tests_dir: str, timeout: int
+        self,
+        problem_dir: str,
+        tests_dir: str,
+        timeout: int,
+        *,
+        val_exe_override: str | None = None,
     ) -> dict:
         """用 val 检查每个 .in 是否满足约束。"""
         exe_ext = get_exe_extension()
-        val_exe = os.path.join(problem_dir, "files", f"val{exe_ext}")
+        val_exe = (
+            val_exe_override
+            if (val_exe_override and os.path.isfile(val_exe_override))
+            else os.path.join(problem_dir, "files", f"val{exe_ext}")
+        )
 
         if not os.path.exists(val_exe):
             return {
@@ -1151,9 +1209,12 @@ class ProblemVerifyTestsTool(Tool):
             }
 
         in_files = sorted(
-            f
-            for f in os.listdir(tests_dir)
-            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            (
+                f
+                for f in os.listdir(tests_dir)
+                if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            ),
+            key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)],
         )
 
         async def _validate_one(in_file: str) -> dict | None:
@@ -1212,9 +1273,12 @@ class ProblemVerifyTestsTool(Tool):
             }
 
         in_files = sorted(
-            f
-            for f in os.listdir(tests_dir)
-            if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            (
+                f
+                for f in os.listdir(tests_dir)
+                if f.endswith(".in") and os.path.isfile(os.path.join(tests_dir, f))
+            ),
+            key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)],
         )
         in_file_set = set(in_files)
         type_by_in_file: dict[str, str] = {}
@@ -1297,9 +1361,12 @@ class ProblemVerifyTestsTool(Tool):
             "hint": "需要确保 type=4 不是仅放大参数，而是有独立卡法" if not passed else "",
         }
 
-    def _check_duplicate_inputs(self, tests_dir: str) -> dict:
+    def _check_duplicate_inputs(self, tests_dir: str, *, max_near_ratio: float = 0.2) -> dict:
         tests_path = Path(tests_dir)
-        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        in_files = sorted(
+            (p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in"),
+            key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)],
+        )
         signatures: dict[str, list[str]] = {}
         normalized_signatures: dict[str, list[str]] = {}
         for path in in_files:
@@ -1319,20 +1386,29 @@ class ProblemVerifyTestsTool(Tool):
         near_duplicate_file_count = sum(len(names) for names in near_duplicates)
         total = len(in_files)
         ratio = (duplicate_file_count + near_duplicate_file_count) / total if total else 0.0
+        near_ratio = near_duplicate_file_count / total if total else 0.0
+        # Zero tolerance for byte-identical exact duplicates; ratio threshold applies only to near duplicates.
+        passed = len(exact_duplicates) == 0 and near_ratio <= max_near_ratio
         return {
-            "passed": ratio <= 0.2,
+            "passed": passed,
             "total": total,
             "duplicate_file_count": duplicate_file_count,
+            "exact_duplicate_count": len(exact_duplicates),
+            "exact_duplicate_tolerance": 0,
             "near_duplicate_file_count": near_duplicate_file_count,
             "duplicate_ratio": ratio,
+            "near_duplicate_ratio": near_ratio,
             "exact_duplicates": exact_duplicates,
             "near_duplicates": near_duplicates[:20],
-            "threshold": 0.2,
+            "threshold": max_near_ratio,
         }
 
     def _check_scale_distribution(self, tests_dir: str) -> dict:
         tests_path = Path(tests_dir)
-        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        in_files = sorted(
+            (p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in"),
+            key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)],
+        )
         buckets = {"empty": 0, "tiny": 0, "small": 0, "medium": 0, "large": 0}
         byte_buckets = {"0-100B": 0, "101B-1KB": 0, "1KB-32KB": 0, "32KB+": 0}
         parsed_first_ints: list[int] = []
@@ -1953,12 +2029,33 @@ class ProblemVerifyTestsTool(Tool):
         slowdown_kill_ratio: float | None = None,
         sol_name: str = "sol",
         undeclared_wrong_solutions: list[str] | None = None,
+        checker_exe_override: str | None = None,
+        interactor_exe_override: str | None = None,
+        wrong_exe_overrides: dict[str, str] | None = None,
     ) -> dict:
         policy_err = _validate_tle_policy_params(tle_kill_factor, slowdown_kill_ratio)
         if policy_err is not None:
             return {"passed": False, "validated": False, "error": policy_err, "message": policy_err}
         if not wrong_solution_names:
-            return {"passed": True, "validated": False, "message": "No wrong solutions configured"}
+            if manifest is not None and manifest.quality_gates.require_wrong_solution_kill:
+                return {
+                    "passed": False,
+                    "validated": True,
+                    "skipped": False,
+                    "missing_wrong_solutions": True,
+                    "details": [],
+                    "message": (
+                        "No wrong solutions configured in manifest.json or discovered under "
+                        "solutions/wrong_*.cpp while quality_gates.require_wrong_solution_kill is enabled"
+                    ),
+                }
+            return {
+                "passed": True,
+                "validated": False,
+                "skipped": True,
+                "details": [],
+                "message": "No wrong solutions configured (require_wrong_solution_kill is disabled)",
+            }
 
         exe_ext = get_exe_extension()
         is_interactive = manifest_is_interactive(manifest)
@@ -1970,9 +2067,12 @@ class ProblemVerifyTestsTool(Tool):
         )
         interactor_bin = ""
         if is_interactive:
-            interactor_bin = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
-            if not os.path.isfile(interactor_bin):
-                interactor_bin = os.path.join(problem_dir, f"interactor{exe_ext}")
+            if interactor_exe_override and os.path.isfile(interactor_exe_override):
+                interactor_bin = interactor_exe_override
+            else:
+                interactor_bin = os.path.join(problem_dir, "files", f"interactor{exe_ext}")
+                if not os.path.isfile(interactor_bin):
+                    interactor_bin = os.path.join(problem_dir, f"interactor{exe_ext}")
             if not os.path.isfile(interactor_bin):
                 return {
                     "passed": False,
@@ -1993,9 +2093,13 @@ class ProblemVerifyTestsTool(Tool):
                 }
 
         checker_bin = (
-            checker_exe_path(problem_dir, exe_ext)
-            if (not is_interactive and not is_communication and verify_with_checker)
-            else ""
+            checker_exe_override
+            if (checker_exe_override and os.path.isfile(checker_exe_override))
+            else (
+                checker_exe_path(problem_dir, exe_ext)
+                if (not is_interactive and not is_communication and verify_with_checker)
+                else ""
+            )
         )
         if not is_interactive and not is_communication and verify_with_checker and not os.path.isfile(checker_bin):
             return {
@@ -2006,7 +2110,10 @@ class ProblemVerifyTestsTool(Tool):
             }
 
         tests_path = Path(tests_dir)
-        in_files = sorted(p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in")
+        in_files = sorted(
+            (p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in"),
+            key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)],
+        )
         details = []
         all_killed = True
 
@@ -2081,30 +2188,38 @@ class ProblemVerifyTestsTool(Tool):
                 all_killed = False
                 continue
 
-            bin_rel = f"solutions/{wrong_name}{exe_ext}"
-            raw_bin = Path(problem_dir) / bin_rel
-            if raw_bin.is_symlink():
-                details.append(
-                    {
-                        "name": wrong_name,
-                        "killed": False,
-                        "reason": f"refusing symlinked wrong binary: {bin_rel}",
-                    }
-                )
-                all_killed = False
-                continue
-            resolved_bin = safe_resolve_under_root(problem_dir, bin_rel)
-            if resolved_bin is None:
-                details.append(
-                    {
-                        "name": wrong_name,
-                        "killed": False,
-                        "reason": f"wrong binary path escapes problem_dir: {bin_rel}",
-                    }
-                )
-                all_killed = False
-                continue
-            binary_path = Path(resolved_bin)
+            override_bin = (
+                wrong_exe_overrides.get(wrong_name)
+                if isinstance(wrong_exe_overrides, dict)
+                else None
+            )
+            if isinstance(override_bin, str) and os.path.isfile(override_bin) and not os.path.islink(override_bin):
+                binary_path = Path(override_bin)
+            else:
+                bin_rel = f"solutions/{wrong_name}{exe_ext}"
+                raw_bin = Path(problem_dir) / bin_rel
+                if raw_bin.is_symlink():
+                    details.append(
+                        {
+                            "name": wrong_name,
+                            "killed": False,
+                            "reason": f"refusing symlinked wrong binary: {bin_rel}",
+                        }
+                    )
+                    all_killed = False
+                    continue
+                resolved_bin = safe_resolve_under_root(problem_dir, bin_rel)
+                if resolved_bin is None:
+                    details.append(
+                        {
+                            "name": wrong_name,
+                            "killed": False,
+                            "reason": f"wrong binary path escapes problem_dir: {bin_rel}",
+                        }
+                    )
+                    all_killed = False
+                    continue
+                binary_path = Path(resolved_bin)
 
             src_rel = manifest_wrong_paths.get(wrong_name, f"solutions/{wrong_name}.cpp")
             resolved_src = safe_resolve_under_root(problem_dir, src_rel)

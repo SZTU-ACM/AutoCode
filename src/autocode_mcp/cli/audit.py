@@ -33,6 +33,17 @@ def main() -> int:
         action="store_true",
         help="Audit an arbitrary problem directory directly without requiring prior workflow state",
     )
+    parser.add_argument(
+        "--layout",
+        choices=["auto", "autocode", "standard_cn", "polygon", "hydro"],
+        default="auto",
+        help="Directory layout adapter for standalone audits (default: auto)",
+    )
+    parser.add_argument(
+        "--mutation-check",
+        action="store_true",
+        help="Run optional single-point mutation testing on the main solution during full audit",
+    )
     args = parser.parse_args()
 
     async def run() -> dict:
@@ -43,6 +54,8 @@ def main() -> int:
             include_difficulty=not args.no_difficulty,
             report_path=args.report_path,
             standalone=args.standalone,
+            layout=args.layout,
+            enable_mutation_testing=True if args.mutation_check else None,
         )
         return result.to_dict()
 

@@ -44,7 +44,7 @@ from .judge_runner import (
     parse_judge_metrics,
 )
 from .platform import get_exe_extension
-from .process import terminate_pid_tree
+from .process import disable_posix_core_dumps, terminate_pid_tree
 
 if TYPE_CHECKING:
     from ..workflow.models import AutoCodeManifest
@@ -154,6 +154,7 @@ async def _run_communicator_stage(
     popen_kwargs: dict[str, Any] = {}
     if sys.platform != "win32":
         popen_kwargs["start_new_session"] = True
+        popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
     proc = await asyncio.create_subprocess_exec(
         communicator_exe,
@@ -801,6 +802,7 @@ class CommunicationRunner:
             popen_kwargs: dict[str, Any] = {"limit": _STREAM_LIMIT}
             if sys.platform != "win32":
                 popen_kwargs["start_new_session"] = True
+                popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
             mgr_env = dict(os.environ)
             mgr_env["AUTOCODE_COMM_MODE"] = "multi_process"
