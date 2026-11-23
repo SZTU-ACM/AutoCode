@@ -2,7 +2,7 @@
   "name": "autocode",
   "displayName": "AutoCode",
   "description": "Verified competitive-programming problem-setting workbench with deterministic compilation, judging, stress testing, and quality-gated packaging.",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "author": {
     "name": "SummerOneTwo",
     "url": "https://github.com/SummerOneTwo"
