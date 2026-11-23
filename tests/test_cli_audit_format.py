@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from autocode_mcp.cli.report_format import format_audit_markdown, format_audit_summary
+from autocode_mcp.cli.report_format import (
+    _escape_md_cell,
+    _fmt_num,
+    _md_code,
+    format_audit_markdown,
+    format_audit_summary,
+)
 
 
 def _sample_report(*, decision: str = "no_go") -> dict[str, Any]:
@@ -159,6 +165,45 @@ def test_format_audit_markdown_escapes_injection_and_ansi() -> None:
     # Mutant table code cell escapes pipe and uses longer backtick fence when needed
     assert "\\|" in md
     assert "```x `` y \\| col```" in md
+
+
+def test_escape_md_backslash_parity_c1_controls_summary_and_fmt_num() -> None:
+    # Backslashes must be escaped BEFORE delimiters in _escape_md_cell (odd count before | / [ / `)
+    assert _escape_md_cell(r"foo\|bar") == r"foo\\\|bar"
+    assert _escape_md_cell(r"\[phish\](https://evil.example)") == r"\\\[phish\\\](https://evil.example)"
+    assert _escape_md_cell(r"\`code\`") == r"\\\`code\\\`"
+
+    # _md_code ensures odd backslash parity before every | and keeps normal backslashes untouched
+    assert _md_code(r"foo|bar") == r"`foo\|bar`"
+    assert _md_code(r"foo\|bar") == r"`foo\\\|bar`"
+    assert _md_code(r"foo\\|bar") == r"`foo\\\\\|bar`"
+    assert _md_code(r'std::cout << "\n";') == r'`std::cout << "\n";`'
+
+    # 8-bit C1 CSI (\x9b) and C1 control bytes (\x80-\x9f) stripped in Markdown and summary
+    c1_text = "\x9b31mRED\x9b0m\x85next"
+    assert _escape_md_cell(c1_text) == "REDnext"
+
+    # _fmt_num trims trailing decimal zeros BEFORE appending 'x'
+    assert _fmt_num(1.0, "x") == "1x"
+    assert _fmt_num(1.1, "x") == "1.1x"
+    assert _fmt_num(1.25, "x") == "1.25x"
+
+    # format_audit_summary sanitizes adversarial decision and mutation_testing evidence
+    adv = _sample_report(decision="go")
+    adv["data"]["decision"] = "no_go\n## HAX \x9b31mX"
+    adv["data"]["quality_signals"]["mutation_testing"]["evidence"] = {
+        "compiled_mutants": "4\nBLOCK",
+        "killed_mutants": "\x1b[31m3\x1b[0m",
+        "survived_mutants": "1\x9b0m",
+        "kill_rate": "0.75\nFAKE",
+    }
+    adv_summary = format_audit_summary(adv)
+    assert "\x1b" not in adv_summary
+    assert "\x9b" not in adv_summary
+    assert "\n## HAX" not in adv_summary
+    assert "\nBLOCK" not in adv_summary
+    assert "\nFAKE" not in adv_summary
+    assert "killed=3/4 BLOCK survived=1 kill_rate=0.75 FAKE" in adv_summary
 
 
 def test_format_audit_summary_output() -> None:

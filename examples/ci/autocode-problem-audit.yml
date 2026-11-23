@@ -41,7 +41,7 @@ jobs:
             --layout auto \
             --mutation-check \
             --format markdown \
-            --report audit_report.json > audit_report.md
+            --report "$(pwd)/audit_report.json" > audit_report.md
           rc=$?
           cat audit_report.md
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

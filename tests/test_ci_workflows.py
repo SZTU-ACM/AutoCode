@@ -37,6 +37,7 @@ def test_ci_workflow_3_platform_matrix_and_least_privilege() -> None:
     assert "pypi" not in raw_ci.lower()
     assert "write-all" not in raw_ci
     assert 'export PATH="/tmp/test-venv/bin:$PATH"' in raw_ci
+    assert not re.search(r"\$\{\{\s*github\.event\.", raw_ci)
 
 
 def test_release_workflow_github_releases_no_pypi_and_sha256() -> None:
@@ -67,6 +68,7 @@ def test_release_workflow_github_releases_no_pypi_and_sha256() -> None:
     assert "sha256sum -c SHA256SUMS.txt" in raw
     assert "gh release create" in raw
     assert 'export PATH="/tmp/release-smoke-venv/bin:$PATH"' in raw
+    assert not re.search(r"\$\{\{\s*github\.event\.", raw)
 
 
 def test_problem_ci_template_safe_and_complete() -> None:
@@ -77,6 +79,7 @@ def test_problem_ci_template_safe_and_complete() -> None:
     assert wf.get("permissions") == {"contents": "read"}
     assert "--standalone" in raw
     assert "--format markdown" in raw
+    assert '--report "$(pwd)/audit_report.json"' in raw
     assert "GITHUB_STEP_SUMMARY" in raw
     assert "twine" not in raw.lower()
     assert "pypi" not in raw.lower()

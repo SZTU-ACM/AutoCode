@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,18 @@ class _VerifyLiveChecksMixin(_VerifyHelpersMixin):
                 timeout=test_timeout,
                 memory_mb=mem_mb,
             )
+            if (
+                result.timed_out
+                and in_file == in_files[0]
+                and sys.platform in ("darwin", "win32")
+            ):
+                # Absorb one-time macOS Gatekeeper / Windows Defender CDHash scan on freshly compiled binary
+                result = await _tv_facade_attr('run_binary', run_binary)(
+                    sol_exe,
+                    input_data,
+                    timeout=test_timeout,
+                    memory_mb=mem_mb,
+                )
 
             if result.timed_out:
                 return ("timed_out", in_file)

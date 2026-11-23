@@ -6,9 +6,9 @@ import re
 from typing import Any
 
 _ANSI_ESCAPE_RE = re.compile(
-    r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])"
+    r"(?:\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])|\x9b[0-?]*[ -/]*[@-~])"
 )
-_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _LINE_BREAK_RE = re.compile(r"[\r\n\t]+")
 
 
@@ -32,7 +32,8 @@ def _escape_md_cell(value: object, *, max_len: int = 300) -> str:
     if not text:
         return "—"
     return (
-        text.replace("&", "&amp;")
+        text.replace("\\", "\\\\")
+        .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("|", "\\|")
@@ -47,7 +48,7 @@ def _md_code(value: object, *, max_len: int = 120) -> str:
     text = _collapse_inline(value, max_len=max_len)
     if not text:
         return "—"
-    text = text.replace("|", "\\|")
+    text = re.sub(r"(\\*)\|", lambda m: (m.group(1) * 2) + "\\|", text)
     longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
     fence = "`" * (longest + 1)
     needs_pad = text.startswith("`") or text.endswith("`")
@@ -63,7 +64,9 @@ def _fmt_num(val: object, suffix: str = "") -> str:
         return "—"
     if isinstance(val, int):
         return f"{val}{suffix}"
-    return f"{val:.2f}{suffix}".rstrip("0").rstrip(".") if suffix == "x" else f"{val}{suffix}"
+    if suffix == "x":
+        return f"{f'{val:.2f}'.rstrip('0').rstrip('.')}x"
+    return f"{val}{suffix}"
 
 
 def _signal_status_label(sig: object) -> str:
@@ -345,7 +348,7 @@ def format_audit_summary(output: dict[str, Any]) -> str:
 
     raw_data = output.get("data")
     data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
-    decision = str(data.get("decision") or "no_go").upper()
+    decision = _collapse_inline(data.get("decision") or "no_go", max_len=20).upper()
     layout = _collapse_inline(data.get("detected_layout") or "auto", max_len=40)
     mode = _collapse_inline(data.get("mode") or "full", max_len=20)
     target = _collapse_inline(data.get("problem_dir") or ".", max_len=160)
@@ -379,10 +382,13 @@ def format_audit_summary(output: dict[str, Any]) -> str:
         mut_sig = quality.get("mutation_testing")
         if isinstance(mut_sig, dict) and mut_sig.get("executed"):
             mut_ev = _as_dict(mut_sig.get("evidence"))
+            killed_str = _collapse_inline(mut_ev.get("killed_mutants", 0), max_len=32) or "0"
+            compiled_str = _collapse_inline(mut_ev.get("compiled_mutants", 0), max_len=32) or "0"
+            survived_str = _collapse_inline(mut_ev.get("survived_mutants", 0), max_len=32) or "0"
+            rate_val = mut_ev.get("kill_rate")
+            rate_str = _collapse_inline(rate_val, max_len=32) if rate_val is not None else "None"
             lines.append(
-                f"  MUTATION: killed={mut_ev.get('killed_mutants', 0)}/"
-                f"{mut_ev.get('compiled_mutants', 0)} "
-                f"survived={mut_ev.get('survived_mutants', 0)} "
-                f"kill_rate={mut_ev.get('kill_rate')}"
+                f"  MUTATION: killed={killed_str}/{compiled_str} "
+                f"survived={survived_str} kill_rate={rate_str}"
             )
     return "\n".join(lines)
