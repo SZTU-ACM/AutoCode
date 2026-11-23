@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-23
+
+### Added
+
+- **Problem CI 人类可读审计报告与自动化分发工作流（Phase 4）**：
+  - `autocode-audit` 新增 `--format json|markdown|summary` 输出模式（默认保持 `json` 向下兼容，`--report <path>` 与 `0=go` / `2=no_go` / `1=error` 退出码不变），新增安全渲染模块 `src/autocode_mcp/cli/report_format.py`（剥离 ANSI 与 8-bit C1 控制符，先转义反斜杠防 GFM 表格与链接绕过，支持阻断项、信号总表、实证复杂度、错解杀伤倍率、变异测试存活明细与通信预算利用率展示）。
+  - 新增即用型 GitHub Actions Problem CI 模板 `examples/ci/autocode-problem-audit.yml`（最小 `contents: read` 权限、零写入 `--standalone --format markdown` 写入 `GITHUB_STEP_SUMMARY`）。
+  - 新增 `.github/workflows/release.yml` 自动化发布流水线：推 `v*` tag 后校核 tag 与 `pyproject.toml` 一致性，运行 `uv build`、隔离 venv 打包冒烟、构建并 `--check` `marketplace`/`agy`/`dsh` 三套 bundle tarball，并附 `SHA256SUMS.txt` 发布至 **GitHub Releases**（不发布 PyPI）。
+  - 升级 `.github/workflows/ci.yml` 为三平台守护矩阵（`ubuntu-latest`、`macos-latest`、`windows-latest`），补全最小权限与 `uv` 打包冒烟校验。
+  - 新增 `tests/test_cli_audit_format.py`、`tests/test_ci_workflows.py` 与 `tests/test_phase2_dogfood_regressions.py`。
+
+### Changed
+
+- **五大核心单文件无环模块化拆解与 `mypy` 严格度收紧（Phase 3，PR-3.1 ~ PR-3.6）**：
+  - 将仓库五大超长单文件（共 `11,510` 行）零行为漂移拆解为严格有向无环子模块（全部 `<= 822` 行，全仓 `70` 模块 AST Tarjan SCC `0` 循环导入，并通过 Facade 模式完整保持既有导入与 32+ 测试 monkeypatch 兼容）：
+    - `utils/exporters.py`（`1,805` 行）拆分为 `utils/exporters/{__init__,common,hydro,polygon,qoj,verify}.py`（max `606` 行）；
+    - `tools/problem.py`（`2,546` 行）拆分为 `problem_helpers.py`、`problem.py`（56 行 Facade）、`problem_cleanup.py`、`problem_create.py`、`problem_generate_helpers.py`、`problem_pack.py`、`problem_generate.py`（max `805` 行）；
+    - `tools/audit.py`（`2,659` 行）拆分为 `audit_constraints.py`、`audit_discovery.py`、`audit_signals.py`、`audit_standalone.py` 与 `audit.py`（max `822` 行）；
+    - `tools/test_verify.py`（`2,616` 行）拆分为 `verify_fingerprint.py`、`verify_static_checks.py`、`verify_live_checks.py`、`verify_wrong_kill.py` 与 `test_verify.py`（max `715` 行）；
+    - `workflow/enforcement.py`（`1,884` 行）拆分为严格分层 DAG：`hashes.py -> state_io.py -> gates.py -> reconcile.py -> enforcement.py`（max `757` 行）。
+  - 在 `pyproject.toml` 重新启用 `mypy` 的 `var-annotated` 与 `arg-type` 严格检查，修复全仓 18 处类型误差（零 `# type: ignore` / `cast` 绕过）。
+
+### Fixed
+
+- **32C 64G 云机真题狗粮压测与跨平台引擎硬化（Phase 2 & PR-3.6）**：
+  - 修复 Linux GCC 12 `-O1 -fsanitize=address,undefined` 下 `new int[2]` 常量尺寸导致 UBSan `object-size` 抢先终止而掩盖 ASan 探针的问题：改用运行时不透明 `volatile int n`、ASan 探针隔离 `UBSAN_OPTIONS`、新增 Linux `-D_GLIBCXX_ASSERTIONS` 加固回退并在 `stress_test.py` 识别 libstdc++ 断言诊断，实现 `profile="static"`（`asan_verified=True` & `ubsan_verified=True`）。
+  - 修复独立通信题（`run_twice` / `grader_linked`）无 `.ans` 文件、独立临时目录未编译 `communicator.cpp`、及 `grader_linked` 错解缺少额外源码链接问题，支持 `CommunicationRunner.run_from_manifest(..., communicator_exe_override=...)`。
+  - 增强 `standard_cn` 独立审计发现：按注释/字面量剥离与 `registerInteraction(...)` 语义分类根/子目录 `tpj.cc`/`tpj.cpp`，支持 `data/validator.cpp`、`solution/brute_force.cpp`、`solution/wrong/*.cpp` 与 `exports/{qoj,hydro,polygon}` 限值回退（同时保持未含权缺失字段的空配置回退，不污染 C++20 系统头文件查找路径）。
+  - 修复复杂性声明与静态 TLE 可行性判定：暴露 `complexity_match` 与 `complexity_feasible`，当实测静态复杂度在目标时限下明显不可行且宣称严格更优时将 `solution_audit_std` 判失败（`passed=False`），并在 `solution_audit_std` 补充源码注释复杂度提取回退与 `math.isfinite` 保护。
+  - 修复 `EmpiricalRatioAnalyzer` 在 Linux `fork+exec` 低启动底噪（2–5 ms）平台下对低常数 $O(n^2)$ 伪装 $O(n)$ 的斜率漏检问题；增强 macOS Gatekeeper / Windows Defender 对新编译二进制首启 CDHash 扫描的容错处理，消除跨平台集成与超时测试抖动。
+
 ## [3.2.1] - 2026-11-23
 
 ### Added

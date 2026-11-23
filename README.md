@@ -41,11 +41,14 @@ AutoCode 的核心原则：**不靠感觉放行，把这些风险前置为确定
 
 ### 入口一：独立验题与审计 CLI（无需 AI 插件，不走 PyPI）
 
-通过 `uv tool install` 直接从 GitHub 仓库或 GitHub Releases wheel 安装独立命令行工具（`autocode-audit`、`autocode-verify`）：
+通过 `uv tool install` 直接从 GitHub 仓库或 GitHub Releases 预构建产物（`wheel` 与 `SHA256SUMS.txt`，不走 PyPI）安装独立命令行工具（`autocode-audit`、`autocode-verify`）：
 
 ```bash
 # 从 GitHub tag 一键安装（推荐）
-uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v3.2.1
+uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v3.3.0
+
+# 或者从 GitHub Releases 下载 wheel 后离线安装
+# uv tool install autocode_mcp-3.3.0-py3-none-any.whl
 
 # 或者在本仓库内直接运行
 uv sync
@@ -86,7 +89,7 @@ autocode-verify /path/to/problem_dir --status --strict-gates
   # 或启动时指定补丁：dsh --patch ./.dsh-plugin/cordis.patch.yml
   ```
 - **Antigravity (`agy`)**：
-  从 GitHub Releases 下载预构建的 `autocode-agy-bundle`，或通过内置打包脚本生成薄壳插件包：
+  从 [GitHub Releases](https://github.com/SZTU-ACM/AutoCode/releases) 下载 `autocode-agy-bundle-v3.3.0.tar.gz` 直接解压即用（同时提供 `marketplace` 与 `dsh` bundle 及 `SHA256SUMS.txt`），也可在源码仓库内本地构建：
   ```bash
   uv run python scripts/build_plugin_bundle.py --target agy --output /tmp/autocode-agy-plugin
   ```
@@ -153,6 +156,37 @@ autocode-verify /path/to/problem_dir --status --strict-gates
 - [examples/checker-sample](examples/checker-sample)：特殊判题题（SPJ，双合法构造解 + 贪心错解对照）。
 - [examples/interactive-sample](examples/interactive-sample)：交互题（二分标程 + 分块独立验证解 + 超查询次数错解 + testlib `interactor.cpp`）。
 - [examples/communication-sample](examples/communication-sample)：两阶段（`run_twice`）噪声信道通信题（含子任务依赖、`communicator.cpp`、标程与无纠错错解）。
+
+---
+
+## 实战评测摘要（真实竞赛题包脱敏 Case Study）
+
+在 32 核 64G 云端 Linux 环境（GCC 12.2.1 C++20）上，使用 `autocode-audit --standalone` 对 **9 套匿名真实历史竞赛题包**（覆盖 `standard` / `spj` / `interactive` 与多格式导出布局）及 **14 套标准/埋雷合成对照包**执行只读盲测：
+
+- **零写入安全（`zero_write_all_ok`）**：`9 / 9` 真实题包全目录 SHA-256 审计前后完全一致，**0 文件写入**；高并发审计完毕后 **0 孤儿进程**、**0 临时目录泄漏**。
+- **对照基准精度**：`6 / 6` 健康题包全部通过（**误报率 `FPR = 0.0%`**，覆盖通信 `run_twice`/`grader_linked`、交互、SPJ 与标准题）；`8 / 8` 预设缺陷对照全部拦截（**检出率 `Recall = 100.0%`**，覆盖 ASan `std::vector` 越界、$O(n^2)$ 谎报 $O(n \log n)$ 复杂度冲突、弱数据未击杀错解、题面与 validator 越界、空测试点及错配导出时限）。
+- **捕获的真实赛题隐患（已脱敏）**：
+  - 自动识别 `tpj.cc` 交互判题程序（`registerInteraction`）与 SPJ 裁判及 `1000ms` 导出子目录时限，消除历史布局误判；
+  - 准确拦截若干真实赛题导出目录中遗留的内部构建标签与缺测例的悬空 `exports/polygon/` 存根；
+  - 单点变异测试（`--mutation-check`）在 `6 / 9` 套真实竞赛题包上定位到可穿越既有终测数据的单点边界变异体，为赛前补强 Hack 数据提供明确清单。
+- **Markdown 审题报告示例（`autocode-audit ... --standalone --mutation-check --format markdown`）**：
+
+```markdown
+# AutoCode Problem Audit Report
+**Verdict:** ✅ GO
+| Field | Value |
+|---|---|
+| Decision | `go` |
+| Layout | `polygon` |
+| Standalone | `True` |
+| Blocking Issues | 0 |
+| Warnings | 1 |
+
+## Wrong Solution Kill Matrix
+| Solution | Expected | Killed | Verdict / Test | Max Time (ms) | Ratio vs Std |
+|---|---|---|---|---|---|
+| `wrong_int32` | `fail` | YES | WA @ 02.in | 9 | 1x |
+```
 
 ---
 
