@@ -24,7 +24,7 @@ int main(int argc, char* argv[]) {
             n = rnd.next(n_min, n_max);
             break;
         case 3:
-            n = std::max(10, n_max);
+            n = n_max;
             break;
         case 4:
             n = n_max;

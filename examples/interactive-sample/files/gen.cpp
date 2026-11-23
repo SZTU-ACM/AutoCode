@@ -26,9 +26,11 @@ int main(int argc, char* argv[]) {
         case 3:
             secret = (seed % 3 == 0) ? 1 : n_max;
             break;
-        case 4:
-            secret = rnd.next(std::max(80, n_min), n_max);
+        case 4: {
+            int lo = std::max(n_min, std::min(80, n_max));
+            secret = rnd.next(lo, n_max);
             break;
+        }
         default:
             secret = rnd.next(n_min, n_max);
             break;

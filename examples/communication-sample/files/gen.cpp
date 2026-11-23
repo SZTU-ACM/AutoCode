@@ -26,7 +26,7 @@ int main(int argc, char* argv[]) {
             break;
         case 4:
             mode = 1;
-            x = rnd.next(8, 15);
+            x = rnd.next(1, 14);
             break;
         default:
             mode = rnd.next(0, 1);

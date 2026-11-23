@@ -317,3 +317,25 @@ async def test_all_four_examples_compile_and_run_smoke(tmp_path, monkeypatch, ca
     )
     assert res_sub1.verdict == "AC"
     assert res_sub2.verdict == "WA"
+
+    # 5. Generator small-scale probe parity & communication limit diversity regression checks
+    for compiled_dir in (exact_dir, checker_dir, inter_dir, comm_dir):
+        gen_exe = str(compiled_dir / "files" / f"gen{exe_ext}")
+        for probe_args in (["1", "4", "5", "15", "1", "1"], ["1", "3", "1", "5", "1", "1"]):
+            probe_res = await run_binary_with_args(gen_exe, probe_args, timeout=5)
+            assert probe_res.success, (
+                f"{compiled_dir.name} gen failed probe {probe_args}: {probe_res.stderr}"
+            )
+
+    comm_gen = str(comm_dir / "files" / f"gen{exe_ext}")
+    t3_outputs: set[str] = set()
+    t4_outputs: set[str] = set()
+    for seed in range(1, 31):
+        r3 = await run_binary_with_args(comm_gen, [str(seed), "3"], timeout=5)
+        r4 = await run_binary_with_args(comm_gen, [str(seed), "4"], timeout=5)
+        assert r3.success and r4.success
+        t3_outputs.add(r3.stdout.strip())
+        t4_outputs.add(r4.stdout.strip())
+    assert len(t3_outputs | t4_outputs) >= 10
+    overlap = len(t3_outputs & t4_outputs) / max(1, min(len(t3_outputs), len(t4_outputs)))
+    assert overlap < 0.8

@@ -21,11 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **跨平台加固、复杂度分析与导出收口（PR #3–#6 + Phase 1 收口）**：
   - 加固 Windows/Linux/macOS 跨平台支持：修复 `WinJobObject` 句柄/浮点超时与定时器粒度、Apple Clang `<bits/stdc++.h>` 提前提示与 `manifest.compiler` 解析、Linux 无 `prlimit` 回退、`RLIMIT_CORE=0` 禁 core dump、强制即时 MLE 终止及 `brute` 最小规模/崩溃严格失败。
-  - `stress_test_run` 支持 `enable_sanitizers=True` 在隔离 `.autocode/san_bin/` 运行 ASan/UBSan 与负对照探针（Linux 容器自动回退 `-static-libasan -static-libubsan`）。
+  - `stress_test_run` 支持 `enable_sanitizers=True` 在隔离 `.autocode/san_bin/` 运行 ASan/UBSan 与负对照探针（Linux 容器自动回退 `-static-libasan -static-libubsan`）；`problem_generate_tests` 新增 `mode="append"|"register_existing"` 与 `tests/hack/` 保留；`autocode-verify` 新增 `--status`/`--strict-gates`/`--reconcile`；MCP Server 统一将超过 128 KB 的工具响应截断摘要并将完整输出落盘至 `.autocode/logs/`。
   - 细粒度 SHA-256 工作流缓存：单独修改 `sol.cpp` 不失效 `brute` 审计，跨平台迁移后纯重编译保留历史分析与数据状态；`.autocode/runtime.json` 统一使用相对路径。
   - 改进静态复杂度与空间复杂度识别（Dijkstra、后悔贪心堆、1D DP、分治、快读、ST 表），强化半对数指数复杂度拟合与交互查询曲线验证，扩展 validator 与题面命名边界等价比对。
   - 完善 Polygon 自包含包 `exports/polygon/` 与 `exports/polygon.zip` 打包回读校验及 zip-slip 防护；强化 `wrong_solution_kill` 在启用门禁却无错解时的 fail-closed 行为，新增 `wrong_ms / std_ms` 倍率报告与零容忍字节级重复测试输入检查。
-  - 重锚 `README.md` 为「零 AI 独立验题 CLI + 多宿主 AI 出题工作台」双入口并同步 `rules/AGENTS.md`；按不发 PyPI 策略移除过时 `twine` 开发依赖并改用 `packaging.metadata` + 隔离安装烟测；`tests/test_packaging.py` 改为动态比对 `pyproject.toml` 版本。
+  - 重锚 `README.md` 为「零 AI 独立验题 CLI + 多宿主 AI 出题工作台」双入口并同步 `rules/AGENTS.md`；按不发 PyPI 策略移除过时 `twine` 开发依赖，改用 `uv build`、`tests/test_e2e_mcp.py -m packaging` CLI/MCP 冒烟测试与 CI 隔离虚拟环境 wheel 安装检验；`tests/test_packaging.py` 改为动态比对 `pyproject.toml` 版本。
 
 ### Fixed
 
