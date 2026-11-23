@@ -64,15 +64,19 @@ def _spill_stress_payload(problem_dir: str, round_no: int, payload: dict[str, An
 def _has_sanitizer_diagnostic(stderr: str) -> bool:
     if not stderr:
         return False
-    return any(
+    if any(
         marker in stderr
         for marker in (
             "AddressSanitizer",
             "UndefinedBehaviorSanitizer",
             "runtime error:",
             "ERROR: LeakSanitizer",
+            "__glibcxx_assert",
+            "stl_vector.h:",
         )
-    )
+    ):
+        return True
+    return "Assertion '" in stderr and "failed" in stderr
 
 
 @dataclass
@@ -889,7 +893,8 @@ class StressTestRunTool(Tool):
 
                     for res in results:  # 按轮序遍历，保证与串行一致的失败传播
                         if res.status == "ok":
-                            round_stats.append(res.stats)
+                            if res.stats is not None:
+                                round_stats.append(res.stats)
                             continue
                         if res.status in ("gen_failed", "sol_failed", "brute_failed"):
                             # 这些失败在串行实现中直接返回，此处同样立即返回。

@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    name: Build, Verify & Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --all-extras
+
+      - name: Validate version and tag consistency
+        run: |
+          VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VER" != "$VERSION" ]; then
+              echo "ERROR: tag $GITHUB_REF_NAME does not match pyproject.toml version $VERSION" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Check contracts, lint, and typecheck
+        run: |
+          uv run python scripts/sync_plugin_version.py --check
+          uv run ruff check .
+          uv run mypy src/
+          uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py tests/test_docs_sync.py tests/test_ci_workflows.py -q
+
+      - name: Build wheel & sdist and verify metadata
+        run: |
+          rm -rf dist release-assets
+          mkdir -p release-assets
+          uv build
+          uv run python - <<'PY'
+          import glob, zipfile
+          from packaging.metadata import Metadata
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as zf:
+              meta_name = next(n for n in zf.namelist() if n.endswith(".dist-info/METADATA"))
+              meta = Metadata.from_email(zf.read(meta_name).decode("utf-8"), validate=True)
+              print(f"Verified wheel metadata: {meta.name}=={meta.version}")
+          PY
+
+      - name: Isolated wheel blind-install smoke
+        run: |
+          uv venv /tmp/release-smoke-venv
+          uv pip install --python /tmp/release-smoke-venv/bin/python dist/autocode_mcp-*.whl pytest pytest-asyncio
+          export PATH="/tmp/release-smoke-venv/bin:$PATH"
+          python -m pytest tests/test_e2e_mcp.py -v -m packaging
+          autocode-audit --help >/dev/null
+          autocode-verify --help >/dev/null
+          set +e
+          autocode-audit examples/exact-sample --standalone --format markdown > /tmp/exact_audit.md
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            echo "Unexpected autocode-audit exit code: $rc" >&2
+            exit 1
+          fi
+          grep -q "# AutoCode Problem Audit Report" /tmp/exact_audit.md
+
+      - name: Build, check, and archive multi-host bundles
+        run: |
+          for target in marketplace agy dsh; do
+            uv run python scripts/build_plugin_bundle.py --target "$target" --output "$RUNNER_TEMP/bundles/$target"
+            uv run python scripts/build_plugin_bundle.py --target "$target" --check --output "$RUNNER_TEMP/bundles/$target"
+            tar -C "$RUNNER_TEMP/bundles" -czf "release-assets/autocode-${target}-bundle-v${VERSION}.tar.gz" "$target"
+          done
+
+      - name: Stage release artifacts and SHA256SUMS.txt
+        run: |
+          cp dist/autocode_mcp-*.whl dist/autocode_mcp-*.tar.gz release-assets/
+          (
+            cd release-assets
+            sha256sum *.whl *.tar.gz > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-and-verify
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Verify SHA256 checksums before publishing
+        run: |
+          (
+            cd release-assets
+            sha256sum -c SHA256SUMS.txt
+          )
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --title "AutoCode ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

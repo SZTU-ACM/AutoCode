@@ -545,6 +545,8 @@ async def test_run_binary_accepts_float_timeout_and_memory():
         comp = await compile_cpp(src, exe)
         assert comp.success, comp.stderr
 
+        # Warm up first launch so macOS Gatekeeper / Windows Defender CDHash scan is cached
+        _ = await run_binary(exe, "0\n", timeout=5.0)
         res = await run_binary(exe, "42\n", timeout=1.5, memory_mb=128.5)
         assert res.success, res.error
         assert res.stdout.strip() == "42"
@@ -563,6 +565,12 @@ def test_resolve_compiler_prefers_homebrew_gcc_over_apple_clang_on_macos(monkeyp
             lambda name: "/opt/homebrew/bin/g++-14"
             if name == "g++-14"
             else ("/usr/bin/g++" if name == "g++" else None),
+        )
+        real_isfile = compiler_module.os.path.isfile
+        monkeypatch.setattr(
+            compiler_module.os.path,
+            "isfile",
+            lambda p: False if p.startswith(("/opt/homebrew/bin/", "/usr/local/bin/")) else real_isfile(p),
         )
         monkeypatch.setattr(
             compiler_module.subprocess,

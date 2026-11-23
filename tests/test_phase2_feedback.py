@@ -747,7 +747,7 @@ async def test_review_security_and_state_hardening(tmp_path):
     mon_res = await DynamicExecutionMonitor.run_monitored_process(
         [str(oom_bin)],
         str(oom_in),
-        time_limit_ms=1000.0,
+        time_limit_ms=5000.0,
         memory_limit_mb=24.0,
         cwd=str(tmp_path),
     )

@@ -1,6 +1,6 @@
 [project]
 name = "autocode-mcp"
-version = "3.2.0"
+version = "3.3.0"
 description = "MCP Server for competitive programming problem creation, based on AutoCode paper"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,9 +68,9 @@ strict = true
 warn_return_any = true
 warn_unused_ignores = true
 exclude = ["tests/", ".venv/"]
-# 收紧：已移除实测可修复或零触发的 no-untyped-def / no-any-return / index / type-var。
+# 收紧：已移除实测可修复或零触发的 no-untyped-def / no-any-return / index / type-var / var-annotated / arg-type。
 # 保留 no-untyped-call 因其主要由 MCP 框架装饰器误报触发。
-disable_error_code = ["override", "untyped-decorator", "var-annotated", "type-arg", "arg-type", "no-untyped-call"]
+disable_error_code = ["override", "untyped-decorator", "type-arg", "no-untyped-call"]
 
 [tool.coverage.run]
 source = ["src/autocode_mcp"]
@@ -85,7 +85,6 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
-    "twine>=6.2.0",
     "types-psutil>=7.2.2.20260402",
     "types-pywin32>=311.0.0.20260402",
     "types-pyyaml>=6.0.12.20250915",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -18,10 +20,12 @@ from ..workflow import (
 )
 from .base import Tool, ToolResult, input_schema_from_model
 from .complexity import (
+    _COMPLEXITY_ORDER,
     ComplexityLevel,
     detect_complexity_conflicts,
     estimate_memory_usage,
     estimate_static_complexity,
+    extract_claimed_complexity,
     extract_n_max_from_constraints,
     has_effective_nested_loops,
     run_empirical_verification,
@@ -122,13 +126,29 @@ async def _probe_brute_small_scale(
                     "message": f"Brute probe generator failed at n={pt}: {exc}",
                 }
 
+            probe_tl_ms = 5000.0 if (idx == 0 and sys.platform in ("darwin", "win32")) else 1000.0
             res = await DynamicExecutionMonitor.run_monitored_process(
                 [brute_path],
                 in_file,
-                time_limit_ms=1000.0,
+                time_limit_ms=probe_tl_ms,
                 memory_limit_mb=mem_mb,
                 cwd=tmp_dir,
             )
+            if (
+                idx == 0
+                and sys.platform in ("darwin", "win32")
+                and str(res.get("status", "")) == "ok"
+                and float(res.get("wall_time_ms") or 0.0) >= 800.0
+            ):
+                # Re-verify idx == 0 under strict 1000ms limit once OS cold-start scan is cached
+                # (catches genuine 1000-5000ms hangs like hang_brute while passing fast binaries).
+                res = await DynamicExecutionMonitor.run_monitored_process(
+                    [brute_path],
+                    in_file,
+                    time_limit_ms=1000.0,
+                    memory_limit_mb=mem_mb,
+                    cwd=tmp_dir,
+                )
             status = str(res.get("status", "runtime_error"))
             rc = res.get("returncode")
             obs_mem = float(res.get("memory_mb") or 0.0)
@@ -241,6 +261,10 @@ class SolutionAuditStdTool(Tool):
                 and m_loaded.empirical_complexity.claimed_complexity.strip()
             ):
                 claimed_complexity = m_loaded.empirical_complexity.claimed_complexity.strip()
+        if not claimed_complexity:
+            extracted = extract_claimed_complexity(code)
+            if extracted:
+                claimed_complexity = extracted
         if constraints is None and m_loaded is not None and m_loaded.constraints:
             constraints = dict(m_loaded.constraints)
 
@@ -264,19 +288,60 @@ class SolutionAuditStdTool(Tool):
             )
 
         n_max = extract_n_max_from_constraints(constraints)
-        if n_max is not None and n_max >= 10**6 and estimated in {
-            ComplexityLevel.QUADRATIC,
-            ComplexityLevel.CUBIC,
-            ComplexityLevel.EXPONENTIAL,
-            ComplexityLevel.FACTORIAL,
-        }:
-            findings.append(
-                {
-                    "severity": "warning",
-                    "type": "high_tle_risk",
-                    "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
-                }
+        raw_tl = constraints.get("time_limit_ms") if isinstance(constraints, dict) else None
+        if (raw_tl is None or isinstance(raw_tl, bool)) and m_loaded is not None:
+            raw_tl = m_loaded.time_limit_ms
+        tl_ms = (
+            float(raw_tl)
+            if (
+                isinstance(raw_tl, int | float)
+                and not isinstance(raw_tl, bool)
+                and math.isfinite(float(raw_tl))
+                and float(raw_tl) > 0
             )
+            else 1000.0
+        )
+        tl_scale = max(1.0, tl_ms / 1000.0)
+        is_static_infeasible = False
+        if n_max is not None:
+            if estimated == ComplexityLevel.QUADRATIC:
+                is_static_infeasible = n_max >= int(50_000 * math.sqrt(tl_scale))
+            elif estimated == ComplexityLevel.CUBIC:
+                is_static_infeasible = n_max >= int(2_000 * (tl_scale ** (1.0 / 3.0)))
+            elif estimated == ComplexityLevel.EXPONENTIAL:
+                is_static_infeasible = n_max >= 35
+            elif estimated == ComplexityLevel.FACTORIAL:
+                is_static_infeasible = n_max >= 15
+
+        complexity_feasible = not is_static_infeasible
+        is_optimistic_lie = (
+            bool(claimed_complexity)
+            and claimed_complexity != estimated
+            and claimed_complexity in _COMPLEXITY_ORDER
+            and estimated in _COMPLEXITY_ORDER
+            and _COMPLEXITY_ORDER.index(claimed_complexity) < _COMPLEXITY_ORDER.index(estimated)
+        )
+        if not complexity_feasible:
+            if is_optimistic_lie:
+                passed = False
+                findings.append(
+                    {
+                        "severity": "error",
+                        "type": "high_tle_risk",
+                        "message": (
+                            f"static complexity {estimated} is infeasible for n_max={n_max} under "
+                            f"{tl_ms:.0f}ms while claimed={claimed_complexity}."
+                        ),
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "type": "high_tle_risk",
+                        "message": "n_max 较大，静态分析估算的标准解复杂度过高，存在 TLE 风险，建议参考。",
+                    }
+                )
 
         empirical_verification: dict = {"status": "skipped"}
         if problem_dir:
@@ -329,6 +394,8 @@ class SolutionAuditStdTool(Tool):
             estimated_memory_mb=estimated_memory_mb,
             detected_patterns=patterns,
             complexity_conflict=has_conflict,
+            complexity_match=not has_conflict,
+            complexity_feasible=complexity_feasible,
             conflict_details=conflict_details,
             findings=findings,
             evidence={

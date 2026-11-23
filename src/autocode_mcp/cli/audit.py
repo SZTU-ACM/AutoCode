@@ -6,6 +6,7 @@ import json
 import sys
 
 from ..tools.audit import ProblemAuditTool
+from .report_format import format_audit_markdown, format_audit_summary
 
 
 def _configure_utf8_stdio() -> None:
@@ -44,6 +45,12 @@ def main() -> int:
         action="store_true",
         help="Run optional single-point mutation testing on the main solution during full audit",
     )
+    parser.add_argument(
+        "--format",
+        choices=["json", "markdown", "summary"],
+        default="json",
+        help="Stdout output format (default: json for backwards compatibility; use markdown for Problem CI)",
+    )
     args = parser.parse_args()
 
     async def run() -> dict:
@@ -60,7 +67,12 @@ def main() -> int:
         return result.to_dict()
 
     output = asyncio.run(run())
-    print(json.dumps(output, ensure_ascii=False))
+    if args.format == "markdown":
+        print(format_audit_markdown(output))
+    elif args.format == "summary":
+        print(format_audit_summary(output))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
     if not output.get("success"):
         return 1
     decision = output.get("data", {}).get("decision")

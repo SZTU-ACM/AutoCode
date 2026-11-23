@@ -50,7 +50,8 @@
     "min_limit_case_ratio": 0.5
   },
   "solutions": [
-    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"}
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp", "expected": "pass"},
+    {"name": "wrong_no_ecc", "role": "wrong", "language": "cpp", "path": "solutions/wrong_no_ecc.cpp", "expected": "fail"}
   ],
   "case_plan": [
     {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},

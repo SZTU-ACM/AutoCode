@@ -190,6 +190,30 @@ def test_verify_complexity_flat_startup_plateau_still_falsifies_quadratic() -> N
     assert res["fitted_complexity"] == "O(n^2)"
 
 
+def test_verify_complexity_linux_low_startup_plateau_falsifies_quadratic_without_linear_fp() -> None:
+    """Linux 2–5ms fork+exec 启动底噪平台下，低常数 O(n^2) 伪装 O(n) 须拦截且真 O(n) 不误报。"""
+    quad_samples = [
+        {"n": 200, "cpu_time_ms": 2.67, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 3.58, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 2.84, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 8.70, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 50.0, "status": "ok"},
+    ]
+    res_quad = EmpiricalRatioAnalyzer.verify_complexity("O(n)", quad_samples, time_limit_ms=2000.0)
+    assert res_quad["passed"] is False
+    assert res_quad["verdict"] == "ratio_mismatch"
+
+    linear_samples = [
+        {"n": 200, "cpu_time_ms": 2.67, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 3.58, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 5.20, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 11.70, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 32.70, "status": "ok"},
+    ]
+    res_linear = EmpiricalRatioAnalyzer.verify_complexity("O(n)", linear_samples, time_limit_ms=2000.0)
+    assert res_linear["passed"] is True
+
+
 def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> None:
     """极窄 N 跨度（<2x，如 n=[11..15]）的温和进程启动抖动应豁免，但真正指数爆炸（16x）仍必须拦截。"""
     jitter_samples = [

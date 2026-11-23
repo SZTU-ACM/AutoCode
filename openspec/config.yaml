@@ -3,25 +3,24 @@ schema: spec-driven
 # Project context (optional)
 # This is shown to AI when creating artifacts.
 context: |
-  Project: AutoCode — a Claude Code plugin for the competitive-programming problem
-  authoring pipeline (problem statement, solution, validator, generator,
-  checker/interactor, stress testing, testdata, Polygon packaging). It ships an
-  internal `autocode-mcp` MCP server (22 tools) as the implementation/development
-  entry point; the primary distribution path is the remote Claude Code plugin, not a
-  standalone local MCP setup.
+  Project: AutoCode — a deterministic competitive-programming verification engine
+  (`autocode-audit`, `autocode-verify`) and multi-host AI problem-setting workbench
+  (`Claude Code`, `Codex`, `DeepSeek Harness`, `Antigravity`). It ships an internal
+  `autocode-mcp` MCP server (22 tools) with authoritative server-side workflow gates;
+  each host connects as a thin shell sharing `skills/` and MCP tools, while
+  standalone CLI auditing runs zero-AI, read-only against external problem packages.
 
   Tech stack:
   - Python 3.10+ (supports 3.10-3.14); package built with hatchling + uv.
-  - Mandatory package manager: `uv` (no pip/poetry/conda workflows).
-  - C++20 (GCC 10+) for all AI-generated problem code (sol/brute/gen/val/checker/interactor).
+  - Mandatory package manager: `uv` (no pip/poetry/conda workflows; no PyPI publishing).
+  - C++20 (GCC 10+ or compatible Clang; avoid <bits/stdc++.h>) for problem sources.
   - Lint/type/test: `ruff` (line-length 100), `mypy --strict`, `pytest` (asyncio_mode=auto).
   - Minimal deps: mcp, pydantic v2, psutil, pyyaml; pywin32 only on Windows.
 
   Conventions:
   - Conventional commits (e.g. refactor(perf): ..., docs(specs): ...). Never use
     abstract codenames like "direction-a"/"direction-b" as commit subjects.
-  - `openspec/` is intentionally git-ignored — spec/change docs are local-only
-    working artifacts, never version-controlled. Never `git add`/`commit` under it.
+  - `openspec/specs/` holds canonical specifications and is version-controlled.
   - The 22 MCP tool signatures are an external contract and MUST NOT change
     (incl. `problem_build_all`). Internal refactors must preserve outward behavior.
   - `hooks/` holds hook config only; hook logic lives in `scripts/`.

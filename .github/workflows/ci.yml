@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -48,13 +51,12 @@ jobs:
       - run: uv sync --all-extras
       - name: Check single-source plugin version sync
         run: uv run python scripts/sync_plugin_version.py --check
-      - name: Validate plugin manifests and bundle builder
-        run: uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py -q
+      - name: Validate plugin manifests, docs sync, CI workflows, and bundle builder
+        run: uv run pytest tests/test_plugin_manifest.py tests/test_plugin_bundle.py tests/test_docs_sync.py tests/test_ci_workflows.py -q
       - name: Build and check clean host plugin bundles
         run: |
           uv run python scripts/build_plugin_bundle.py --output "$RUNNER_TEMP/autocode-bundle"
           uv run python scripts/build_plugin_bundle.py --check --output "$RUNNER_TEMP/autocode-bundle"
-          uv run python scripts/build_plugin_bundle.py --target agy --output "$RUNNER_TEMP/autocode-agy"
           uv run python scripts/build_plugin_bundle.py --target agy --output "$RUNNER_TEMP/autocode-agy"
           uv run python scripts/build_plugin_bundle.py --target agy --check --output "$RUNNER_TEMP/autocode-agy"
           uv run python scripts/build_plugin_bundle.py --target dsh --output "$RUNNER_TEMP/autocode-dsh"
@@ -75,7 +77,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
-      - run: uv run pytest tests/ -v -m "not integration" --cov --cov-report=xml
+      - run: uv run pytest tests/ -v -m "not integration and not packaging" --cov --cov-report=xml
       - uses: codecov/codecov-action@v4
         with:
           files: coverage.xml
@@ -94,6 +96,45 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run pytest tests/ -v -m "integration"
 
+  test-cross-platform:
+    name: Cross-Platform (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: Run macOS core compatibility suite
+        if: matrix.os == 'macos-latest'
+        run: |
+          uv run pytest -q \
+            tests/test_cross_platform_feedback.py \
+            tests/test_phase2_feedback.py \
+            tests/test_compiler.py \
+            tests/test_plugin_bundle.py \
+            tests/test_server_enforcement.py \
+            tests/test_cli_audit_format.py
+      - name: Run Windows core compatibility suite
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          g++ --version || true
+          uv run pytest -q \
+            tests/test_win_job.py \
+            tests/test_cross_platform_feedback.py \
+            tests/test_phase2_feedback.py \
+            tests/test_process.py \
+            tests/test_plugin_bundle.py \
+            tests/test_cli_audit_format.py
+
   # 打包产物 smoke test - 验证 wheel 安装后 console script 正常工作
   test-packaging:
     runs-on: ubuntu-latest
@@ -105,24 +146,35 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-      - name: Build wheel
+      - name: Build wheel and check metadata
         run: |
           uv sync --all-extras
           uv build
-      - name: Install from wheel
+          uv run python - <<'PY'
+          import glob, zipfile
+          from packaging.metadata import Metadata
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as zf:
+              meta_name = next(n for n in zf.namelist() if n.endswith(".dist-info/METADATA"))
+              Metadata.from_email(zf.read(meta_name).decode("utf-8"), validate=True)
+          PY
+      - name: Install from wheel in isolated uv venv
         run: |
-          # 创建临时虚拟环境进行安装测试
-          python -m venv /tmp/test-venv
-          source /tmp/test-venv/bin/activate
-          pip install dist/autocode_mcp-*.whl
-          pip install pytest pytest-asyncio
-      - name: Run packaging smoke tests
+          uv venv /tmp/test-venv
+          uv pip install --python /tmp/test-venv/bin/python dist/autocode_mcp-*.whl pytest pytest-asyncio
+      - name: Run packaging smoke tests and CLI checks
         run: |
-          source /tmp/test-venv/bin/activate
-          pytest tests/test_e2e_mcp.py -v -m "packaging"
-      - name: Verify console script
-        run: |
-          source /tmp/test-venv/bin/activate
-          autocode-mcp --help || true  # --help 可能返回非 0，但命令应该存在
-          # 验证 MCP 握手
+          export PATH="/tmp/test-venv/bin:$PATH"
+          python -m pytest tests/test_e2e_mcp.py -v -m "packaging"
+          autocode-audit --help >/dev/null
+          autocode-verify --help >/dev/null
+          set +e
+          autocode-audit examples/exact-sample --standalone --format markdown > /tmp/exact_ci.md
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            exit 1
+          fi
+          grep -q "# AutoCode Problem Audit Report" /tmp/exact_ci.md
           echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | timeout 5 autocode-mcp | head -1

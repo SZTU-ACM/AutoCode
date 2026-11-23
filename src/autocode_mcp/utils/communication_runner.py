@@ -1330,6 +1330,7 @@ class CommunicationRunner:
         memory_limit_mb: float | None = None,
         deadlock_timeout_ms: float | None = None,
         use_system_temp: bool = False,
+        communicator_exe_override: str | None = None,
     ) -> JudgeResult:
         """Dispatch communication execution according to ``manifest.protocol.mode``."""
         protocol = manifest.protocol
@@ -1363,7 +1364,11 @@ class CommunicationRunner:
                 cwd=run_cwd,
             )
 
-        comm_bin = resolve_communicator_binary(problem_dir, manifest)
+        comm_bin = (
+            communicator_exe_override
+            if (communicator_exe_override and os.path.isfile(communicator_exe_override))
+            else resolve_communicator_binary(problem_dir, manifest)
+        )
         if not comm_bin:
             return JudgeResult(
                 verdict="FAIL",

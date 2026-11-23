@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -90,6 +90,7 @@ _ALLOWED_EXTRA_FLAGS = frozenset(
         "-g",
         "-static-libasan",
         "-static-libubsan",
+        "-D_GLIBCXX_ASSERTIONS",
     }
 )
 _COMPILER_INFO_CACHE: dict[str, dict[str, Any]] = {}
@@ -101,20 +102,23 @@ _SANITIZER_PROBE_CPP = r"""
 int main(int argc, char** argv) {
     if (argc < 2) return 0;
     if (std::strcmp(argv[1], "ok") == 0) {
-        int* p = new int[4];
+        volatile int n = 4;
+        int* p = new int[n];
         p[0] = 1;
         int r = p[0] - 1;
         delete[] p;
         return r;
     }
     if (std::strcmp(argv[1], "asan") == 0) {
-        int* p = new int[2];
+        volatile int n = 2;
+        int* p = new int[n];
         p[0] = 1;
         p[1] = 2;
         volatile int idx = 5;
-        volatile int x = p[idx];
+        p[idx] = 42;
+        int r = p[0];
         delete[] p;
-        return x == 1234567 ? 1 : 0;
+        return r == 1234567 ? 1 : 0;
     }
     if (std::strcmp(argv[1], "ubsan") == 0) {
         volatile int a = 2147483647;
@@ -226,6 +230,19 @@ def probe_sanitizer_support(
             True,
             True,
         )
+        ubsan_static_assert = (
+            "ubsan_static_assert",
+            [
+                "-fsanitize=undefined",
+                "-fno-omit-frame-pointer",
+                "-g",
+                "-static-libubsan",
+                "-D_GLIBCXX_ASSERTIONS",
+            ],
+            {"UBSAN_OPTIONS": base_ubsan_opts},
+            False,
+            True,
+        )
         ubsan_static = (
             "ubsan_static",
             ["-fsanitize=undefined", "-fno-omit-frame-pointer", "-g", "-static-libubsan"],
@@ -241,9 +258,9 @@ def probe_sanitizer_support(
             True,
         )
         candidates = (
-            [static_both, dyn_no_order, dyn_both, ubsan_static, ubsan_dyn]
+            [static_both, dyn_no_order, dyn_both, ubsan_static_assert, ubsan_static, ubsan_dyn]
             if preload_detected
-            else [dyn_both, static_both, dyn_no_order, ubsan_static, ubsan_dyn]
+            else [dyn_both, static_both, dyn_no_order, ubsan_static_assert, ubsan_static, ubsan_dyn]
         )
     elif sys.platform == "darwin":
         candidates = [
@@ -340,6 +357,9 @@ def probe_sanitizer_support(
 
             asan_verified = False
             if expect_asan:
+                # Prevent UBSan (e.g. object-size under GCC 12) from halting before ASan reports.
+                asan_run_env = dict(run_env)
+                asan_run_env["UBSAN_OPTIONS"] = "halt_on_error=0:print_stacktrace=0"
                 try:
                     asan_run = subprocess.run(
                         [bin_path, "asan"],
@@ -347,7 +367,7 @@ def probe_sanitizer_support(
                         text=True,
                         encoding="utf-8",
                         errors="replace",
-                        env=run_env,
+                        env=asan_run_env,
                         timeout=5.0,
                         check=False,
                         **probe_run_kwargs,
@@ -1429,7 +1449,7 @@ async def run_batch(
 
 async def compile_all(
     problem_dir: str,
-    specs: list[str | BuildSpec],
+    specs: Sequence[str | BuildSpec],
     max_concurrent: int = 4,
 ) -> dict[str, CompileResult]:
     """
