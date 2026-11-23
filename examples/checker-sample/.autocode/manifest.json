@@ -9,6 +9,7 @@
   "memory_limit_mb": 256,
   "statement_path": "statements/README.md",
   "tutorial_path": "statements/tutorial.md",
+  "constraints": {"n_max": 1000000000},
   "quality_gates": {
     "require_stress_passed": true,
     "require_validation_passed": true,
@@ -19,8 +20,8 @@
     "min_limit_case_ratio": 0.5
   },
   "solutions": [
-    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
-    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"},
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp", "expected": "pass"},
+    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp", "expected": "pass"},
     {"name": "wrong-greedy", "role": "wrong", "language": "cpp", "path": "solutions/wrong-greedy.cpp", "expected": "fail"}
   ],
   "case_plan": [

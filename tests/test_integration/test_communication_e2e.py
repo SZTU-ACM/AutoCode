@@ -606,6 +606,7 @@ encode(42) -> 8 bits -> decode -> 42
 
     sol_code = """
 // Time Complexity: O(1)
+#include <cstddef>
 #include "problem.h"
 std::vector<int> encode(int n) {
     std::vector<int> out;
@@ -614,11 +615,12 @@ std::vector<int> encode(int n) {
 }
 int decode(const std::vector<int>& msg) {
     int n = 0;
-    for (size_t i = 0; i < msg.size(); ++i) if (msg[i]) n |= (1 << i);
+    for (std::size_t i = 0; i < msg.size(); ++i) if (msg[i]) n |= (1 << i);
     return n;
 }
 """
     wrong_bits_code = """
+#include <cstddef>
 #include "problem.h"
 std::vector<int> encode(int n) {
     std::vector<int> out;
@@ -627,7 +629,7 @@ std::vector<int> encode(int n) {
 }
 int decode(const std::vector<int>& msg) {
     int n = 0;
-    for (size_t i = 0; i < msg.size(); ++i) if (msg[i]) n |= (1 << i);
+    for (std::size_t i = 0; i < msg.size(); ++i) if (msg[i]) n |= (1 << i);
     return n;
 }
 """

@@ -1,11 +1,17 @@
 {
   "schema_version": "1.0",
   "problem_name": "Interactive Sample",
+  "problem_type": "interactive",
   "interactive": true,
   "time_limit_ms": 2000,
   "memory_limit_mb": 256,
   "statement_path": "statements/README.md",
   "tutorial_path": "statements/tutorial.md",
+  "constraints": {"n_max": 100},
+  "protocol": {
+    "mode": "interactive_1v1",
+    "max_queries": 20
+  },
   "quality_gates": {
     "require_stress_passed": true,
     "require_validation_passed": true,
@@ -16,8 +22,9 @@
     "min_limit_case_ratio": 0.5
   },
   "solutions": [
-    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp"},
-    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp"}
+    {"name": "sol", "role": "main", "language": "cpp", "path": "solutions/sol.cpp", "expected": "pass"},
+    {"name": "brute", "role": "brute", "language": "cpp", "path": "solutions/brute.cpp", "expected": "pass"},
+    {"name": "wrong_over_limit", "role": "wrong", "language": "cpp", "path": "solutions/wrong_over_limit.cpp", "expected": "fail"}
   ],
   "case_plan": [
     {"name": "tiny-1", "type": "1", "seed": 1, "group": "sanity"},

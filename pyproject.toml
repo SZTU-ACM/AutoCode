@@ -1,6 +1,6 @@
 [project]
 name = "autocode-mcp"
-version = "3.2.0"
+version = "3.2.1"
 description = "MCP Server for competitive programming problem creation, based on AutoCode paper"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -85,7 +85,6 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
-    "twine>=6.2.0",
     "types-psutil>=7.2.2.20260402",
     "types-pywin32>=311.0.0.20260402",
     "types-pyyaml>=6.0.12.20250915",

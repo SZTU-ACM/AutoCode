@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -30,7 +31,7 @@ int main(int argc, char* argv[]) {
 
         std::string noisy = msg;
         if (mode == 1) {
-            size_t flip_pos = static_cast<size_t>((x * 7 + 3) % bits);
+            std::size_t flip_pos = static_cast<std::size_t>((x * 7 + 3) % bits);
             noisy[flip_pos] = (noisy[flip_pos] == '0') ? '1' : '0';
         }
         std::cout << noisy << "\n";

@@ -2,6 +2,12 @@
 
 import json
 import os
+from pathlib import Path
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (project floor) has no tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import pytest
 
@@ -9,10 +15,11 @@ import pytest
 
 
 def test_import():
-    """测试模块导入。"""
+    """测试模块导入与版本真源一致性。"""
     from autocode_mcp import __version__
 
-    assert __version__ == "3.2.0"
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert __version__ == pyproject["project"]["version"]
 
 
 def test_tool_result():
