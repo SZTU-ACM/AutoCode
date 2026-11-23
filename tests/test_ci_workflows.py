@@ -67,6 +67,7 @@ def test_release_workflow_github_releases_no_pypi_and_sha256() -> None:
     assert "SHA256SUMS.txt" in raw
     assert "sha256sum -c SHA256SUMS.txt" in raw
     assert "gh release create" in raw
+    assert '--repo "${GITHUB_REPOSITORY}"' in raw
     assert 'export PATH="/tmp/release-smoke-venv/bin:$PATH"' in raw
     assert not re.search(r"\$\{\{\s*github\.event\.", raw)
 
