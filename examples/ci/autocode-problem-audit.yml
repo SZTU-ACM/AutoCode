@@ -1,0 +1,60 @@
+name: AutoCode Problem CI Audit
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AUTOCODE_REF: v3.3.0
+  PROBLEM_DIR: .
+
+jobs:
+  audit:
+    name: Standalone Problem Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Verify C++ toolchain and install autocode-audit
+        run: |
+          g++ --version
+          uv tool install "git+https://github.com/SZTU-ACM/AutoCode.git@${AUTOCODE_REF}"
+
+      - name: Run zero-write standalone audit
+        run: |
+          set +e
+          "$HOME/.local/bin/autocode-audit" "$PROBLEM_DIR" \
+            --standalone \
+            --layout auto \
+            --mutation-check \
+            --format markdown \
+            --report audit_report.json > audit_report.md
+          rc=$?
+          cat audit_report.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat audit_report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+      - name: Upload audit report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autocode-audit-report
+          path: |
+            audit_report.json
+            audit_report.md
+          if-no-files-found: ignore

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,19 @@ async def _probe_brute_small_scale(
                 memory_limit_mb=mem_mb,
                 cwd=tmp_dir,
             )
+            if (
+                idx == 0
+                and sys.platform in ("darwin", "win32")
+                and str(res.get("status", "")) == "timeout"
+            ):
+                # Absorb one-time macOS Gatekeeper / Windows Defender CDHash scan on freshly compiled binary
+                res = await DynamicExecutionMonitor.run_monitored_process(
+                    [brute_path],
+                    in_file,
+                    time_limit_ms=1000.0,
+                    memory_limit_mb=mem_mb,
+                    cwd=tmp_dir,
+                )
             status = str(res.get("status", "runtime_error"))
             rc = res.get("returncode")
             obs_mem = float(res.get("memory_mb") or 0.0)

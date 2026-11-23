@@ -51,11 +51,14 @@ uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v3.2.1
 uv sync
 ```
 
-对任意外部题包运行**零写入只读审计**（支持 `auto` / `autocode` / `standard_cn` / `polygon` / `hydro` 布局，并可选 `--mutation-check` 单点变异测试检验数据强度）：
+对任意外部题包运行**零写入只读审计**（支持 `auto` / `autocode` / `standard_cn` / `polygon` / `hydro` 布局、可选 `--mutation-check` 单点变异测试，以及 `--format json|markdown|summary`，默认 `json`）：
 
 ```bash
-autocode-audit /path/to/problem_dir --standalone --layout auto --mutation-check --report audit_report.json
+# 输出适合人类阅读 / GitHub Step Summary 的 Markdown 审题报告并落盘 JSON
+autocode-audit /path/to/problem_dir --standalone --layout auto --mutation-check --format markdown --report audit_report.json
 ```
+
+要在自己的题目仓库 / 出题 PR 中直接接入 Problem CI，可复制 [examples/ci/autocode-problem-audit.yml](examples/ci/autocode-problem-audit.yml) 到 `.github/workflows/autocode-audit.yml`：每次 PR 自动零写入审题并把 Markdown 报告写入 GitHub Step Summary（`0=go`，`2=no_go` 自动拦阻）。
 
 快速检查 AutoCode 题包目录、编译产物新鲜度与工作流门禁状态：
 

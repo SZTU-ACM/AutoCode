@@ -42,7 +42,7 @@ def test_docs_cover_canonical_models_and_cli_flags():
     audit_cli = _read("src/autocode_mcp/cli/audit.py")
     verify_cli = _read("src/autocode_mcp/cli/verify.py")
 
-    for flag in ("--standalone", "--layout", "--mutation-check", "--mode", "--report"):
+    for flag in ("--standalone", "--layout", "--mutation-check", "--mode", "--report", "--format"):
         assert flag in audit_cli
         assert flag in claude_md, f"Missing audit CLI flag {flag!r} in CLAUDE.md"
 
@@ -50,7 +50,7 @@ def test_docs_cover_canonical_models_and_cli_flags():
         assert flag in verify_cli
         assert flag in claude_md, f"Missing verify CLI flag {flag!r} in CLAUDE.md"
 
-    for public_flag in ("--standalone", "--layout", "--mutation-check"):
+    for public_flag in ("--standalone", "--layout", "--mutation-check", "--format"):
         assert public_flag in readme_md, f"Missing {public_flag!r} in README.md"
         assert public_flag in agents_md, f"Missing {public_flag!r} in rules/AGENTS.md"
 
