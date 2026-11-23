@@ -301,6 +301,7 @@ int main() {
         tmp_path,
         "gl_ok",
         """
+#include <cstddef>
 #include "problem.h"
 std::vector<int> encode(int n) {
     std::vector<int> out;
@@ -309,7 +310,7 @@ std::vector<int> encode(int n) {
 }
 int decode(const std::vector<int>& bits) {
     int n = 0;
-    for (size_t i = 0; i < bits.size(); ++i) if (bits[i]) n |= (1 << i);
+    for (std::size_t i = 0; i < bits.size(); ++i) if (bits[i]) n |= (1 << i);
     return n;
 }
 """,
