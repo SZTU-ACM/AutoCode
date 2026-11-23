@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tempfile
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -24,7 +26,7 @@ from ..utils.communication_runner import (
 from ..utils.compiler import compile_cpp, resolve_effective_compiler, run_binary_with_args
 from ..utils.judge_runner import InteractiveRunner, JudgeResult
 from ..utils.platform import get_exe_extension
-from ..utils.process import terminate_pid_tree
+from ..utils.process import disable_posix_core_dumps, terminate_pid_tree
 from ..workflow import load_manifest, manifest_is_communication
 from ..workflow.models import AutoCodeManifest
 from .base import Tool, ToolResult, input_schema_from_model
@@ -546,6 +548,10 @@ class InteractorBuildTool(Tool):
                         mp_env["AUTOCODE_COMM_PROCS"] = str(
                             max(2, len(manifest.protocol.participant_solutions))
                         )
+                        mp_popen_kwargs: dict[str, Any] = {}
+                        if sys.platform != "win32":
+                            mp_popen_kwargs["start_new_session"] = True
+                            mp_popen_kwargs["preexec_fn"] = disable_posix_core_dumps
                         proc_mp = await asyncio.create_subprocess_exec(
                             os.path.abspath(interactor_exe),
                             input_file,
@@ -556,6 +562,7 @@ class InteractorBuildTool(Tool):
                             stderr=asyncio.subprocess.PIPE,
                             cwd=temp_dir,
                             env=mp_env,
+                            **mp_popen_kwargs,
                         )
                         try:
                             out_b, err_b = await asyncio.wait_for(

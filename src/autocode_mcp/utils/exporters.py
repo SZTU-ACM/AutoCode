@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1069,7 +1070,12 @@ _MAX_VERIFY_XML_BYTES = 5 * 1024 * 1024
 _MAX_QOJ_VERIFY_TESTS = 10_000
 
 
-def _read_export_text(container: str, rel_posix: str) -> str | None:
+def _read_export_text(
+    container: str,
+    rel_posix: str,
+    *,
+    max_bytes: int = _MAX_VERIFY_MEMBER_BYTES,
+) -> str | None:
     """Read a UTF-8 text member from either an extracted export dir or a .zip archive safely."""
     if os.path.isfile(container) and container.endswith(".zip"):
         try:
@@ -1078,18 +1084,26 @@ def _read_export_text(container: str, rel_posix: str) -> str | None:
                     info = zf.getinfo(rel_posix)
                 except KeyError:
                     return None
-                if info.file_size > _MAX_VERIFY_MEMBER_BYTES:
+                if stat.S_ISLNK(info.external_attr >> 16):
                     return None
-                return zf.read(info).decode("utf-8", errors="replace")
+                if info.file_size > max_bytes:
+                    return None
+                with zf.open(info, "r") as fp:
+                    data = fp.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    return None
+                return data.decode("utf-8", errors="replace")
         except (OSError, zipfile.BadZipFile):
             return None
     resolved = safe_resolve_under_root(container, rel_posix)
     if resolved is None or not os.path.isfile(resolved):
         return None
     try:
-        if os.path.getsize(resolved) > _MAX_VERIFY_MEMBER_BYTES:
+        with open(resolved, "rb") as fp:
+            data = fp.read(max_bytes + 1)
+        if len(data) > max_bytes:
             return None
-        return Path(resolved).read_text(encoding="utf-8", errors="replace")
+        return data.decode("utf-8", errors="replace")
     except OSError:
         return None
 
@@ -1113,14 +1127,32 @@ def _export_has_member(
     return resolved is not None and os.path.isfile(resolved)
 
 
-def _load_zip_member_set(container: str) -> set[str] | None:
+def _inspect_zip_members(container: str) -> tuple[set[str] | None, list[str]]:
+    """Return ``(member_names, unsafe_members)`` for a zip container (or ``(None, [])`` for a dir)."""
     if not (os.path.isfile(container) and container.endswith(".zip")):
-        return None
+        return None, []
     try:
         with zipfile.ZipFile(container, "r") as zf:
-            return set(zf.namelist())
+            names: set[str] = set()
+            unsafe: list[str] = []
+            for info in zf.infolist():
+                raw_name = info.filename
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    unsafe.append(f"symlink:{raw_name}")
+                    continue
+                if "\\" in raw_name or not _is_safe_export_rel_path(raw_name.rstrip("/")):
+                    if not (raw_name.endswith("/") and _is_safe_export_rel_path(raw_name.rstrip("/"))):
+                        unsafe.append(raw_name)
+                        continue
+                names.add(raw_name)
+            return names, unsafe
     except (OSError, zipfile.BadZipFile):
-        return None
+        return None, ["invalid_or_corrupt_zip_archive"]
+
+
+def _load_zip_member_set(container: str) -> set[str] | None:
+    names, _ = _inspect_zip_members(container)
+    return names
 
 
 def _resolve_contained_container(problem_dir: str, candidate: str | None) -> str | None:
@@ -1133,12 +1165,17 @@ def _resolve_contained_container(problem_dir: str, candidate: str | None) -> str
             cand_path = real_root / cand_path
         real_cand = cand_path.resolve()
         real_cand.relative_to(real_root)
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
     return str(real_cand) if real_cand.exists() else None
 
 
 def _parse_hydro_time_ms(raw: Any) -> int | None:
+    if isinstance(raw, int | float) and not isinstance(raw, bool):
+        val = float(raw)
+        if math.isfinite(val) and val > 0:
+            return int(round(val))
+        return None
     if not isinstance(raw, str):
         return None
     s = raw.strip().lower()
@@ -1160,6 +1197,11 @@ def _parse_hydro_time_ms(raw: Any) -> int | None:
 
 
 def _parse_hydro_mem_mb(raw: Any) -> int | None:
+    if isinstance(raw, int | float) and not isinstance(raw, bool):
+        val = float(raw)
+        if math.isfinite(val) and val > 0:
+            return int(round(val))
+        return None
     if not isinstance(raw, str):
         return None
     s = raw.strip().lower()
@@ -1173,6 +1215,204 @@ def _parse_hydro_mem_mb(raw: Any) -> int | None:
             except (ValueError, OverflowError):
                 return None
     return None
+
+
+_SAFE_POLYGON_TEST_PAT_RE = re.compile(
+    r"^[A-Za-z0-9_./-]{0,100}%(?:0?[1-9])?d[A-Za-z0-9_./-]{0,32}$"
+)
+_SAFE_QOJ_SUF_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+_INTERNAL_EXPORT_TOP_DIRS = frozenset({".autocode", "exports"})
+
+
+def _is_safe_export_rel_path(rel_path: str, *, disallow_internal: bool = False) -> bool:
+    if not isinstance(rel_path, str):
+        return False
+    cleaned = rel_path.replace("\\", "/").strip()
+    if not cleaned or cleaned.startswith("/") or ":" in cleaned or "\x00" in cleaned:
+        return False
+    parts = [p for p in cleaned.split("/") if p]
+    if not parts or any(p in (".", "..") for p in parts):
+        return False
+    if disallow_internal and parts[0].lower() in _INTERNAL_EXPORT_TOP_DIRS:
+        return False
+    return True
+
+
+def _extract_polygon_xml_refs(root: Any) -> tuple[list[str], list[str]]:
+    """Extract (required_refs, optional_solution_refs) relative paths from parsed problem.xml."""
+    required: list[str] = []
+    optional_sols: list[str] = []
+    seen_req: set[str] = set()
+    seen_opt: set[str] = set()
+
+    def _add_req(val: str | None) -> None:
+        if isinstance(val, str) and val.strip():
+            norm = val.strip().replace("\\", "/")
+            if norm not in seen_req:
+                seen_req.add(norm)
+                required.append(norm)
+
+    def _add_opt(val: str | None) -> None:
+        if isinstance(val, str) and val.strip():
+            norm = val.strip().replace("\\", "/")
+            if norm not in seen_opt and norm not in seen_req:
+                seen_opt.add(norm)
+                optional_sols.append(norm)
+
+    for el in root.findall(".//statements/statement"):
+        _add_req(el.attrib.get("path"))
+    for el in root.findall(".//judging/testset/checker"):
+        _add_req(el.attrib.get("path"))
+    for el in root.findall(".//judging/testset/interactor"):
+        _add_req(el.attrib.get("path"))
+    for el in root.findall(".//judging/testset/communication"):
+        _add_req(el.attrib.get("grader"))
+        _add_req(el.attrib.get("header"))
+    for el in root.findall(".//files/resources/file"):
+        _add_req(el.attrib.get("path"))
+    for el in root.findall(".//files/executables/executable/source"):
+        _add_req(el.attrib.get("path"))
+    for sol_el in root.findall(".//assets/solutions/solution"):
+        tag = str(sol_el.attrib.get("tag", "")).strip().lower()
+        for src_el in sol_el.findall("source"):
+            if tag == "main":
+                _add_req(src_el.attrib.get("path"))
+            else:
+                _add_opt(src_el.attrib.get("path"))
+
+    return required, optional_sols
+
+
+def export_polygon(
+    problem_dir: str,
+    manifest: AutoCodeManifest,
+    *,
+    xml_content: str,
+    in_files: list[str],
+    answer_ext: str,
+    output_rel_dir: str = "exports/polygon",
+    data_mode: ExportDataMode = "hardlink",
+) -> dict[str, Any]:
+    """Build a self-contained Polygon export under ``exports/polygon/`` (or ``exports/polygon.zip``).
+
+    Stages ``problem.xml``, every existing asset referenced by ``path=`` / ``grader=`` / ``header=``,
+    and all test input/answer files so no references dangle when the export is moved or audited.
+    """
+    import xml.etree.ElementTree as ET
+
+    if data_mode not in _ALLOWED_DATA_MODES:
+        raise ValueError(f"Unsupported data_mode: {data_mode!r}; expected one of: copy, hardlink, zip")
+
+    is_interactive = manifest_is_interactive(manifest)
+    safe_pairs = _collect_safe_test_pairs(
+        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
+    )
+
+    if len(xml_content.encode("utf-8")) > _MAX_VERIFY_XML_BYTES:
+        raise ValueError("problem.xml exceeds maximum allowed size")
+    if "<!DOCTYPE" in xml_content.upper() or "<!ENTITY" in xml_content.upper():
+        raise ValueError("problem.xml contains disallowed DOCTYPE/ENTITY declarations")
+    try:
+        xml_root = ET.fromstring(xml_content)
+    except ET.ParseError as exc:
+        raise ValueError(f"invalid problem.xml: {exc}") from exc
+    req_refs, opt_refs = _extract_polygon_xml_refs(xml_root)
+    all_refs = list(dict.fromkeys([*req_refs, *opt_refs]))
+    for ref in all_refs:
+        if not _is_safe_export_rel_path(ref, disallow_internal=True) or ref.lower() == "problem.xml":
+            raise ValueError(f"Unsafe path reference in problem.xml: {ref!r}")
+
+    zip_target: str | None = None
+    target_dir: str | None = None
+    temp_ctx: tempfile.TemporaryDirectory[str] | None = None
+    stage_dir: str | None = None
+    if data_mode == "zip":
+        zip_target = _prepare_safe_zip_path(problem_dir, output_rel_dir)
+        temp_ctx = tempfile.TemporaryDirectory()
+        out_dir = temp_ctx.name
+    else:
+        target_dir = _resolve_safe_export_dir(problem_dir, output_rel_dir)
+        parent_dir = os.path.dirname(target_dir)
+        os.makedirs(parent_dir, exist_ok=True)
+        stage_dir = tempfile.mkdtemp(prefix=".tmp_export_", dir=parent_dir)
+        out_dir = stage_dir
+
+    try:
+        Path(out_dir, "problem.xml").write_text(xml_content, encoding="utf-8")
+        stage_mode_used: set[str] = set()
+        effective_stage_arg: ExportDataMode = "copy" if data_mode == "zip" else data_mode
+
+        staged_assets: list[str] = ["problem.xml"]
+        missing_referenced_files: list[str] = []
+        for rel in all_refs:
+            src_abs = safe_resolve_under_root(problem_dir, rel)
+            if src_abs is None or not os.path.isfile(src_abs):
+                missing_referenced_files.append(rel)
+                continue
+            dst_abs = safe_resolve_under_root(out_dir, rel)
+            if dst_abs is None:
+                raise ValueError(f"Export destination escapes polygon staging dir: {rel!r}")
+            os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+            stage_mode_used.add(_stage_data_file(src_abs, dst_abs, effective_stage_arg))
+            staged_assets.append(rel)
+
+        tests_out_dir = os.path.join(out_dir, "tests")
+        os.makedirs(tests_out_dir, exist_ok=True)
+        omitted_empty_answers: list[str] = []
+        for in_name, ans_name, src_in, src_ans in safe_pairs:
+            stage_mode_used.add(
+                _stage_data_file(src_in, os.path.join(tests_out_dir, in_name), effective_stage_arg)
+            )
+            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
+                if ans_name is not None:
+                    omitted_empty_answers.append(ans_name)
+            elif src_ans is not None and ans_name is not None:
+                stage_mode_used.add(
+                    _stage_data_file(src_ans, os.path.join(tests_out_dir, ans_name), effective_stage_arg)
+                )
+
+        if data_mode == "zip" and zip_target is not None:
+            _zip_directory(out_dir, zip_target)
+            _cleanup_stale_sibling(zip_target, is_zip=True)
+            effective_data_mode = "zip"
+            final_output_dir = zip_target
+        else:
+            assert stage_dir is not None and target_dir is not None
+            _commit_staged_export_dir(stage_dir, target_dir)
+            stage_dir = None
+            _cleanup_stale_sibling(target_dir, is_zip=False)
+            final_output_dir = target_dir
+            if stage_mode_used == {"hardlink"}:
+                effective_data_mode = "hardlink"
+            elif "hardlink" in stage_mode_used:
+                effective_data_mode = "mixed"
+            else:
+                effective_data_mode = "copy"
+
+        result_dict: dict[str, Any] = {
+            "format": "polygon",
+            "output_dir": final_output_dir,
+            "export_dir": final_output_dir,
+            "problem_xml": os.path.join(os.path.abspath(problem_dir), "problem.xml"),
+            "exported_problem_xml": (
+                "problem.xml" if data_mode == "zip" else os.path.join(final_output_dir, "problem.xml")
+            ),
+            "data_mode": data_mode,
+            "effective_data_mode": effective_data_mode,
+            "test_count": len(safe_pairs),
+            "subtask_count": len(manifest.subtasks),
+            "omitted_empty_answers": omitted_empty_answers,
+            "staged_assets": staged_assets,
+            "missing_referenced_files": missing_referenced_files,
+        }
+        if zip_target is not None:
+            result_dict["archive_path"] = zip_target
+        return result_dict
+    finally:
+        if temp_ctx is not None:
+            temp_ctx.cleanup()
+        if stage_dir is not None and os.path.exists(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def verify_exported_packages(
@@ -1189,7 +1429,11 @@ def verify_exported_packages(
 
     if formats is None:
         detected: list[str] = []
-        if os.path.isfile(os.path.join(problem_dir, "problem.xml")):
+        if (
+            os.path.isfile(os.path.join(problem_dir, "problem.xml"))
+            or os.path.isdir(os.path.join(problem_dir, "exports", "polygon"))
+            or os.path.isfile(os.path.join(problem_dir, "exports", "polygon.zip"))
+        ):
             detected.append("polygon")
         if os.path.isdir(os.path.join(problem_dir, "exports", "hydro")) or os.path.isfile(
             os.path.join(problem_dir, "exports", "hydro.zip")
@@ -1205,51 +1449,178 @@ def verify_exported_packages(
     errors: list[str] = []
     warnings: list[str] = []
 
-    if "polygon" in formats:
-        xml_path = safe_resolve_under_root(problem_dir, "problem.xml")
-        p_errors: list[str] = []
-        p_meta: dict[str, Any] = {"present": xml_path is not None and os.path.isfile(xml_path)}
-        if xml_path is None or not os.path.isfile(xml_path):
-            p_errors.append("problem.xml missing or escapes problem_dir")
-        else:
-            try:
-                if os.path.getsize(xml_path) > _MAX_VERIFY_XML_BYTES:
-                    p_errors.append("problem.xml exceeds 5MB safety size limit")
+    def _verify_polygon_container(container_path: str, label: str, *, strict_workspace_sync: bool) -> tuple[list[str], list[str], dict[str, Any]]:
+        c_errors: list[str] = []
+        c_warnings: list[str] = []
+        c_meta: dict[str, Any] = {"present": False, "container": container_path}
+        zip_names, zip_unsafe = _inspect_zip_members(container_path)
+        if zip_unsafe:
+            c_errors.append(f"{label}: unsafe zip archive members detected: {zip_unsafe[:10]}")
+            return c_errors, c_warnings, c_meta
+        xml_raw = _read_export_text(container_path, "problem.xml", max_bytes=_MAX_VERIFY_XML_BYTES)
+        if xml_raw is None:
+            c_errors.append(f"{label}: problem.xml missing, unreadable, or exceeds 5MB limit")
+            return c_errors, c_warnings, c_meta
+        c_meta["present"] = True
+        if "<!DOCTYPE" in xml_raw.upper() or "<!ENTITY" in xml_raw.upper():
+            c_errors.append(f"{label}: problem.xml contains disallowed DOCTYPE/ENTITY declarations")
+            return c_errors, c_warnings, c_meta
+        try:
+            root = ET.fromstring(xml_raw)
+        except ET.ParseError as exc:
+            c_errors.append(f"{label}: failed to parse problem.xml: {exc}")
+            return c_errors, c_warnings, c_meta
+
+        tl_node = root.find(".//judging/testset/time-limit")
+        ml_node = root.find(".//judging/testset/memory-limit")
+        tc_node = root.find(".//judging/testset/test-count")
+        in_pat_node = root.find(".//judging/testset/input-path-pattern")
+        ans_pat_node = root.find(".//judging/testset/answer-path-pattern")
+        is_xml_interactive = root.find(".//judging/testset/interactor") is not None and root.find(".//judging/testset/communication") is None
+        try:
+            tl_val = int(tl_node.text.strip()) if (tl_node is not None and tl_node.text) else None
+            ml_bytes = int(ml_node.text.strip()) if (ml_node is not None and ml_node.text) else None
+            tc_val = int(tc_node.text.strip()) if (tc_node is not None and tc_node.text) else None
+        except ValueError as exc:
+            c_errors.append(f"{label}: invalid numeric limit in problem.xml: {exc}")
+            return c_errors, c_warnings, c_meta
+
+        c_meta.update(
+            {
+                "time_limit_ms": tl_val,
+                "memory_limit_mb": (ml_bytes // (1024 * 1024)) if ml_bytes is not None else None,
+                "test_count": tc_val,
+            }
+        )
+        if tl_val != expected_time_limit_ms:
+            c_errors.append(f"{label}: problem.xml time-limit={tl_val}ms != expected {expected_time_limit_ms}ms")
+        expected_ml_mib = expected_memory_limit_mb * 1024 * 1024
+        expected_ml_si = expected_memory_limit_mb * 1_000_000
+        if ml_bytes not in (expected_ml_mib, expected_ml_si):
+            c_errors.append(
+                f"{label}: problem.xml memory-limit={ml_bytes} != expected {expected_ml_mib}"
+            )
+        if expected_test_count is not None and tc_val != expected_test_count:
+            c_errors.append(f"{label}: problem.xml test-count={tc_val} != expected {expected_test_count}")
+
+        req_refs, opt_refs = _extract_polygon_xml_refs(root)
+        dangling_refs: list[str] = []
+        for ref in req_refs:
+            if not _is_safe_export_rel_path(ref):
+                c_errors.append(f"{label}: unsafe path reference in problem.xml: {ref}")
+            elif not _export_has_member(container_path, ref, zip_names=zip_names):
+                dangling_refs.append(ref)
+        for ref in opt_refs:
+            if not _is_safe_export_rel_path(ref):
+                c_errors.append(f"{label}: unsafe solution path reference in problem.xml: {ref}")
+                continue
+            if not _export_has_member(container_path, ref, zip_names=zip_names):
+                ws_src = safe_resolve_under_root(problem_dir, ref)
+                if strict_workspace_sync and ws_src is not None and os.path.isfile(ws_src):
+                    dangling_refs.append(ref)
                 else:
-                    xml_raw = Path(xml_path).read_text(encoding="utf-8", errors="replace")
-                    if "<!DOCTYPE" in xml_raw.upper() or "<!ENTITY" in xml_raw.upper():
-                        p_errors.append("problem.xml contains disallowed DOCTYPE/ENTITY declarations")
-                    else:
-                        root = ET.fromstring(xml_raw)
-                        tl_node = root.find(".//judging/testset/time-limit")
-                        ml_node = root.find(".//judging/testset/memory-limit")
-                        tc_node = root.find(".//judging/testset/test-count")
-                        tl_val = int(tl_node.text.strip()) if (tl_node is not None and tl_node.text) else None
-                        ml_bytes = int(ml_node.text.strip()) if (ml_node is not None and ml_node.text) else None
-                        tc_val = int(tc_node.text.strip()) if (tc_node is not None and tc_node.text) else None
-                        p_meta.update(
-                            {
-                                "time_limit_ms": tl_val,
-                                "memory_limit_mb": (ml_bytes // (1024 * 1024)) if ml_bytes is not None else None,
-                                "test_count": tc_val,
-                            }
-                        )
-                        if tl_val != expected_time_limit_ms:
-                            p_errors.append(
-                                f"problem.xml time-limit={tl_val}ms != expected {expected_time_limit_ms}ms"
-                            )
-                        if ml_bytes != expected_memory_limit_mb * 1024 * 1024:
-                            p_errors.append(
-                                f"problem.xml memory-limit={ml_bytes} != expected {expected_memory_limit_mb * 1024 * 1024}"
-                            )
-                        if expected_test_count is not None and tc_val != expected_test_count:
-                            p_errors.append(
-                                f"problem.xml test-count={tc_val} != expected {expected_test_count}"
-                            )
-            except (ET.ParseError, OSError, ValueError) as exc:
-                p_errors.append(f"failed to parse problem.xml: {exc}")
+                    c_warnings.append(f"{label}: optional solution path not found on disk: {ref}")
+
+        if dangling_refs:
+            c_errors.append(
+                f"{label}: dangling problem.xml path references ({len(dangling_refs)}): {dangling_refs[:10]}"
+            )
+
+        # Verify test files referenced by input-path-pattern / answer-path-pattern
+        if isinstance(tc_val, int) and 0 < tc_val <= _MAX_QOJ_VERIFY_TESTS:
+            in_pat = (in_pat_node.text or "").strip() if in_pat_node is not None else "tests/%02d.in"
+            ans_pat = (ans_pat_node.text or "").strip() if ans_pat_node is not None else "tests/%02d.ans"
+            in_pat_ok = bool(_SAFE_POLYGON_TEST_PAT_RE.fullmatch(in_pat))
+            ans_pat_ok = is_xml_interactive or bool(_SAFE_POLYGON_TEST_PAT_RE.fullmatch(ans_pat))
+            if not in_pat_ok:
+                c_errors.append(f"{label}: unsafe or invalid input-path-pattern: {in_pat!r}")
+            if not ans_pat_ok:
+                c_errors.append(f"{label}: unsafe or invalid answer-path-pattern: {ans_pat!r}")
+            missing_tests: list[str] = []
+            if in_pat_ok and ans_pat_ok:
+                for idx in range(1, tc_val + 1):
+                    in_rel = in_pat % idx
+                    if not _is_safe_export_rel_path(in_rel) or not _export_has_member(
+                        container_path, in_rel, zip_names=zip_names
+                    ):
+                        missing_tests.append(in_rel)
+                    if not is_xml_interactive:
+                        ans_rel = ans_pat % idx
+                        if not _is_safe_export_rel_path(ans_rel) or not _export_has_member(
+                            container_path, ans_rel, zip_names=zip_names
+                        ):
+                            missing_tests.append(ans_rel)
+                    if len(missing_tests) >= 10:
+                        break
+            if missing_tests:
+                c_errors.append(f"{label}: missing Polygon test files: {missing_tests[:10]}")
+            c_meta["dangling_refs"] = dangling_refs
+            c_meta["missing_tests"] = missing_tests
+        elif isinstance(tc_val, int) and tc_val > _MAX_QOJ_VERIFY_TESTS:
+            c_errors.append(
+                f"{label}: problem.xml test-count={tc_val} exceeds safety cap {_MAX_QOJ_VERIFY_TESTS}"
+            )
+        elif tc_val is None or tc_val <= 0:
+            c_errors.append(f"{label}: problem.xml test-count must be positive, got {tc_val}")
+
+        return c_errors, c_warnings, c_meta
+
+    if "polygon" in formats:
+        p_errors: list[str] = []
+        p_warnings: list[str] = []
+        p_meta: dict[str, Any] = {"present": False}
+
+        root_xml = safe_resolve_under_root(problem_dir, "problem.xml")
+        has_root_xml = root_xml is not None and os.path.isfile(root_xml)
+
+        p_raw_container = None
+        if isinstance(exports_meta, dict) and isinstance(exports_meta.get("polygon"), dict):
+            p_raw_container = (
+                exports_meta["polygon"].get("archive_path")
+                or exports_meta["polygon"].get("export_dir")
+            )
+            if p_raw_container and os.path.abspath(str(p_raw_container)) == os.path.abspath(problem_dir):
+                p_raw_container = None
+        if not p_raw_container:
+            cand_zip = os.path.join(problem_dir, "exports", "polygon.zip")
+            cand_dir = os.path.join(problem_dir, "exports", "polygon")
+            if os.path.lexists(cand_zip):
+                p_raw_container = cand_zip
+            elif os.path.lexists(cand_dir):
+                p_raw_container = cand_dir
+        p_export_container = (
+            _resolve_contained_container(problem_dir, p_raw_container)
+            if p_raw_container
+            else None
+        )
+
+        if p_raw_container is not None and p_export_container is None:
+            p_errors.append("polygon export artifact missing or escapes problem_dir")
+        if not has_root_xml and p_export_container is None:
+            if not p_errors:
+                p_errors.append("problem.xml missing or escapes problem_dir")
+        else:
+            if has_root_xml:
+                re_errs, re_warns, re_meta = _verify_polygon_container(
+                    os.path.abspath(problem_dir), "polygon(root)", strict_workspace_sync=False
+                )
+                p_errors.extend(re_errs)
+                p_warnings.extend(re_warns)
+                p_meta.update(re_meta)
+            if p_export_container is not None:
+                ex_errs, ex_warns, ex_meta = _verify_polygon_container(
+                    p_export_container, "polygon(export)", strict_workspace_sync=True
+                )
+                p_errors.extend(ex_errs)
+                p_warnings.extend(ex_warns)
+                if not has_root_xml:
+                    p_meta.update(ex_meta)
+                else:
+                    p_meta["export_package"] = ex_meta
+
         checks["polygon"] = {"passed": not p_errors, "errors": p_errors, **p_meta}
         errors.extend(p_errors)
+        warnings.extend(p_warnings)
 
     if "hydro" in formats:
         h_raw_container = None
@@ -1258,14 +1629,16 @@ def verify_exported_packages(
         if not h_raw_container:
             cand_zip = os.path.join(problem_dir, "exports", "hydro.zip")
             cand_dir = os.path.join(problem_dir, "exports", "hydro")
-            h_raw_container = cand_zip if os.path.isfile(cand_zip) else (cand_dir if os.path.isdir(cand_dir) else None)
+            h_raw_container = cand_zip if os.path.lexists(cand_zip) else (cand_dir if os.path.lexists(cand_dir) else None)
         h_container = _resolve_contained_container(problem_dir, h_raw_container)
         h_errors: list[str] = []
         h_meta: dict[str, Any] = {"present": h_container is not None}
         if h_container is None:
             h_errors.append("hydro export artifact missing or escapes problem_dir")
         else:
-            h_zip_names = _load_zip_member_set(h_container)
+            h_zip_names, h_zip_unsafe = _inspect_zip_members(h_container)
+            if h_zip_unsafe:
+                h_errors.append(f"hydro export contains unsafe zip members: {h_zip_unsafe[:10]}")
             pyaml_text = _read_export_text(h_container, "problem.yaml")
             if pyaml_text is None:
                 h_errors.append("hydro export missing problem.yaml")
@@ -1312,6 +1685,9 @@ def verify_exported_packages(
                             for field_key in ("input", "output"):
                                 fname = case.get(field_key)
                                 if isinstance(fname, str) and fname:
+                                    if "/" in fname or "\\" in fname or not _is_safe_export_rel_path(f"testdata/{fname}"):
+                                        h_errors.append(f"hydro config.yaml contains unsafe case filename: {fname!r}")
+                                        continue
                                     if field_key == "input":
                                         referenced_inputs.add(fname)
                                     if not _export_has_member(
@@ -1344,14 +1720,16 @@ def verify_exported_packages(
         if not q_raw_container:
             cand_zip = os.path.join(problem_dir, "exports", "qoj.zip")
             cand_dir = os.path.join(problem_dir, "exports", "qoj")
-            q_raw_container = cand_zip if os.path.isfile(cand_zip) else (cand_dir if os.path.isdir(cand_dir) else None)
+            q_raw_container = cand_zip if os.path.lexists(cand_zip) else (cand_dir if os.path.lexists(cand_dir) else None)
         q_container = _resolve_contained_container(problem_dir, q_raw_container)
         q_errors: list[str] = []
         q_meta: dict[str, Any] = {"present": q_container is not None}
         if q_container is None:
             q_errors.append("qoj export artifact missing or escapes problem_dir")
         else:
-            q_zip_names = _load_zip_member_set(q_container)
+            q_zip_names, q_zip_unsafe = _inspect_zip_members(q_container)
+            if q_zip_unsafe:
+                q_errors.append(f"qoj export contains unsafe zip members: {q_zip_unsafe[:10]}")
             conf_text = _read_export_text(q_container, "problem.conf")
             if conf_text is None:
                 q_errors.append("qoj export missing problem.conf")
@@ -1370,6 +1748,9 @@ def verify_exported_packages(
                 n_tests_val = _safe_qoj_int("n_tests")
                 is_qoj_interactive = parsed.get("interaction_mode", "").lower() == "on"
                 output_suf = parsed.get("output_suf", "ans").lstrip(".") or "ans"
+                output_suf_safe = bool(_SAFE_QOJ_SUF_RE.fullmatch(output_suf))
+                if not output_suf_safe:
+                    q_errors.append(f"qoj problem.conf contains unsafe output_suf: {output_suf!r}")
                 q_meta.update(
                     {
                         "time_limit_ms": tl_ms_val,
@@ -1406,7 +1787,7 @@ def verify_exported_packages(
                             ):
                                 q_errors.append(f"qoj export missing data/{idx}.in")
                                 break
-                            if not is_qoj_interactive and not _export_has_member(
+                            if not is_qoj_interactive and output_suf_safe and not _export_has_member(
                                 q_container,
                                 f"data/{idx}.{output_suf}",
                                 zip_names=q_zip_names,

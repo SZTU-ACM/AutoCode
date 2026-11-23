@@ -3,9 +3,39 @@ import os
 import re
 import shlex
 import subprocess
-from typing import Any
+import sys
+from typing import Any, cast
 
+from .process import POSIX_KILL_SIGNAL, disable_posix_core_dumps
 from .ratio_analyzer import normalize_complexity_expression
+
+_resource: Any = None
+_RLIMIT_FSIZE: Any = None
+if os.name != "nt":
+    try:
+        import resource as _resource
+
+        _RLIMIT_FSIZE = getattr(_resource, "RLIMIT_FSIZE", None)
+    except ImportError:  # pragma: no cover
+        _resource = None
+        _RLIMIT_FSIZE = None
+
+_MAX_SCALE_GEN_BYTES = 64 * 1024 * 1024  # 64 MB safety cap for generated scale probe input
+
+
+def _scale_gen_preexec() -> None:
+    """Disable core dumps and cap output file size for POSIX generator probes."""
+    disable_posix_core_dumps()
+    if _resource is not None and _RLIMIT_FSIZE is not None:
+        try:
+            _, cur_hard = cast(Any, _resource).getrlimit(_RLIMIT_FSIZE)
+            rlim_inf = getattr(_resource, "RLIM_INFINITY", -1)
+            cap = _MAX_SCALE_GEN_BYTES
+            if cur_hard != rlim_inf and cur_hard >= 0:
+                cap = min(cap, int(cur_hard))
+            cast(Any, _resource).setrlimit(_RLIMIT_FSIZE, (cap, cap))
+        except (ValueError, OSError):
+            pass
 
 _SIMPLE_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -159,22 +189,47 @@ class MultiScaleSampler:
         out_dir = os.path.dirname(output_file_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
+        abs_cwd = os.path.abspath(out_dir) if out_dir else None
         resolved_cmd = list(cmd)
         if resolved_cmd and os.path.exists(resolved_cmd[0]):
             resolved_cmd[0] = os.path.abspath(resolved_cmd[0])
+        popen_kwargs: dict[str, Any] = {
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "cwd": abs_cwd,
+        }
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True
+            popen_kwargs["preexec_fn"] = _scale_gen_preexec
         with open(output_file_path, "w", encoding="utf-8", newline="\n") as out_f:
-            proc = subprocess.run(
-                resolved_cmd,
-                stdout=out_f,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_sec,
-                check=False,
-            )
+            proc = subprocess.Popen(resolved_cmd, stdout=out_f, **popen_kwargs)
+            try:
+                _, stderr_text = proc.communicate(timeout=timeout_sec)
+            except subprocess.TimeoutExpired:
+                try:
+                    if sys.platform == "win32":
+                        subprocess.run(
+                            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                            capture_output=True,
+                            timeout=3.0,
+                            check=False,
+                        )
+                    else:
+                        cast(Any, os).killpg(proc.pid, POSIX_KILL_SIGNAL)
+                except OSError:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.SubprocessError:
+                    pass
+                raise
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"Generator execution failed with exit code {proc.returncode}: {proc.stderr.strip()}"
+                    f"Generator execution failed with exit code {proc.returncode}: {(stderr_text or '').strip()}"
                 )
         return True

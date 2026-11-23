@@ -1350,6 +1350,8 @@ def _apply_problem_build_all(
 
 def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], success: bool, data: dict[str, Any]) -> dict[str, Any]:
     state = load_workflow_state(problem_dir)
+    if tool_name == "problem_create" and not success:
+        return state
     if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
         return state
     if tool_name == "solution_build" and bool(tool_input.get("enable_sanitizers")):

@@ -6,7 +6,7 @@ from typing import Any
 
 import psutil
 
-from .process import terminate_pid_tree
+from .process import disable_posix_core_dumps, terminate_pid_tree
 
 
 class DynamicExecutionMonitor:
@@ -132,6 +132,7 @@ class DynamicExecutionMonitor:
         popen_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True
+            popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
         wall_start = time.perf_counter()
         peak_memory_mb = 0.0
@@ -156,6 +157,8 @@ class DynamicExecutionMonitor:
             ps_proc = psutil.Process(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             ps_proc = None
+
+        mle_event = asyncio.Event()
 
         async def _sample_resources() -> None:
             nonlocal peak_memory_mb, accumulated_cpu_ms
@@ -182,6 +185,7 @@ class DynamicExecutionMonitor:
                         if cpu > accumulated_cpu_ms:
                             accumulated_cpu_ms = cpu
                         if peak_memory_mb > memory_limit_mb:
+                            mle_event.set()
                             break
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         break
@@ -209,25 +213,53 @@ class DynamicExecutionMonitor:
 
         read_stdout_task = asyncio.create_task(_read_stream_limited(subproc.stdout, max_output_bytes))
         read_stderr_task = asyncio.create_task(_read_stream_limited(subproc.stderr, max_output_bytes))
+        wait_proc_task = asyncio.create_task(subproc.wait())
+        mle_wait_task = asyncio.create_task(mle_event.wait())
 
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(subproc.wait(), read_stdout_task, read_stderr_task),
-                timeout=timeout_sec,
-            )
-            stdout_bytes = read_stdout_task.result()
-            stderr_bytes = read_stderr_task.result()
-        except asyncio.TimeoutError:
-            status = "timeout"
+        async def _cleanup_running() -> None:
             await terminate_pid_tree(pid)
             try:
                 await asyncio.wait_for(subproc.wait(), timeout=1.0)
             except Exception:
                 pass
-            if not read_stdout_task.done():
-                read_stdout_task.cancel()
-            if not read_stderr_task.done():
-                read_stderr_task.cancel()
+            for t in (wait_proc_task, mle_wait_task, read_stdout_task, read_stderr_task):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(
+                wait_proc_task, mle_wait_task, read_stdout_task, read_stderr_task, return_exceptions=True
+            )
+
+        try:
+            done, _ = await asyncio.wait(
+                {wait_proc_task, mle_wait_task},
+                timeout=timeout_sec,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if mle_event.is_set() or (mle_wait_task in done and peak_memory_mb > memory_limit_mb):
+                status = "mle"
+                await _cleanup_running()
+            elif wait_proc_task in done:
+                mle_wait_task.cancel()
+                try:
+                    await mle_wait_task
+                except asyncio.CancelledError:
+                    pass
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        asyncio.gather(read_stdout_task, read_stderr_task),
+                        timeout=max(0.5, min(2.0, timeout_sec)),
+                    )
+                except asyncio.TimeoutError:
+                    for t in (read_stdout_task, read_stderr_task):
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(read_stdout_task, read_stderr_task, return_exceptions=True)
+            else:
+                status = "mle" if peak_memory_mb > memory_limit_mb else "timeout"
+                await _cleanup_running()
+        except BaseException:
+            await _cleanup_running()
+            raise
         finally:
             sampler_task.cancel()
             try:
@@ -237,16 +269,16 @@ class DynamicExecutionMonitor:
 
         wall_elapsed_ms = (time.perf_counter() - wall_start) * 1000.0
 
-        if status != "timeout":
-            if peak_memory_mb > memory_limit_mb:
-                status = "mle"
+        if peak_memory_mb > memory_limit_mb:
+            status = "mle"
+            if subproc.returncode is None:
                 await terminate_pid_tree(pid)
                 try:
                     await asyncio.wait_for(subproc.wait(), timeout=1.0)
                 except Exception:
                     pass
-            elif subproc.returncode != 0:
-                status = "runtime_error"
+        elif status == "ok" and subproc.returncode != 0:
+            status = "runtime_error"
 
         calc_wall_ms = max(0.1, wall_elapsed_ms - baseline_overhead_ms)
         if status == "ok":
@@ -289,6 +321,7 @@ class DynamicExecutionMonitor:
         popen_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True
+            popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
         wall_start = time.perf_counter()
         with tempfile.TemporaryDirectory(dir=abs_cwd) as raw_tmp_dir:

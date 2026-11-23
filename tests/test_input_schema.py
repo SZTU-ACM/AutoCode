@@ -71,7 +71,15 @@ def test_audit_schema_from_model():
     schema = input_schema_from_model(ProblemAuditInput)
     assert schema["type"] == "object"
     props = schema["properties"]
-    assert set(props) == {"problem_dir", "mode", "include_difficulty", "report_path", "standalone"}
+    assert set(props) == {
+        "problem_dir",
+        "mode",
+        "include_difficulty",
+        "report_path",
+        "standalone",
+        "layout",
+        "enable_mutation_testing",
+    }
     assert props["problem_dir"]["type"] == "string"
     assert props["mode"]["enum"] == ["quick", "full"]
     assert props["mode"]["default"] == "full"
@@ -79,6 +87,9 @@ def test_audit_schema_from_model():
     assert props["include_difficulty"]["default"] is True
     assert props["standalone"]["type"] == "boolean"
     assert props["standalone"]["default"] is False
+    assert props["layout"]["enum"] == ["auto", "autocode", "standard_cn", "polygon", "hydro"]
+    assert props["layout"]["default"] == "auto"
+    assert _non_null(props["enable_mutation_testing"])["type"] == "boolean"
     # report_path is optional (absent from required, nullable string)
     assert "report_path" not in schema["required"]
     assert _non_null(props["report_path"])["type"] == "string"

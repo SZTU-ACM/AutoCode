@@ -272,129 +272,195 @@ def _strip_cpp_comments_and_strings(code: str) -> str:
 
 _TOKEN_RE = re.compile(r"[A-Za-z_]\w*|[{}();]")
 
+_MULTITEST_HEADER_RE = re.compile(
+    r"^(?:"
+    r"(?:(?:--|\+\+)?\s*(?:T|t|tc|tt|tests?|cases?|q_cases?)\s*(?:--|\+\+)?)"
+    r"|(?:(?:int|long|ll|size_t)\s+(?:tc|tt|cas|case_id|_)\s*=\s*[01]\s*;\s*(?:tc|tt|cas|case_id|_)\s*<=?\s*(?:T|t|tc|tests?|cases?)\s*;.*)"
+    r"|(?:(?:std::)?cin\s*>>.*)"
+    r")$"
+)
 
-def _skip_balanced_parens(tokens: list[str], pos: int) -> int:
-    """Given tokens[pos] == '(', return the index immediately after its matching ')'."""
+
+def _extract_paren_expr(code: str, open_idx: int) -> tuple[str, int]:
+    """Return (inner_text, index_after_closing_paren) for balanced parens starting at open_idx."""
     depth = 0
-    total = len(tokens)
-    while pos < total:
-        tok = tokens[pos]
-        if tok == "(":
+    i = open_idx
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if ch == "(":
             depth += 1
-        elif tok == ")":
+        elif ch == ")":
             depth -= 1
             if depth == 0:
-                return pos + 1
-        pos += 1
-    return total
+                return code[open_idx + 1 : i].strip(), i + 1
+        i += 1
+    return code[open_idx + 1 :].strip(), n
 
 
-def analyze_loop_complexity(code: str) -> str:
-    cleaned = _strip_cpp_comments_and_strings(code)
-    tokens = _TOKEN_RE.findall(cleaned)
-    total = len(tokens)
+def _is_multitest_driver_header(header: str) -> bool:
+    s = " ".join(header.strip().split())
+    return bool(s and _MULTITEST_HEADER_RE.match(s))
+
+
+def _is_small_constant_for_header(header: str) -> bool:
+    """Detect O(1) fixed-bound loops like `for (int d = 0; d < 4; d++)` or `for (int b = 29; b >= 0; b--)`."""
+    parts = [p.strip() for p in header.split(";")]
+    if len(parts) != 3:
+        return False
+    m_asc = re.match(r"^[A-Za-z_]\w*\s*(<=?)\s*(\d+)$", parts[1])
+    if m_asc:
+        bound = int(m_asc.group(2))
+        return 0 < bound <= 32
+    m_desc_init = re.search(r"=\s*(\d+)\s*$", parts[0])
+    m_desc_cond = re.match(r"^[A-Za-z_]\w*\s*(>=?)\s*0$", parts[1])
+    if m_desc_init and m_desc_cond:
+        bound = int(m_desc_init.group(1))
+        return 0 < bound <= 32
+    return False
+
+
+def _analyze_loop_nesting(
+    cleaned: str,
+    *,
+    ignore_multitest: bool = False,
+    ignore_small_const: bool = False,
+) -> tuple[int, bool, bool]:
+    """Compute (max_loop_depth, saw_any_loop, has_nested_for_loops) over comment-stripped C++ code."""
+    # Scan with char offsets so we can inspect loop headers for multi-test / constant-bound detection.
+    tok_iter = list(_TOKEN_RE.finditer(cleaned))
+    total = len(tok_iter)
 
     max_nesting = 0
     saw_loop = False
-    # Stack frames: "brace_loop" | "do_brace" | "brace_other" | "single_loop" | "single_do"
-    frames: list[str] = []
+    has_nested_for = False
+    # Stack entries: (kind, counts_toward_depth, is_for)
+    # kind in: "brace_loop" | "do_brace" | "brace_other" | "single_loop" | "single_do"
+    frames: list[tuple[str, bool, bool]] = []
     expecting_do_while = False
 
     def _active_loop_depth() -> int:
-        return sum(
-            1 for f in frames if f in ("brace_loop", "do_brace", "single_loop", "single_do")
-        )
+        return sum(1 for k, counts, _ in frames if counts and k in ("brace_loop", "do_brace", "single_loop", "single_do"))
+
+    def _active_for_depth() -> int:
+        return sum(1 for k, counts, is_f in frames if counts and is_f and k in ("brace_loop", "single_loop"))
 
     def _unwind_single_loops(next_tok: str | None) -> None:
         nonlocal expecting_do_while
         if next_tok == "else":
             return
         while frames:
-            top = frames[-1]
-            if top == "single_loop":
+            top_k, _, _ = frames[-1]
+            if top_k == "single_loop":
                 frames.pop()
-            elif top == "single_do":
+            elif top_k == "single_do":
                 frames.pop()
                 expecting_do_while = True
                 break
             else:
                 break
 
+    def _skip_parens_idx(pos: int) -> int:
+        depth = 0
+        while pos < total:
+            t = tok_iter[pos].group(0)
+            if t == "(":
+                depth += 1
+            elif t == ")":
+                depth -= 1
+                if depth == 0:
+                    return pos + 1
+            pos += 1
+        return total
+
     i = 0
     while i < total:
-        tok = tokens[i]
+        tok = tok_iter[i].group(0)
 
         if tok in ("for", "while"):
             if tok == "while" and expecting_do_while:
                 expecting_do_while = False
                 i += 1
-                if i < total and tokens[i] == "(":
-                    i = _skip_balanced_parens(tokens, i)
-                if i < total and tokens[i] == ";":
+                if i < total and tok_iter[i].group(0) == "(":
+                    i = _skip_parens_idx(i)
+                if i < total and tok_iter[i].group(0) == ";":
                     i += 1
-                _unwind_single_loops(tokens[i] if i < total else None)
+                _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
                 continue
 
-            if i + 1 < total and tokens[i + 1] == "(":
+            if i + 1 < total and tok_iter[i + 1].group(0) == "(":
                 saw_loop = True
-                current_depth = _active_loop_depth() + 1
-                max_nesting = max(max_nesting, current_depth)
-                i = _skip_balanced_parens(tokens, i + 1)
-                if i < total and tokens[i] == ";":
+                is_for = tok == "for"
+                header_str, _ = _extract_paren_expr(cleaned, tok_iter[i + 1].start())
+                counts = True
+                if ignore_multitest and _active_loop_depth() == 0 and _is_multitest_driver_header(header_str):
+                    counts = False
+                elif ignore_small_const and is_for and _is_small_constant_for_header(header_str):
+                    counts = False
+                if counts:
+                    current_depth = _active_loop_depth() + 1
+                    max_nesting = max(max_nesting, current_depth)
+                    if is_for and _active_for_depth() >= 1:
+                        has_nested_for = True
+                i = _skip_parens_idx(i + 1)
+                if i < total and tok_iter[i].group(0) == ";":
                     i += 1
-                    _unwind_single_loops(tokens[i] if i < total else None)
-                elif i < total and tokens[i] == "{":
-                    frames.append("brace_loop")
+                    _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
+                elif i < total and tok_iter[i].group(0) == "{":
+                    frames.append(("brace_loop", counts, is_for))
                     i += 1
                 else:
-                    frames.append("single_loop")
+                    frames.append(("single_loop", counts, is_for))
                 continue
 
         elif tok == "do":
-            if i + 1 < total and tokens[i + 1] != "(":
+            if i + 1 < total and tok_iter[i + 1].group(0) != "(":
                 saw_loop = True
                 current_depth = _active_loop_depth() + 1
                 max_nesting = max(max_nesting, current_depth)
                 i += 1
-                if i < total and tokens[i] == "{":
-                    frames.append("do_brace")
+                if i < total and tok_iter[i].group(0) == "{":
+                    frames.append(("do_brace", True, False))
                     i += 1
                 else:
-                    frames.append("single_do")
+                    frames.append(("single_do", True, False))
                 continue
 
         elif tok in ("if", "switch"):
-            if i + 1 < total and tokens[i + 1] == "(":
-                i = _skip_balanced_parens(tokens, i + 1)
+            if i + 1 < total and tok_iter[i + 1].group(0) == "(":
+                i = _skip_parens_idx(i + 1)
                 continue
 
         elif tok == "{":
-            frames.append("brace_other")
+            frames.append(("brace_other", False, False))
             i += 1
             continue
 
         elif tok == "}":
-            # Pop until matching braced frame
-            popped = None
+            popped_kind = None
             while frames:
-                top = frames.pop()
-                if top in ("brace_loop", "do_brace", "brace_other"):
-                    popped = top
+                top_k, _, _ = frames.pop()
+                if top_k in ("brace_loop", "do_brace", "brace_other"):
+                    popped_kind = top_k
                     break
             i += 1
-            if popped == "do_brace":
+            if popped_kind == "do_brace":
                 expecting_do_while = True
             else:
-                _unwind_single_loops(tokens[i] if i < total else None)
+                _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
             continue
 
         elif tok == ";":
             i += 1
-            _unwind_single_loops(tokens[i] if i < total else None)
+            _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
             continue
 
         i += 1
 
+    return max_nesting, saw_loop, has_nested_for
+
+
+def _depth_to_complexity(max_nesting: int, saw_loop: bool) -> str:
     if not saw_loop:
         return ComplexityLevel.CONSTANT
     if max_nesting <= 1:
@@ -404,6 +470,82 @@ def analyze_loop_complexity(code: str) -> str:
     if max_nesting == 3:
         return ComplexityLevel.CUBIC
     return ComplexityLevel.EXPONENTIAL
+
+
+def analyze_loop_complexity(code: str) -> str:
+    cleaned = _strip_cpp_comments_and_strings(code)
+    max_nesting, saw_loop, _ = _analyze_loop_nesting(cleaned)
+    return _depth_to_complexity(max_nesting, saw_loop)
+
+
+def has_effective_nested_loops(code: str) -> bool:
+    """Return True when algorithmic loop depth (ignoring multi-test drivers & small constant loops) is >= 2."""
+    cleaned = _strip_cpp_comments_and_strings(code)
+    depth, _, _ = _analyze_loop_nesting(cleaned, ignore_multitest=True, ignore_small_const=True)
+    return depth >= 2
+
+
+def _has_exponential_recursion(cleaned: str) -> bool:
+    """Detect exponential branching / backtracking recursion while ignoring tree DFS, Tarjan, and divide-and-conquer."""
+    # Find function definitions: <ret> <name>(<params>) { ... }
+    fn_re = re.compile(
+        r"\b(?:void|int|long\s+long|ll|bool|double|auto|unsigned)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{"
+    )
+    skip_names = {"main", "if", "for", "while", "switch", "catch", "else"}
+    non_exp_name_re = re.compile(
+        r"(?:merge|sort|qsort|quick|cdq|build|query|update|modify|push|seg|tarjan|scc|lca)",
+        re.IGNORECASE,
+    )
+    for m in fn_re.finditer(cleaned):
+        fname = m.group(1)
+        if fname in skip_names or non_exp_name_re.search(fname):
+            continue
+        # Extract balanced body starting at '{'
+        brace_start = m.end() - 1
+        depth = 0
+        end = brace_start
+        for idx in range(brace_start, len(cleaned)):
+            ch = cleaned[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = idx
+                    break
+        if end <= brace_start:
+            continue
+        body = cleaned[brace_start + 1 : end]
+        self_calls = re.findall(rf"\b{re.escape(fname)}\s*\(", body)
+        if not self_calls:
+            continue
+        # Exclude memoized DP, divide-and-conquer, segment tree, binary tree, and Tarjan SCC
+        if (
+            re.search(r"\b(?:mid|dp|memo|cache|lson|rson)\b", body)
+            or re.search(r"(?:/\s*2|>>\s*1|<<\s*1)\b", body)
+            or re.search(r"\b(?:ch|son|lc|rc|ls|rs|low|dfn)\s*\[", body)
+            or re.search(r"(?:->|\.)\s*(?:left|right)\b", body)
+        ):
+            continue
+        has_tree_or_tarjan_guard = bool(
+            re.search(r"!=\s*(?:p|fa|par|parent|prev)\b", body)
+            or re.search(r"\bin_?stack\b", body)
+        )
+        # Backtracking: recursive call inside loop + unmark/pop_back (excluding rooted-tree DFS / Tarjan)
+        has_backtrack_undo = bool(
+            re.search(r"\b(?:used|vis|visited|chosen|picked|mark)\s*\[[^\]]+\]\s*=\s*(?:0|false)\b", body)
+            or (re.search(r"\.pop_back\s*\(\s*\)", body) and not has_tree_or_tarjan_guard)
+        )
+        if has_backtrack_undo and re.search(r"\b(?:for|while)\s*\(", body):
+            return True
+        # Direct multi-branch recursion without graph/tree visited or parent guard (e.g. dfs(i+1, 0); dfs(i+1, 1);)
+        if (
+            len(self_calls) >= 2
+            and not has_tree_or_tarjan_guard
+            and not re.search(r"\b(?:vis|visited|adj|edges?|head|left|right)\b", body)
+        ):
+            return True
+    return False
 
 
 def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
@@ -437,11 +579,16 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         patterns.append("permutation_enumeration")
         complexity = _higher_complexity(complexity, ComplexityLevel.FACTORIAL)
 
-    if re.search(
-        r"\bbfs\b|\bdfs\b|(?<![a-zA-Z0-9_])(?:std::)?(?:queue|stack)\s*<",
-        cleaned,
-    ):
+    has_explicit_graph = bool(re.search(r"\bbfs\b|\bdfs\b", cleaned))
+    has_queue_stack = bool(re.search(r"(?<![a-zA-Z0-9_])(?:std::)?(?:queue|stack)\s*<", cleaned))
+    has_graph_context = bool(
+        re.search(r"\b(?:adj|graph|edges?|head|nxt|vis|visited|dist|dis|deg|indeg|tree)\b", cleaned)
+    )
+    if has_explicit_graph or (has_queue_stack and has_graph_context and "heap" not in patterns):
         patterns.append("graph_traversal")
+        complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
+    elif has_queue_stack:
+        patterns.append("stack_queue")
         complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
 
     if re.search(r"\bdp\[|\bmemo\[|\bmemoization\b", cleaned):
@@ -456,8 +603,28 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
     ):
         patterns.append("recursion")
 
-    if re.search(r"\b1(?:[uUlL]{0,3})\s*<<\s*[a-zA-Z_]\w*|\bbitmask\b", cleaned):
+    has_submask_enum = any(
+        m.group(1) != m.group(2)
+        for m in re.finditer(r"\(\s*([a-zA-Z_]\w*)\s*-\s*1\s*\)\s*&\s*([a-zA-Z_]\w*)", cleaned)
+    )
+    has_bitmask_loop_bound = bool(
+        re.search(r"(?:<|<=)\s*\(?\s*1(?:[uUlL]{0,3})\s*<<\s*(?:\(\s*)?[a-zA-Z_]\w*", cleaned)
+    )
+    has_bitmask_dp_array = bool(
+        re.search(r"\b(?:dp|f|memo|mask|state|sub|bit|subset)\w*\s*\[\s*1\s*<<\s*(?:1[2-9]|2\d)\s*\]", cleaned)
+    )
+    if (
+        has_bitmask_loop_bound
+        or has_submask_enum
+        or has_bitmask_dp_array
+        or re.search(r"\bbitmask\b", cleaned)
+    ):
         patterns.append("bitmask")
+        complexity = _higher_complexity(complexity, ComplexityLevel.EXPONENTIAL)
+
+    if _has_exponential_recursion(cleaned):
+        if "backtracking" not in patterns:
+            patterns.append("backtracking")
         complexity = _higher_complexity(complexity, ComplexityLevel.EXPONENTIAL)
 
     if re.search(r"\bbitset\s*<", cleaned):
@@ -468,114 +635,122 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
 
 def _has_nested_for_loops(cleaned: str) -> bool:
     """判断是否存在真正的两层及以上 `for` 嵌套循环（排除 amortized `for+while(pop)` 或 `while+adj_for`）。"""
-    tokens = _TOKEN_RE.findall(cleaned)
-    total = len(tokens)
-    frames: list[str] = []
-    expecting_do_while = False
+    _, _, has_nested_for = _analyze_loop_nesting(cleaned, ignore_multitest=True, ignore_small_const=True)
+    return has_nested_for
 
-    def _active_for_depth() -> int:
-        return sum(1 for f in frames if f in ("for_brace", "for_single"))
 
-    def _unwind(next_tok: str | None) -> None:
-        nonlocal expecting_do_while
-        if next_tok == "else":
-            return
-        while frames:
-            top = frames[-1]
-            if top in ("for_single", "other_single"):
-                frames.pop()
-            elif top == "do_single":
-                frames.pop()
-                expecting_do_while = True
-                break
-            else:
-                break
-
-    i = 0
-    while i < total:
-        tok = tokens[i]
-        if tok in ("for", "while"):
-            if tok == "while" and expecting_do_while:
-                expecting_do_while = False
-                i += 1
-                if i < total and tokens[i] == "(":
-                    i = _skip_balanced_parens(tokens, i)
-                if i < total and tokens[i] == ";":
-                    i += 1
-                _unwind(tokens[i] if i < total else None)
-                continue
-            if i + 1 < total and tokens[i + 1] == "(":
-                is_for = tok == "for"
-                if is_for and _active_for_depth() >= 1:
-                    return True
-                i = _skip_balanced_parens(tokens, i + 1)
-                if i < total and tokens[i] == ";":
-                    i += 1
-                    _unwind(tokens[i] if i < total else None)
-                elif i < total and tokens[i] == "{":
-                    frames.append("for_brace" if is_for else "other_brace")
-                    i += 1
-                else:
-                    frames.append("for_single" if is_for else "other_single")
-                continue
-        elif tok == "do" and i + 1 < total and tokens[i + 1] != "(":
-            i += 1
-            if i < total and tokens[i] == "{":
-                frames.append("do_brace")
-                i += 1
-            else:
-                frames.append("do_single")
+def _has_2d_dp_table(cleaned: str) -> bool:
+    """Check whether DP indexing/declaration genuinely uses two non-trivial dimensions."""
+    for m in re.finditer(r"\b(?:dp|memo)\s*\[([^\]]+)\]\s*\[([^\]]+)\]", cleaned):
+        dim1 = m.group(1).strip()
+        dim2 = m.group(2).strip()
+        if (dim1.isdigit() and int(dim1) <= 4) or (dim2.isdigit() and int(dim2) <= 4):
             continue
-        elif tok in ("if", "switch") and i + 1 < total and tokens[i + 1] == "(":
-            i = _skip_balanced_parens(tokens, i + 1)
-            continue
-        elif tok == "{":
-            frames.append("brace_other")
-            i += 1
-            continue
-        elif tok == "}":
-            popped = None
-            while frames:
-                top = frames.pop()
-                if top in ("for_brace", "other_brace", "do_brace", "brace_other"):
-                    popped = top
-                    break
-            i += 1
-            if popped == "do_brace":
-                expecting_do_while = True
-            else:
-                _unwind(tokens[i] if i < total else None)
-            continue
-        elif tok == ";":
-            i += 1
-            _unwind(tokens[i] if i < total else None)
-            continue
-        i += 1
+        return True
     return False
 
 
 def estimate_static_complexity(code: str) -> tuple[str, list[str]]:
-    """综合循环结构与算法模式识别静态复杂度，识别 Dijkstra/单调队列等均摊模式。"""
+    """综合循环结构与算法模式识别静态复杂度，识别多测包装、Dijkstra/反悔贪心/单调队列等均摊模式。"""
     cleaned = _strip_cpp_comments_and_strings(code)
-    loop_complexity = analyze_loop_complexity(code)
+    algo_depth, saw_loop, has_nested_for = _analyze_loop_nesting(
+        cleaned, ignore_multitest=True, ignore_small_const=True
+    )
+    loop_complexity = _depth_to_complexity(algo_depth, saw_loop)
     pattern_complexity, patterns = detect_algorithm_patterns(code)
 
+    # 1D linear DP (`dp[i] = ...`) inside a single loop should NOT be forcibly promoted to O(n^2)
+    effective_pattern_comp = pattern_complexity
+    if (
+        effective_pattern_comp == ComplexityLevel.QUADRATIC
+        and "dynamic_programming" in patterns
+        and algo_depth <= 1
+        and not _has_2d_dp_table(cleaned)
+    ):
+        non_dp_patterns = set(patterns) - {"dynamic_programming"}
+        if non_dp_patterns & {"binary_search", "sorting", "divide_and_conquer", "tree_data_structure", "heap"}:
+            effective_pattern_comp = ComplexityLevel.N_LOG_N
+        else:
+            effective_pattern_comp = ComplexityLevel.LINEAR
+
     effective_loop = loop_complexity
-    if loop_complexity == ComplexityLevel.QUADRATIC and not _has_nested_for_loops(cleaned):
+    if loop_complexity == ComplexityLevel.QUADRATIC and not has_nested_for:
         has_container_pop = bool(
             re.search(r"\.(?:pop|pop_front|pop_back)\s*\(", cleaned)
         )
-        if "heap" in patterns and has_container_pop:
+        if "heap" in patterns and (has_container_pop or re.search(r"\bpriority_queue\b", cleaned)):
             effective_loop = ComplexityLevel.N_LOG_N
-        elif (has_container_pop or "graph_traversal" in patterns) and "dynamic_programming" not in patterns:
+        elif (
+            has_container_pop or "graph_traversal" in patterns or "stack_queue" in patterns
+        ) and not _has_2d_dp_table(cleaned):
             effective_loop = ComplexityLevel.LINEAR
 
     final = (
-        _higher_complexity(effective_loop, pattern_complexity)
-        if pattern_complexity is not None
+        _higher_complexity(effective_loop, effective_pattern_comp)
+        if effective_pattern_comp is not None
         else effective_loop
     )
     return final, patterns
+
+
+def detect_complexity_conflicts(
+    *,
+    claimed: str | None,
+    static_estimated: str | None,
+    empirical: dict[str, Any] | None = None,
+) -> tuple[bool, list[str]]:
+    """Detect material disagreements across claimed, static, and confident empirical complexities."""
+    conflicts: list[str] = []
+    norm_claimed = normalize_complexity_expression(claimed) if claimed else None
+    norm_static = normalize_complexity_expression(static_estimated) if static_estimated else None
+
+    emp_fitted: str | None = None
+    _non_fit_verdicts = {
+        "verified_within_noise_floor",
+        "verified_with_cache_jump",
+        "insufficient_samples",
+        "no_valid_samples",
+        "timeout_at_extreme",
+        "mle_at_scale",
+        "runtime_error_at_scale",
+        "query_budget_exceeded",
+    }
+    if isinstance(empirical, dict):
+        verdict = str(empirical.get("verdict") or "")
+        status = str(empirical.get("status") or "")
+        r2 = empirical.get("r_squared")
+        raw_fit = empirical.get("fitted_complexity")
+        r2_ok = (
+            isinstance(r2, int | float)
+            and not isinstance(r2, bool)
+            and math.isfinite(float(r2))
+            and float(r2) >= 0.5
+        )
+        confident = (
+            status not in ("skipped", "pending_generator", "pending_interactor", "by_design_slow", "generator_error")
+            and verdict not in _non_fit_verdicts
+            and isinstance(raw_fit, str)
+            and bool(raw_fit.strip())
+            and r2_ok
+        )
+        if confident and isinstance(raw_fit, str):
+            norm_fit = normalize_complexity_expression(raw_fit)
+            if norm_fit in _COMPLEXITY_ORDER:
+                emp_fitted = norm_fit
+
+    def _order_gap(a: str, b: str) -> int:
+        if a in _COMPLEXITY_ORDER and b in _COMPLEXITY_ORDER:
+            return abs(_COMPLEXITY_ORDER.index(a) - _COMPLEXITY_ORDER.index(b))
+        return 0 if a == b else 1
+
+    if norm_claimed and norm_static and norm_claimed != norm_static:
+        conflicts.append(f"claimed ({norm_claimed}) != static_estimated ({norm_static})")
+    if norm_claimed and emp_fitted and norm_claimed != emp_fitted and _order_gap(norm_claimed, emp_fitted) >= 1:
+        conflicts.append(f"claimed ({norm_claimed}) != empirical_fitted ({emp_fitted})")
+    if norm_static and emp_fitted and norm_static != emp_fitted and _order_gap(norm_static, emp_fitted) >= 1:
+        conflicts.append(f"static_estimated ({norm_static}) != empirical_fitted ({emp_fitted})")
+
+    return bool(conflicts), conflicts
 
 
 def recommend_time_limit_ms(
@@ -657,12 +832,18 @@ def build_risk_notes(
     return notes
 
 
+def _is_small_const_dim(expr: str) -> bool:
+    s = expr.strip()
+    return s.isdigit() and int(s) <= 64
+
+
 def estimate_memory_usage(code: str) -> tuple[str, int]:
     cleaned = _strip_cpp_comments_and_strings(code)
+    type_kw = r"(?:(?:unsigned|signed|long|short)\s+)*(?:int|long|short|char|bool|double|float|ll|ull|int\d+_t|uint\d+_t|size_t)"
     array_patterns = [
-        r"(\w+)\s*\[(\d+)\]",
-        r"vector\s*<\s*[^>]+\s*>\s+(\w+)\s*\((\d+)\)",
-        r"array\s*<\s*[^,>]+,\s*(\d+)\s*>",
+        rf"\b{type_kw}\s+\w+\s*\[(\d+)\](?!\s*\[)",
+        r"\bvector\s*<\s*[^<>]+\s*>\s+\w+\s*\((\d+)(?:\s*,|\s*\))",
+        r"\barray\s*<\s*[^,>]+,\s*(\d+)\s*>",
     ]
 
     total_elements = 0
@@ -670,28 +851,35 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
         matches = re.findall(pattern, cleaned)
         for match in matches:
             try:
-                if isinstance(match, tuple):
-                    size = int(match[-1])
-                else:
-                    size = int(match)
-                total_elements += size
+                size = int(match[-1] if isinstance(match, tuple) else match)
+                if size > 1:
+                    total_elements += size
             except (ValueError, IndexError):
                 pass
+
+    # Detect genuine 2D allocations (declarations, NOT ordinary 2D element accesses like adj[u][i] or dp[i][0])
+    has_2d_dynamic = False
+    for m in re.finditer(
+        r"\bvector\s*<\s*vector\s*<[^>]+(?:<[^>]+>)?[^>]*>\s*>\s+\w+\s*\(([^,()]+),\s*vector\s*<[^>]+(?:<[^>]+>)?[^>]*>\s*\(([^,()]+)",
+        cleaned,
+    ):
+        d1, d2 = m.group(1).strip(), m.group(2).strip()
+        if not (_is_small_const_dim(d1) or _is_small_const_dim(d2)):
+            has_2d_dynamic = True
+            break
+    for m in re.finditer(
+        rf"\b{type_kw}\s+\w+\s*\[([^\]]+)\]\s*\[([^\]]+)\]",
+        cleaned,
+    ):
+        d1, d2 = m.group(1).strip(), m.group(2).strip()
+        if d1.isdigit() and d2.isdigit():
+            total_elements += int(d1) * int(d2)
+        if not (_is_small_const_dim(d1) or _is_small_const_dim(d2)):
+            has_2d_dynamic = True
 
     memory_bytes = total_elements * 4
     memory_mb = max(1, memory_bytes // (1024 * 1024))
 
-    # 识别动态尺寸二维容器（如 vector<vector<int>> dp(n, vector<int>(m)) 或符号二维数组 dp[N][M]）
-    has_2d_dynamic = bool(
-        re.search(
-            r"vector\s*<\s*vector\s*<[^>]+>\s*>\s+\w+\s*\([^,)]+,\s*vector\s*<",
-            cleaned,
-        )
-        or re.search(
-            r"\[\s*[a-zA-Z_]\w*(?:\s*[+\-]\s*\d+)?\s*\]\s*\[\s*[a-zA-Z_]\w*(?:\s*[+\-]\s*\d+)?\s*\]",
-            cleaned,
-        )
-    )
     if has_2d_dynamic:
         return "O(n^2)", max(memory_mb, 128) if total_elements == 0 else memory_mb
 
@@ -707,7 +895,7 @@ def estimate_memory_usage(code: str) -> tuple[str, int]:
             r"|\b(?:unordered_)?(?:set|multiset|map|multimap)\s*<"
             r"|\b(?:deque|queue|priority_queue|stack|list)\s*<"
             r"|\bnew\s+\w+(?:\s*<[^>]*>)?\s*\["
-            r"|(?:int|long\s+long|double|char|bool|unsigned)\s+\w+\s*\[[^0-9\]\n]+\]",
+            rf"|\b{type_kw}\s+\w+\s*\[[^0-9\]\n]+\]",
             cleaned,
         )
         or (
@@ -1130,7 +1318,8 @@ class SolutionAnalyzeTool(Tool):
         assert resolved is not None
         code = resolved.code
 
-        final_complexity, patterns = estimate_static_complexity(code)
+        static_complexity, patterns = estimate_static_complexity(code)
+        final_complexity = static_complexity
 
         manifest_claimed: str | None = None
         m_loaded = None
@@ -1178,7 +1367,6 @@ class SolutionAnalyzeTool(Tool):
         effective_constraints = dict(constraints) if isinstance(constraints, dict) else None
         if effective_constraints is not None and constraint_n_max is not None and "n_max" not in effective_constraints:
             effective_constraints["n_max"] = constraint_n_max
-        risk_notes = build_risk_notes(final_complexity, effective_constraints, warnings)
         suggested_test_configs = self._generate_test_configs(recommended_n_max, constraints)
         stress_profiles = self._recommended_stress_profiles(
             final_complexity=final_complexity,
@@ -1195,9 +1383,21 @@ class SolutionAnalyzeTool(Tool):
                 constraints,
             )
 
+        has_conflict, conflict_details = detect_complexity_conflicts(
+            claimed=claimed_complexity or detected_claimed,
+            static_estimated=static_complexity,
+            empirical=empirical_verification,
+        )
+        if has_conflict:
+            warnings.append(f"Complexity estimate conflict: {'; '.join(conflict_details)}")
+        risk_notes = build_risk_notes(final_complexity, effective_constraints, warnings)
+
         return ToolResult.ok(
             claimed_complexity=claimed_complexity or detected_claimed,
             estimated_complexity=final_complexity,
+            static_estimated_complexity=static_complexity,
+            complexity_conflict=has_conflict,
+            conflict_details=conflict_details,
             worst_case_complexity=final_complexity,
             average_case_complexity=final_complexity,
             time_complexity=final_complexity,

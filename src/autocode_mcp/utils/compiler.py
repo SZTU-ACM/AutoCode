@@ -27,13 +27,20 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
 from .platform import get_exe_extension
-from .process import is_pid_alive, terminate_pid_tree
+from .process import disable_posix_core_dumps, is_pid_alive, terminate_pid_tree
 
 _psutil: Any
 try:
     import psutil as _psutil
 except ImportError:  # pragma: no cover
     _psutil = None
+
+_resource: Any = None
+if os.name != "nt":
+    try:
+        import resource as _resource
+    except ImportError:  # pragma: no cover
+        _resource = None
 
 if TYPE_CHECKING:
     from .win_job import WinJobObject
@@ -184,7 +191,7 @@ def probe_sanitizer_support(
     if use_cache and cache_key in _SANITIZER_PROBE_CACHE:
         return _clone_sanitizer_info(_SANITIZER_PROBE_CACHE[cache_key])
 
-    base_asan_opts = "detect_leaks=0:abort_on_error=1:halt_on_error=1"
+    base_asan_opts = "detect_leaks=0:abort_on_error=1:halt_on_error=1:disable_coredump=1"
     base_ubsan_opts = "print_stacktrace=1:halt_on_error=1"
 
     candidates: list[tuple[str, list[str], dict[str, str], bool, bool]]
@@ -302,6 +309,9 @@ def probe_sanitizer_support(
 
             run_env = dict(os.environ)
             run_env.update(env_overrides)
+            probe_run_kwargs: dict[str, Any] = {}
+            if sys.platform != "win32":
+                probe_run_kwargs["preexec_fn"] = disable_posix_core_dumps
             try:
                 ok_run = subprocess.run(
                     [bin_path, "ok"],
@@ -312,6 +322,7 @@ def probe_sanitizer_support(
                     env=run_env,
                     timeout=5.0,
                     check=False,
+                    **probe_run_kwargs,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 attempts.append({"profile": prof_name, "stage": "ok_run", "error": str(exc)})
@@ -339,6 +350,7 @@ def probe_sanitizer_support(
                         env=run_env,
                         timeout=5.0,
                         check=False,
+                        **probe_run_kwargs,
                     )
                     asan_err = (asan_run.stderr or "") + (asan_run.stdout or "")
                     asan_verified = (
@@ -364,6 +376,7 @@ def probe_sanitizer_support(
                         env=run_env,
                         timeout=5.0,
                         check=False,
+                        **probe_run_kwargs,
                     )
                     ub_err = (ub_run.stderr or "") + (ub_run.stdout or "")
                     ubsan_verified = ub_run.returncode != 0 and (
@@ -938,35 +951,37 @@ async def compile_cpp(
 
 def _clamp_rlimit_bytes(memory_bytes: int, limit_attr: str) -> int:
     """将请求的内存上限钳制到当前进程的 POSIX hard limit 以内，避免 EPERM/ValueError。"""
-    import resource
+    if _resource is None:
+        return memory_bytes
 
-    limit_const = getattr(resource, limit_attr, None)
+    limit_const = getattr(_resource, limit_attr, None)
     if limit_const is None:
         return memory_bytes
     try:
-        _, cur_hard = cast(Any, resource).getrlimit(limit_const)
+        _, cur_hard = cast(Any, _resource).getrlimit(limit_const)
     except (ValueError, OSError):
         return memory_bytes
-    rlim_inf = getattr(resource, "RLIM_INFINITY", -1)
+    rlim_inf = getattr(_resource, "RLIM_INFINITY", -1)
     if cur_hard != rlim_inf and cur_hard >= 0:
         return min(memory_bytes, int(cur_hard))
     return memory_bytes
 
 
 def _set_posix_resource_limit(memory_mb: int | float) -> None:
-    """POSIX 上设置进程资源限制（通过 preexec_fn 调用）。"""
-    import resource
-
+    """POSIX 上设置进程资源限制（通过 preexec_fn 调用，并强制禁用 core dump）。"""
+    disable_posix_core_dumps()
+    if _resource is None:
+        return
     requested_bytes = max(1, int(round(float(memory_mb) * 1024 * 1024)))
     for limit_attr in ("RLIMIT_AS", "RLIMIT_DATA"):
-        limit_const = getattr(resource, limit_attr, None)
+        limit_const = getattr(_resource, limit_attr, None)
         if limit_const is None:
             continue
         clamped = _clamp_rlimit_bytes(requested_bytes, limit_attr)
         try:
-            cast(Any, resource).setrlimit(limit_const, (clamped, clamped))
-        except (ValueError, OSError) as e:
-            _logger.debug("Failed to set %s on POSIX: %s", limit_attr, e)
+            cast(Any, _resource).setrlimit(limit_const, (clamped, clamped))
+        except (ValueError, OSError):
+            pass
 
 
 def _set_macos_resource_limit(memory_mb: int | float) -> None:
@@ -1029,6 +1044,7 @@ async def _run_process(
     *,
     env: dict[str, str] | None = None,
     disable_as_limit: bool = False,
+    cwd: str | None = None,
 ) -> RunResult:
     """运行进程的公共逻辑。"""
     import tempfile
@@ -1058,6 +1074,7 @@ async def _run_process(
                 stdout=out_f,
                 stderr=err_f,
                 env=proc_env,
+                cwd=cwd,
             )
             if process.pid:
                 try:
@@ -1087,31 +1104,51 @@ async def _run_process(
                         e,
                     )
         elif sys.platform == "darwin":
-            # macOS: 使用 preexec_fn 设置资源限制；sanitizer 模式下跳过 RLIMIT_AS 避免虚拟影射内存报错
+            # macOS: 使用 preexec_fn 设置资源限制；sanitizer 模式下跳过 RLIMIT_AS 但仍禁用 core dump
             darwin_kwargs: dict[str, Any] = {
                 "stdin": asyncio.subprocess.PIPE,
                 "stdout": out_f,
                 "stderr": err_f,
                 "start_new_session": True,
                 "env": proc_env,
+                "cwd": cwd,
+                "preexec_fn": (
+                    disable_posix_core_dumps
+                    if disable_as_limit
+                    else (lambda: _set_posix_resource_limit(safe_memory_mb))
+                ),
             }
-            if not disable_as_limit:
-                darwin_kwargs["preexec_fn"] = lambda: _set_posix_resource_limit(safe_memory_mb)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 **darwin_kwargs,
             )
         else:
-            # Linux: 优先使用 prlimit（钳制到 hard limit）；sanitizer 模式（disable_as_limit=True）跳过 RLIMIT_AS
+            # Linux: 优先使用 prlimit（含 --core=0，避免 preexec_fn）；无 prlimit 时回退 preexec_fn
             if disable_as_limit:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=out_f,
-                    stderr=err_f,
-                    start_new_session=True,
-                    env=proc_env,
-                )
+                prlimit_path = shutil.which("prlimit")
+                if prlimit_path:
+                    process = await asyncio.create_subprocess_exec(
+                        prlimit_path,
+                        "--core=0",
+                        *cmd,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=out_f,
+                        stderr=err_f,
+                        start_new_session=True,
+                        env=proc_env,
+                        cwd=cwd,
+                    )
+                else:
+                    process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=out_f,
+                        stderr=err_f,
+                        start_new_session=True,
+                        env=proc_env,
+                        cwd=cwd,
+                        preexec_fn=disable_posix_core_dumps,
+                    )
             else:
                 memory_bytes = safe_memory_mb * 1024 * 1024
                 prlimit_path = shutil.which("prlimit")
@@ -1122,12 +1159,14 @@ async def _run_process(
                         prlimit_path,
                         f"--as={as_bytes}",
                         f"--data={data_bytes}",
+                        "--core=0",
                         *cmd,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=out_f,
                         stderr=err_f,
                         start_new_session=True,
                         env=proc_env,
+                        cwd=cwd,
                     )
                 else:
                     exec_kwargs: dict[str, Any] = {
@@ -1136,6 +1175,7 @@ async def _run_process(
                         "stderr": err_f,
                         "start_new_session": True,
                         "env": proc_env,
+                        "cwd": cwd,
                     }
                     if os.name != "nt":
                         exec_kwargs["preexec_fn"] = lambda: _set_posix_resource_limit(safe_memory_mb)
@@ -1299,6 +1339,7 @@ async def run_binary(
     *,
     env: dict[str, str] | None = None,
     disable_as_limit: bool = False,
+    cwd: str | None = None,
 ) -> RunResult:
     """运行二进制文件，带超时和内存限制。"""
     if not os.path.exists(binary_path):
@@ -1316,6 +1357,7 @@ async def run_binary(
         process_start_hook,
         env=env,
         disable_as_limit=disable_as_limit,
+        cwd=cwd,
     )
 
 

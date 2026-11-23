@@ -25,7 +25,7 @@ import psutil
 
 from .checker_judge import run_testlib_checker, verdict_from_testlib_rc
 from .execution_monitor import DynamicExecutionMonitor
-from .process import terminate_pid_tree
+from .process import disable_posix_core_dumps, terminate_pid_tree
 
 __all__ = [
     "CheckerRunner",
@@ -403,6 +403,7 @@ class InteractiveRunner:
             popen_kwargs: dict[str, Any] = {}
             if sys.platform != "win32":
                 popen_kwargs["start_new_session"] = True
+                popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
             wall_start = time.perf_counter()
             try:
