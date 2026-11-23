@@ -57,9 +57,9 @@ uv run autocode-verify <problem_dir> --reconcile
 uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
 uv run autocode-audit /path/to/external-problem --standalone --layout auto --mutation-check
 
-# 构建并检查分发包
+# 构建并校验分发包（wheel METADATA + 隔离安装烟测；不发布 PyPI）
 uv build
-uv run twine check dist/*
+uv run pytest tests/test_e2e_mcp.py -m packaging -q
 ```
 
 ## 项目结构
