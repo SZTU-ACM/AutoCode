@@ -129,6 +129,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "AutoCode ${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag
