@@ -359,7 +359,39 @@ async def test_genuine_rss_overflow_still_flags_mle(tmp_path: Path):
         res = await run_binary(str(exe), "", timeout=10, memory_mb=8)
         assert not res.success, f"run {run_idx} unexpectedly succeeded: {res}"
         assert res.memory_limit_exceeded is True, f"run {run_idx} missed MLE: {res}"
-        assert res.memory_mb is not None and res.memory_mb > 8.0, f"run {run_idx}: {res}"
+        if sys.platform == "darwin":
+            # Linux prlimit and Windows WinJobObject reject the 48MB allocation at mmap/commit time
+            # before RSS rises above 8MB; macOS enforces via physical RSS measurement.
+            assert res.memory_mb is not None and res.memory_mb > 8.0, f"run {run_idx}: {res}"
+
+
+@pytest.mark.asyncio
+async def test_posix_wait4_captures_short_lived_peak_rss_mb(tmp_path: Path):
+    """POSIX os.wait4 ru_maxrss captures accurate peak RSS even for <10ms -O2 binaries."""
+    if os.name == "nt":
+        pytest.skip("POSIX os.wait4 ru_maxrss test")
+
+    src = tmp_path / "alloc24.cpp"
+    exe = tmp_path / "alloc24"
+    src.write_text(
+        "#include <iostream>\n#include <vector>\n"
+        "int main() {\n"
+        "    std::vector<char> buf(24 * 1024 * 1024, 1);\n"
+        "    volatile char sum = 0;\n"
+        "    for (size_t i = 0; i < buf.size(); i += 4096) sum += buf[i];\n"
+        "    std::cout << (int)sum << '\\n';\n"
+        "    return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    comp = await compile_cpp(str(src), str(exe), opt_level="O2", use_cache=False)
+    assert comp.success, comp.stderr
+
+    for run_idx in range(5):
+        res = await run_binary(str(exe), "", timeout=10, memory_mb=256)
+        assert res.success, f"run {run_idx} failed: {res}"
+        assert res.memory_limit_exceeded is False
+        assert res.memory_mb is not None and res.memory_mb >= 16.0, f"run {run_idx}: {res}"
 
 
 def test_mle_classifier_distinguishes_external_sigkill_from_oom_evidence():
