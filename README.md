@@ -158,6 +158,9 @@ autocode-audit /path/to/problem_dir \
 
 若要在命题仓库的 Pull Request 中自动执行审题门禁，可直接复制 [examples/ci/autocode-problem-audit.yml](examples/ci/autocode-problem-audit.yml) 到 `.github/workflows/autocode-audit.yml`：每次 PR 自动只读审题并将 Markdown 报告写入 GitHub Step Summary（`0=go` 放行，`2=no_go` 拦阻）。
 
+> [!WARNING]
+> **PR CI 安全边界**：`autocode-audit` 会编译并执行题包中的 C++ 源码（属于不可信 PR 代码执行面）。请**仅**在一次性的（ephemeral）GitHub-hosted runner（如 `ubuntu-latest`）上运行不受信任的 PR 审题，**切勿**在带有持久状态或特权权限的 `self-hosted` runner 上运行，**切勿**向审题 Job 注入敏感 Secrets，且**切勿**将触发器从 `pull_request` 改为 `pull_request_target`。
+
 对 AutoCode 工作区快速检查目录结构、编译产物与工作流门禁状态：
 
 ```bash
@@ -193,7 +196,7 @@ validator_build / checker_build
 
 交互题不是简单地“没有标准输入输出”。`statements/README.md` 必须把协议写成可执行契约：谁先输出、隐藏参数范围、每种查询和最终答案的格式、judge 响应含义、查询次数上限、每次输出后的 flush、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞时的判定。样例应写成交互 transcript，明确哪些行来自 judge、哪些行来自选手。
 
-`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `tout` 向选手输出并在每次响应后 `tout.flush()`，用 `ouf` 读取选手输出，所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。不要用 `std::cout` 向选手发送交互数据。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的判定。
+`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `std::cout` 向选手管道发送交互数据并在每次响应后执行 `std::cout.flush()`（或 `std::flush` / `std::endl`），用 `ouf` 读取选手输出，用 `tout`（`argv[2]`）写入可选的诊断日志（不会发送给选手），所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的判定。
 
 通信题支持：
 

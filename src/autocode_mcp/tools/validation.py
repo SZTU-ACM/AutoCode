@@ -191,6 +191,11 @@ class ProblemValidateTool(Tool):
         checker_for_samples = manifest_uses_testlib_checker(manifest_model) and os.path.isfile(
             checker_bin
         )
+        mem_mb: int | float = (
+            manifest_model.memory_limit_mb
+            if (manifest_model is not None and manifest_model.memory_limit_mb > 0)
+            else 256
+        )
 
         results = {}
         all_passed = True
@@ -214,6 +219,7 @@ class ProblemValidateTool(Tool):
                     timeout,
                     problem_dir=problem_dir,
                     checker_exe=checker_bin if checker_for_samples else None,
+                    memory_mb=mem_mb,
                 )
                 results["statement_samples"] = result
                 if not result.get("passed", 0) == result.get("total", 0):
@@ -242,6 +248,7 @@ class ProblemValidateTool(Tool):
                     timeout,
                     problem_dir=problem_dir,
                     checker_exe=checker_bin if checker_for_samples else None,
+                    memory_mb=mem_mb,
                 )
                 results["sample_files"] = result
                 if not result.get("passed", 0) == result.get("total", 0):
@@ -772,6 +779,7 @@ class ProblemValidateTool(Tool):
         *,
         problem_dir: str | None = None,
         checker_exe: str | None = None,
+        memory_mb: int | float = 256,
     ) -> dict:
         """验证题面样例。SPJ 且提供 checker 时用 checker(input, sol_out, expected)。"""
         details = []
@@ -785,7 +793,7 @@ class ProblemValidateTool(Tool):
             expected = sample.get("expected_output", "")
 
             # 运行 sol
-            result = await run_binary(sol_exe, input_data, timeout=timeout)
+            result = await run_binary(sol_exe, input_data, timeout=timeout, memory_mb=memory_mb)
             if not result.success:
                 in_p, in_tr, _ = _truncate_preview(input_data)
                 ex_p, ex_tr, _ = _truncate_preview(expected)
@@ -894,6 +902,7 @@ class ProblemValidateTool(Tool):
         *,
         problem_dir: str | None = None,
         checker_exe: str | None = None,
+        memory_mb: int | float = 256,
     ) -> dict:
         """验证样例文件。"""
         # 找到所有 .in 文件（排除子目录）
@@ -931,7 +940,7 @@ class ProblemValidateTool(Tool):
                 input_data = f.read()
 
             # 运行 sol
-            result = await run_binary(sol_exe, input_data, timeout=timeout)
+            result = await run_binary(sol_exe, input_data, timeout=timeout, memory_mb=memory_mb)
             if not result.success:
                 err_p, err_tr, _ = _truncate_preview(result.error or "Execution failed")
                 row_full = {

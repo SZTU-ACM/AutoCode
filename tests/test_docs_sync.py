@@ -88,3 +88,50 @@ def test_rules_agents_md_synced_with_latest_gates():
         "autocode-verify",
     ):
         assert token in agents_md, f"Missing {token!r} in rules/AGENTS.md"
+
+
+def test_readme_interactor_uses_stdout_not_tout():
+    """README.md must instruct interactors to prompt contestants via std::cout, never tout."""
+    readme_md = _read("README.md")
+
+    assert "不要用 `std::cout`" not in readme_md
+    assert "用 `tout` 向选手输出" not in readme_md
+    assert "tout.flush()" not in readme_md
+
+    assert "registerInteraction(argc, argv)" in readme_md
+    assert "std::cout" in readme_md
+    assert "std::cout.flush()" in readme_md
+    assert "`inf`" in readme_md
+    assert "`ouf`" in readme_md
+    assert "`tout`" in readme_md
+    assert "`argv[2]`" in readme_md
+
+
+def test_pr_ci_security_boundary_warnings_present():
+    """PR CI example, README.md, and TROUBLESHOOTING.md must warn on untrusted PR CI boundaries."""
+    import yaml
+
+    ci_text = _read("examples/ci/autocode-problem-audit.yml")
+    ci_yaml = yaml.safe_load(ci_text)
+    assert isinstance(ci_yaml, dict)
+    on_block = ci_yaml.get("on") or ci_yaml.get(True)
+    assert isinstance(on_block, dict)
+    assert "pull_request" in on_block
+    assert "pull_request_target" not in on_block
+    assert ci_yaml["jobs"]["audit"]["runs-on"] == "ubuntu-latest"
+    assert ci_yaml["permissions"] == {"contents": "read"}
+
+    readme_md = _read("README.md")
+    troubleshooting_md = _read("TROUBLESHOOTING.md")
+
+    for doc_name, content in (
+        ("examples/ci/autocode-problem-audit.yml", ci_text),
+        ("README.md", readme_md),
+        ("TROUBLESHOOTING.md", troubleshooting_md),
+    ):
+        assert "self-hosted" in content, f"Missing self-hosted runner warning in {doc_name}"
+        assert "pull_request_target" in content, (
+            f"Missing pull_request_target warning in {doc_name}"
+        )
+        assert "secrets" in content.lower(), f"Missing secrets warning in {doc_name}"
+        assert "ubuntu-latest" in content, f"Missing ephemeral ubuntu-latest guidance in {doc_name}"

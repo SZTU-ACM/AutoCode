@@ -1,13 +1,18 @@
+# SECURITY BOUNDARY (untrusted PR C++ compilation & execution):
+# - Run untrusted PR audits ONLY on ephemeral GitHub-hosted runners (e.g. ubuntu-latest).
+# - NEVER run on privileged or persistent self-hosted runners.
+# - NEVER inject sensitive secrets or elevated GITHUB_TOKEN permissions.
+# - NEVER switch `pull_request` to `pull_request_target` (which runs PR code with base secrets/write context).
 name: AutoCode Problem CI Audit
 
 on:
   push:
     branches: [main, master]
-  pull_request:
+  pull_request:  # SECURITY: NEVER switch to pull_request_target for untrusted PRs.
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: read  # SECURITY: keep least-privilege read-only token; NEVER inject secrets.
 
 env:
   AUTOCODE_REF: v3.3.0
@@ -16,7 +21,7 @@ env:
 jobs:
   audit:
     name: Standalone Problem Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # SECURITY: ephemeral GitHub-hosted runners ONLY; NEVER self-hosted.
     steps:
       - uses: actions/checkout@v4
 

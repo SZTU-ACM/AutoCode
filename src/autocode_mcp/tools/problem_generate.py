@@ -525,7 +525,21 @@ class ProblemGenerateTestsTool(Tool, _ProblemGenerateHelpersMixin):
                             )
                         ans_text = comm_run.judge_stdout or comm_run.stdout or ""
                     elif os.path.isfile(sol_exe):
-                        sol_run = await _facade_attr('run_binary', run_binary)(sol_exe, str(item["input_data"]), timeout=timeout)
+                        hack_mem_mb = (
+                            float(manifest_model.memory_limit_mb)
+                            if (
+                                manifest_model is not None
+                                and manifest_model.memory_limit_mb
+                                and manifest_model.memory_limit_mb > 0
+                            )
+                            else 256.0
+                        )
+                        sol_run = await _facade_attr('run_binary', run_binary)(
+                            sol_exe,
+                            str(item["input_data"]),
+                            timeout=timeout,
+                            memory_mb=hack_mem_mb,
+                        )
                         if not sol_run.success:
                             return ToolResult.fail(
                                 f"Solution failed on preserved hack test ({item.get('purpose', idx)}): "
@@ -701,13 +715,22 @@ class ProblemGenerateTestsTool(Tool, _ProblemGenerateHelpersMixin):
             if val_result.return_code != 0:
                 return _CandidateOutcome(fallback_used=fallback_used)
 
+        mem_mb = (
+            float(manifest_model.memory_limit_mb)
+            if (
+                manifest_model is not None
+                and manifest_model.memory_limit_mb
+                and manifest_model.memory_limit_mb > 0
+            )
+            else 256.0
+        )
+
         if is_communication and manifest_model is not None and problem_dir is not None:
             tl_ms = (
                 min(float(timeout) * 1000.0, max(float(manifest_model.time_limit_ms) * 1.5, 1000.0))
                 if manifest_model.time_limit_ms
                 else float(timeout) * 1000.0
             )
-            mem_mb = float(manifest_model.memory_limit_mb) if manifest_model.memory_limit_mb else 256.0
             jres = await CommunicationRunner.run_from_manifest(
                 problem_dir=problem_dir,
                 manifest=manifest_model,
@@ -732,11 +755,6 @@ class ProblemGenerateTestsTool(Tool, _ProblemGenerateHelpersMixin):
                 if (manifest_model and manifest_model.time_limit_ms)
                 else float(timeout) * 1000.0
             )
-            mem_mb = (
-                float(manifest_model.memory_limit_mb)
-                if (manifest_model and manifest_model.memory_limit_mb)
-                else 256.0
-            )
             jres = await InteractiveRunner.run(
                 interactor_exe=interactor_exe,
                 solution_exe=sol_exe,
@@ -756,7 +774,9 @@ class ProblemGenerateTestsTool(Tool, _ProblemGenerateHelpersMixin):
                 )
             output_data = jres.judge_stdout if jres.judge_stdout.strip() else ""
         else:
-            sol_result = await _facade_attr('run_binary', run_binary)(sol_exe, input_data, timeout=timeout)
+            sol_result = await _facade_attr('run_binary', run_binary)(
+                sol_exe, input_data, timeout=timeout, memory_mb=mem_mb
+            )
             if not sol_result.success:
                 return _CandidateOutcome(
                     error=(seed, f"sol failed: {sol_result.stderr or sol_result.error or f'return_code={sol_result.return_code}'}"),
