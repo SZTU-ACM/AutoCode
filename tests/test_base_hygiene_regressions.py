@@ -338,7 +338,7 @@ async def test_external_sigkill_with_low_rss_not_misclassified_as_mle(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_genuine_rss_overflow_still_flags_mle(tmp_path: Path):
-    """Genuine RSS overflow above memory_mb must still fail with memory_limit_exceeded=True."""
+    """Genuine RSS overflow (including short-lived warmed -O2 binaries) must reliably flag MLE."""
     src = tmp_path / "hog.cpp"
     exe = tmp_path / ("hog.exe" if sys.platform == "win32" else "hog")
     src.write_text(
@@ -352,12 +352,14 @@ async def test_genuine_rss_overflow_still_flags_mle(tmp_path: Path):
         "}\n",
         encoding="utf-8",
     )
-    comp = await compile_cpp(str(src), str(exe), use_cache=False)
+    comp = await compile_cpp(str(src), str(exe), opt_level="O2", use_cache=False)
     assert comp.success, comp.stderr
 
-    res = await run_binary(str(exe), "", timeout=10, memory_mb=8)
-    assert not res.success
-    assert res.memory_limit_exceeded is True
+    for run_idx in range(10):
+        res = await run_binary(str(exe), "", timeout=10, memory_mb=8)
+        assert not res.success, f"run {run_idx} unexpectedly succeeded: {res}"
+        assert res.memory_limit_exceeded is True, f"run {run_idx} missed MLE: {res}"
+        assert res.memory_mb is not None and res.memory_mb > 8.0, f"run {run_idx}: {res}"
 
 
 def test_mle_classifier_distinguishes_external_sigkill_from_oom_evidence():

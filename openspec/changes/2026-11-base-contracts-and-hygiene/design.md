@@ -34,13 +34,13 @@ CompileCache(cache_dir=None)
   - When `manifest is None` (missing `.autocode/manifest.json`), returns empty `ProblemConfig()` so `get_resource_limit` gracefully applies defaults (`2s / 256MB` for non-brute, `60s / available MB` for `brute`). Note: corrupt/non-UTF8 manifests still fail fast via `load_manifest` (`ValueError`) rather than silently bypassing validation.
   - `time_limit_ms` converts cleanly to seconds (`int` when divisible by 1000, `float` otherwise), and `memory_limit_mb` populates `ProblemConfig.memory_limit`. Non-`"brute"` roles (`"sol"`, `"reference"`, `"wrong"`) inherit manifest limits unless overridden by explicit parameters.
 - **Tool `memory_mb` passthrough**:
-  - `stress_test.py` (`_run_round` for both `sol_result` and `brute_result`), `problem_generate.py` (`_generate_single_candidate` and preserved hack test runner), and `validation.py` (`_validate_statement_samples` and `_validate_sample_files`) pass `memory_mb=manifest.memory_limit_mb` (defaulting to `256` when manifest is absent).
+  - `stress_test.py` (`_run_round` for both `sol_result` and `brute_result`), `problem_generate.py` (`_process_candidate` and preserved hack test runner), and `validation.py` (`_validate_statement_samples` and `_validate_sample_files`) pass `memory_mb=manifest.memory_limit_mb` (defaulting to `256` when manifest is absent).
 - **`compiler.py` MLE vs external `SIGKILL` attribution**:
-  - `_sample_rss` takes an immediate initial RSS sample before sleeping (5ms polling interval) and, when `not disable_as_limit` and `rss > float(memory_mb)`, latches `rss_limit_exceeded = True` and terminates the child tree so macOS (where `RLIMIT_AS == RLIMIT_RSS` does not enforce memory) and Linux both enforce physical RSS caps.
+  - On POSIX, `_PosixWait4Process` reaps child processes via threaded `os.wait4(pid, 0)` to capture exact kernel-reported `rusage.ru_maxrss` (bytes on macOS, KiB on Linux), eliminating polling blind spots on sub-10ms binaries (while delegating to `asyncio.create_subprocess_exec` whenever tests monkeypatch it). Concurrently, `_sample_rss` polls every 5ms and, when `not disable_as_limit` and `rss > float(memory_mb)`, latches `rss_limit_exceeded = True` and terminates the child tree early so both macOS and Linux enforce physical RSS caps.
   - `_classify_memory_limit_exceeded(...)` determines `memory_limit_exceeded` using explicit evidence:
     1. `rss_limit_exceeded` is True, or (`not disable_as_limit` and observed `peak_rss_mb > float(memory_mb)`).
     2. Windows `STATUS_NO_MEMORY` exit codes (`3221225495`, `-1073741801`).
-    3. Explicit OOM diagnostics in `stderr` (`bad_alloc`, `out of memory`, `cannot allocate memory`).
+    3. Explicit OOM diagnostics in `stderr` (`bad_alloc`, `out of memory`, `cannot allocate memory`, `failed to map segment`).
     4. POSIX `SIGKILL` (`-9`, `137`, `-signal.SIGKILL`) ONLY when `not disable_as_limit` and `peak_rss_mb is not None` and `peak_rss_mb >= float(memory_mb) * 0.85`.
   - **Tradeoff**: Requiring `peak_rss_mb >= 0.85 * memory_mb` (or explicit OOM stderr) for `SIGKILL` prevents external `kill -9`, container kills, or macOS Gatekeeper kills on low-RSS processes from being falsely blamed on MLE, while the `0.85` threshold accommodates small sampling intervals right before a kernel OOM kill.
 
