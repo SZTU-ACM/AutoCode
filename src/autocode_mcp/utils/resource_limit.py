@@ -5,18 +5,19 @@ from pathlib import Path
 from typing import Literal
 
 import psutil
-import yaml
+
+from ..workflow.manifest import load_manifest
 
 
 @dataclass
 class ResourceLimit:
-    timeout_sec: int = 30
+    timeout_sec: int | float = 30
     memory_mb: int = 256
 
 
 @dataclass
 class ProblemConfig:
-    time_limit: int | None = None
+    time_limit: int | float | None = None
     memory_limit: int | None = None
 
 
@@ -25,33 +26,40 @@ def get_available_memory_mb() -> int:
 
 
 def load_problem_config(problem_dir: Path) -> ProblemConfig:
-    config_path = problem_dir / "problem.yaml"
-    if not config_path.exists():
+    """Load time/memory limits from `.autocode/manifest.json` if present."""
+    manifest = load_manifest(str(problem_dir))
+    if manifest is None:
         return ProblemConfig()
 
-    with config_path.open(encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    time_limit: int | float | None = None
+    if manifest.time_limit_ms > 0:
+        if manifest.time_limit_ms % 1000 == 0:
+            time_limit = manifest.time_limit_ms // 1000
+        else:
+            time_limit = manifest.time_limit_ms / 1000.0
+
+    memory_limit: int | None = None
+    if manifest.memory_limit_mb > 0:
+        memory_limit = manifest.memory_limit_mb
 
     return ProblemConfig(
-        time_limit=data.get("time_limit"),
-        memory_limit=data.get("memory_limit"),
+        time_limit=time_limit,
+        memory_limit=memory_limit,
     )
 
 
 def get_resource_limit(
     problem_dir: str,
     solution_type: Literal["sol", "brute", "wrong", "reference"],
-    timeout: int | None = None,
+    timeout: int | float | None = None,
     memory_mb: int | None = None,
 ) -> ResourceLimit:
     if solution_type == "brute":
-        default_timeout = 60
+        default_timeout: int | float = 60
         default_memory = get_available_memory_mb()
     else:
         default_timeout = 2
         default_memory = 256
-
-    if solution_type == "sol":
         config = load_problem_config(Path(problem_dir))
         if config.time_limit is not None:
             default_timeout = config.time_limit

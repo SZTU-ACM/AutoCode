@@ -1055,6 +1055,43 @@ async def _force_terminate_process(
             _logger.debug("Second kill attempt failed: %s", e)
 
 
+def _classify_memory_limit_exceeded(
+    *,
+    return_code: int,
+    stderr_text: str,
+    memory_limit_mb: int | float,
+    peak_rss_mb: float | None,
+    rss_limit_exceeded: bool,
+    disable_as_limit: bool,
+) -> bool:
+    """判定进程失败是否为真实的内存超限（MLE）。
+
+    避免将低 RSS 下由外部 kill -9 / 容器拦截触发的 SIGKILL (-9 / 137) 误归因成 MLE。
+    """
+    if rss_limit_exceeded:
+        return True
+    limit_mb = max(1.0, float(memory_limit_mb))
+    if not disable_as_limit and peak_rss_mb is not None and peak_rss_mb > limit_mb:
+        return True
+    # Windows STATUS_NO_MEMORY (0xC0000017)
+    if return_code in (3221225495, -1073741801):
+        return True
+    lowered_err = stderr_text.lower()
+    if (
+        "bad_alloc" in stderr_text
+        or "out of memory" in lowered_err
+        or "cannot allocate memory" in lowered_err
+        or "failed to map segment" in lowered_err
+    ):
+        return True
+    sigkill_rc = return_code in (-9, 137) or (
+        hasattr(signal, "SIGKILL") and return_code == -signal.SIGKILL
+    )
+    if sigkill_rc and not disable_as_limit and peak_rss_mb is not None:
+        return peak_rss_mb >= limit_mb * 0.85
+    return False
+
+
 async def _run_process(
     cmd: list[str],
     stdin: str = "",
@@ -1070,7 +1107,8 @@ async def _run_process(
     import tempfile
 
     start_time = time.perf_counter()
-    safe_memory_mb = max(1, int(round(float(memory_mb))))
+    effective_limit_mb = max(1.0, float(memory_mb))
+    safe_memory_mb = max(1, int(round(effective_limit_mb)))
     job = None
     process = None
     out_f = err_f = None
@@ -1211,10 +1249,11 @@ async def _run_process(
                 _logger.debug("process_start_hook failed: %s", e)
 
         peak_rss_mb: float | None = None
+        rss_limit_exceeded = False
         rss_task: asyncio.Task[None] | None = None
         if process and process.pid and _psutil is not None:
             async def _sample_rss(pid: int) -> None:
-                nonlocal peak_rss_mb
+                nonlocal peak_rss_mb, rss_limit_exceeded
                 assert _psutil is not None
                 try:
                     p_obj = _psutil.Process(pid)
@@ -1223,9 +1262,13 @@ async def _run_process(
                             rss = p_obj.memory_info().rss / (1024.0 * 1024.0)
                             if peak_rss_mb is None or rss > peak_rss_mb:
                                 peak_rss_mb = rss
+                            if not disable_as_limit and rss > effective_limit_mb:
+                                rss_limit_exceeded = True
+                                await _force_terminate_process(process, job)
+                                break
                         except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                             break
-                        await asyncio.sleep(0.01)
+                        await asyncio.sleep(0.005)
                 except Exception:
                     return
 
@@ -1305,15 +1348,16 @@ async def _run_process(
         ret = process.returncode if process.returncode is not None else -1
         out_str = stdout_data.decode("utf-8", errors="replace")
         err_str = stderr_data.decode("utf-8", errors="replace")
-        mle = False
-        if ret in (-9, 137, 3221225495, -1073741801) or (
-            hasattr(signal, "SIGKILL") and ret == -signal.SIGKILL
-        ):
-            mle = True
-        elif "bad_alloc" in err_str or "Out of memory" in err_str:
-            mle = True
+        mle = _classify_memory_limit_exceeded(
+            return_code=ret,
+            stderr_text=err_str,
+            memory_limit_mb=effective_limit_mb,
+            peak_rss_mb=peak_rss_mb,
+            rss_limit_exceeded=rss_limit_exceeded,
+            disable_as_limit=disable_as_limit,
+        )
         return RunResult(
-            success=ret == 0,
+            success=(ret == 0 and not mle),
             return_code=ret,
             stdout=out_str,
             stderr=err_str,

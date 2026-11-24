@@ -196,6 +196,20 @@ PermissionError: [Errno 13] Permission denied
 2. 验证 `input_schema` 参数是否正确
 3. 检查 `problem_dir` 路径是否存在且有写权限
 
+## CI 与安全边界
+
+### Pull Request 自动审题（`autocode-audit --standalone`）安全规范
+
+**风险说明：**
+`autocode-audit` 会实际编译并运行待测题包中的 C++ 代码（解法、生成器、校验器、交互器等）。如果工作流运行在不受信任的 Pull Request 上，这些源码属于不可信代码执行面。
+
+**强制安全边界：**
+
+1. **仅使用一次性（ephemeral）GitHub-hosted runner**：如 `runs-on: ubuntu-latest`，确保每次运行结束后环境销毁，无状态残留。
+2. **严禁使用特权或持久化 `self-hosted` runner**：切勿将不可信 PR 审题调度到内网、宿主机或带特权权限的自托管 runner，以防横向渗透或宿主机持久化污染。
+3. **严禁注入敏感 Secrets**：审题 Job 仅保留最小权限 `permissions: { contents: read }`，切勿向构建/审计步骤传入部署密钥、API Token 或发布凭据。
+4. **严禁将 `pull_request` 改为 `pull_request_target`**：`pull_request_target` 会在基础分支上下文中运行工作流并暴露仓库级 Secrets 与写权限，结合 C++ 编译执行会导致严重供应链安全漏洞。
+
 ## 获取帮助
 
 如果遇到未在本文档中列出的问题：

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 ProblemType = Literal["standard", "spj", "interactive", "communication"]
 OracleMode = Literal["brute", "interactor_only", "reference_solutions"]
 ProtocolMode = Literal["interactive_1v1", "run_twice", "multi_process", "grader_linked"]
+ExpectedVerdict = Literal["AC", "WA", "TLE", "MLE", "RE", "PE"]
+SandboxBackend = Literal["none", "bwrap", "nsjail", "isolate", "apple_container", "docker"]
 
 _COMMUNICATION_MODES = frozenset({"run_twice", "multi_process", "grader_linked"})
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
@@ -80,12 +83,36 @@ class CasePlanItem(BaseModel):
         return value.strip()
 
 
+class SandboxConfig(BaseModel):
+    """Optional sandbox isolation configuration for solution execution."""
+
+    backend: SandboxBackend = "none"
+    extra_args: list[str] = Field(default_factory=list)
+
+    @field_validator("extra_args", mode="before")
+    @classmethod
+    def validate_extra_args(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("sandbox.extra_args must be a list of strings")
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("sandbox.extra_args entries must be non-empty strings")
+            if any(ch in item for ch in ("\x00", "\n", "\r")):
+                raise ValueError("sandbox.extra_args contains invalid control characters")
+            cleaned.append(item)
+        return cleaned
+
+
 class SolutionEntry(BaseModel):
     name: str
     role: Literal["main", "brute", "reference", "wrong"]
     language: Literal["cpp", "python"] = "cpp"
     path: str
     expected: Literal["pass", "fail"] | None = None
+    expected_verdict: ExpectedVerdict | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -99,6 +126,24 @@ class SolutionEntry(BaseModel):
         if res is None:
             raise ValueError("solutions.path must be a non-empty relative path")
         return str(res)
+
+
+def validate_executable_solution_language(entry: SolutionEntry | str) -> Literal["cpp"]:
+    """Validate that a solution entry targets a currently executable runtime language.
+
+    Manifest deserialization permits ``language="python"`` for forward schema
+    compatibility, while current execution paths only support C++ until Wave 2
+    Python runner support is implemented.
+    """
+    lang = entry.language if isinstance(entry, SolutionEntry) else str(entry).strip().lower()
+    if lang == "cpp":
+        return "cpp"
+    if lang == "python":
+        raise ValueError(
+            "Solution execution for language='python' is not yet supported "
+            "(supported executable languages: 'cpp'); Python execution will be enabled in Wave 2 (T2E)."
+        )
+    raise ValueError(f"Unsupported executable solution language: {lang!r} (supported: 'cpp')")
 
 
 class ProtocolConfig(BaseModel):
@@ -326,11 +371,23 @@ class AuditGates(BaseModel):
     min_difficulty_confidence: float = Field(default=0.5, ge=0, le=1)
     enable_mutation_testing: bool = False
     mutation_budget: int = Field(default=6, ge=1, le=12)
+    fail_on_mutation_survival: bool = False
+    min_branch_coverage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
 
     @field_validator("mutation_budget", mode="before")
     @classmethod
     def reject_bool_mutation_budget(cls, value: Any) -> Any:
         return _reject_bool_value(value, "audit_gates.mutation_budget")
+
+    @field_validator("min_branch_coverage", mode="before")
+    @classmethod
+    def reject_bool_min_branch_coverage(cls, value: Any) -> Any:
+        return _reject_bool_value(value, "audit_gates.min_branch_coverage")
 
 
 class DifficultyProfile(BaseModel):
@@ -363,6 +420,10 @@ class AutoCodeManifest(BaseModel):
     )
     time_limit_ms: int = 2000
     memory_limit_mb: int = 256
+    multi_test: bool = False
+    scale_token_index: int | None = Field(default=None, ge=0)
+    sandbox: SandboxConfig | None = None
+    time_limit_multipliers: dict[str, float] | None = None
     compiler: str | None = Field(
         default=None,
         description="可选自定义 C++ 编译器路径或命令（如 g++-14 / /opt/homebrew/bin/g++-14）；缺省为 g++",
@@ -377,6 +438,36 @@ class AutoCodeManifest(BaseModel):
     quality_gates: QualityGates = Field(default_factory=QualityGates)
     audit_gates: AuditGates = Field(default_factory=AuditGates)
     difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
+
+    @field_validator("scale_token_index", mode="before")
+    @classmethod
+    def reject_bool_scale_token_index(cls, value: Any) -> Any:
+        return _reject_bool_value(value, "scale_token_index")
+
+    @field_validator("time_limit_multipliers", mode="before")
+    @classmethod
+    def validate_time_limit_multipliers(cls, value: Any) -> dict[str, float] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("time_limit_multipliers must be a mapping of language/key to positive float")
+        out: dict[str, float] = {}
+        for raw_key, raw_val in value.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise ValueError("time_limit_multipliers keys must be non-empty strings")
+            if any(ch in raw_key for ch in ("\x00", "\n", "\r")):
+                raise ValueError("time_limit_multipliers key contains invalid control characters")
+            if isinstance(raw_val, bool) or not isinstance(raw_val, int | float):
+                raise ValueError(
+                    f"time_limit_multipliers[{raw_key!r}] must be a positive number, got {raw_val!r}"
+                )
+            mult = float(raw_val)
+            if not math.isfinite(mult) or mult <= 0.0:
+                raise ValueError(
+                    f"time_limit_multipliers[{raw_key!r}] must be a finite positive number, got {raw_val!r}"
+                )
+            out[raw_key.strip()] = mult
+        return out
 
     @field_validator("compiler", mode="before")
     @classmethod

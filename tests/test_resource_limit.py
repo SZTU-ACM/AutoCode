@@ -1,8 +1,6 @@
 import tempfile
 from pathlib import Path
 
-import yaml
-
 from autocode_mcp.utils.resource_limit import (
     ProblemConfig,
     ResourceLimit,
@@ -10,6 +8,8 @@ from autocode_mcp.utils.resource_limit import (
     get_resource_limit,
     load_problem_config,
 )
+from autocode_mcp.workflow.manifest import save_manifest
+from autocode_mcp.workflow.models import AutoCodeManifest
 
 
 def test_resource_limit_defaults():
@@ -45,9 +45,14 @@ def test_problem_config_custom():
 def test_load_problem_config_exists():
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = Path(tmpdir)
-        config_path = problem_dir / "problem.yaml"
-        config_data = {"time_limit": 120, "memory_limit": 1024}
-        config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+        save_manifest(
+            str(problem_dir),
+            AutoCodeManifest(
+                problem_name="Config Exists",
+                time_limit_ms=120000,
+                memory_limit_mb=1024,
+            ),
+        )
 
         config = load_problem_config(problem_dir)
 
@@ -83,9 +88,14 @@ def test_get_resource_limit_brute_defaults(monkeypatch):
 def test_get_resource_limit_with_config():
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = Path(tmpdir)
-        config_path = problem_dir / "problem.yaml"
-        config_data = {"time_limit": 5, "memory_limit": 512}
-        config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+        save_manifest(
+            str(problem_dir),
+            AutoCodeManifest(
+                problem_name="With Manifest",
+                time_limit_ms=5000,
+                memory_limit_mb=512,
+            ),
+        )
 
         limit = get_resource_limit(str(problem_dir), "sol")
         assert limit.timeout_sec == 5
@@ -95,9 +105,14 @@ def test_get_resource_limit_with_config():
 def test_get_resource_limit_with_params():
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = Path(tmpdir)
-        config_path = problem_dir / "problem.yaml"
-        config_data = {"time_limit": 5, "memory_limit": 512}
-        config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+        save_manifest(
+            str(problem_dir),
+            AutoCodeManifest(
+                problem_name="With Params",
+                time_limit_ms=5000,
+                memory_limit_mb=512,
+            ),
+        )
 
         limit = get_resource_limit(str(problem_dir), "sol", timeout=10, memory_mb=1024)
         assert limit.timeout_sec == 10
@@ -108,9 +123,14 @@ def test_get_resource_limit_brute_ignores_config(monkeypatch):
     monkeypatch.setattr("autocode_mcp.utils.resource_limit.get_available_memory_mb", lambda: 4096)
     with tempfile.TemporaryDirectory() as tmpdir:
         problem_dir = Path(tmpdir)
-        config_path = problem_dir / "problem.yaml"
-        config_data = {"time_limit": 5, "memory_limit": 512}
-        config_path.write_text(yaml.dump(config_data), encoding="utf-8")
+        save_manifest(
+            str(problem_dir),
+            AutoCodeManifest(
+                problem_name="Brute Ignores",
+                time_limit_ms=5000,
+                memory_limit_mb=512,
+            ),
+        )
 
         limit = get_resource_limit(str(problem_dir), "brute")
         assert limit.timeout_sec == 60
