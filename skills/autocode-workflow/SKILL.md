@@ -74,8 +74,8 @@ Interactive and communication tasks are not just "no validator". They require an
 | Problem setup | `problem_create` must create directory structure and `manifest.json` |
 | Standard solution | `solution_build(solution_type="sol")` succeeds (or `participant_solutions` for `multi_process`) |
 | Brute solution | `solution_build(solution_type="brute")` succeeds after sol (required when `oracle_mode == "brute"`) |
-| Complexity audit | `solution_analyze`, `solution_audit_std` (and `solution_audit_brute` when `oracle_mode == "brute"`) reviewed |
-| Validator | Standard / SPJ: `validator_build` returns valid `accuracy >= 0.9` (optional for interactive / communication) |
+| Complexity audit | `solution_analyze`, `solution_audit_std` (and `solution_audit_brute` when `oracle_mode == "brute"`) reviewed; re-running after `generator_build` with unchanged source SHA-256 executes dynamic empirical/brute probes non-destructively |
+| Validator | Standard / SPJ: `validator_build` passes both positive (`expected_valid=True`) and negative (`expected_valid=False`) cases with `accuracy >= 0.9` (optional for interactive / communication) |
 | Interactor / Communicator | Interactive & communication (`run_twice` / `multi_process`): `interactor_build` is ready; `grader_linked`: `files/grader.cpp` + `files/problem.h` linked |
 | Generator | `generator_build` succeeds after validator/interactor gate |
 | Stress | `stress_test_run` completes all rounds |
@@ -141,18 +141,19 @@ Use:
 - `solution_analyze` to estimate time/space complexity, risk notes, and recommended stress profiles.
 - `solution_audit_std` to check std complexity and constraint mismatch (both tools share `static_estimated_complexity` and emit explicit `complexity_conflict` warnings when claimed/static/empirical estimates disagree).
 - `solution_audit_brute` to check whether brute can support stress testing (runs a small-scale stepped probe with `RLIMIT_CORE=0` when binaries exist, hard-failing on crashes/OOM and auto-clamping `recommended_stress_params.n_max` on timeout).
+- Re-running `solution_analyze`, `solution_audit_std`, or `solution_audit_brute` **after `generator_build`** with unchanged canonical `sol.cpp` / `brute.cpp` SHA-256 runs dynamic empirical complexity fitting (`std_empirical_verified`) and `_probe_brute_small_scale` (`brute_probed`) **without** resetting `std_audited`, `brute_audited`, `validator_ready`, `generator_built`, `checker_ready`, `interactor_ready`, or `stress_passed` (failing closed if a dynamic probe fails). Check `dynamic_probe` (`ran` vs `pending_binaries`) in audit responses.
 
 Do not accept a claimed complexity without evidence.
 
 ### `validator_build`
 
-Non-interactive problems need a validator with evidence. A validator build without effective accuracy is not enough.
+Non-interactive problems need a validator with evidence. A validator build without effective accuracy or negative counterexamples is not enough (`validator_ready` requires both positive and negative cases).
 
 Target:
 
 - `accuracy >= 0.9`
-- valid inputs include normal, boundary, and maximum cases;
-- invalid inputs include near-valid but illegal formats/ranges.
+- `has_positive_cases == true` (`expected_valid=True`): normal, boundary, and maximum cases;
+- `has_negative_cases == true` (`expected_valid=False`): near-valid but illegal formats/ranges (prevents permissive `return 0;` validators from passing).
 
 ### `interactor_build`
 
@@ -228,7 +229,7 @@ Must pass before packaging. When `verify_types` is omitted on a managed workspac
 
 With `special_judge: true` and `stress_comparison: "checker"` (and a built `files/checker`), `answer_consistency` and `wrong_solution_kill` use the testlib checker against jury answers; with `stress_comparison: "exact"` they still compare strings to the answer files.
 
-`wrong_solution_kill` auto-discovers and auto-compiles missing or stale `solutions/wrong_*.cpp` files with the same compiler and resource limits as `sol.cpp`. When `quality_gates.require_wrong_solution_kill=true` and zero wrong solutions are configured or present, it fails closed (`passed=false`) instead of returning a false pass. `duplicate_inputs` enforces zero tolerance on exact byte-identical duplicates (`exact_duplicates > 0` fails immediately). Wrong entries honor manifest `expected`: default `fail` means at least one test must reject the binary; `pass` means all tests must accept it (checker AC or exact match to `.ans`). The report includes per-test timing breakdowns, `wrong_ms / std_ms` ratios, `max_memory_mb`, configurable TLE policies (`quality_gates.wrong_tle_kill_factor`, default `1.0`, and optional `wrong_slowdown_kill_ratio`), and `host_performance_bias` warnings in `problem_audit` when a fast local CPU may mask TLE on typical OJ hardware.
+`wrong_solution_kill` auto-discovers and auto-compiles missing or stale `solutions/wrong_*.cpp` files with the same compiler and resource limits as `sol.cpp`. When `manifest.solutions` declares any `role == "wrong"` entry and `quality_gates.require_wrong_solution_kill` is omitted, gate evaluation (`check_gates` / `PRE_GATES`) treats `require_wrong_solution_kill` as effectively enabled (`true`); set `"require_wrong_solution_kill": false` explicitly to opt out. When `require_wrong_solution_kill` is enabled and zero wrong solutions are configured or present, it fails closed (`passed=false`) instead of returning a false pass. `duplicate_inputs` enforces zero tolerance on exact byte-identical duplicates (`exact_duplicates > 0` fails immediately). Wrong entries honor manifest `expected`: default `fail` means at least one test must reject the binary; `pass` means all tests must accept it (checker AC or exact match to `.ans`). The report includes per-test timing breakdowns, `wrong_ms / std_ms` ratios, `max_memory_mb`, configurable TLE policies (`quality_gates.wrong_tle_kill_factor`, default `1.0`, and optional `wrong_slowdown_kill_ratio`), and `host_performance_bias` warnings in `problem_audit` when a fast local CPU may mask TLE on typical OJ hardware.
 
 **Near-AC Single-Point Mutation Red-Teaming (Recommended)**: beyond standard naive/wrong solutions, construct 2–3 near-AC single-point mutations of `sol.cpp` (e.g. off-by-one boundary, missing tie-breaker, 32-bit overflow, dropped edge-case branch) as `solutions/wrong_*.cpp` and verify `wrong_solution_kill` rejects every one; you can also enable automated single-point mutation testing via `audit_gates.enable_mutation_testing=true` or `autocode-audit --mutation-check`, and strengthen tests via `mode="append"` or `tests/hack/` if any mutation passes all tests.
 
@@ -243,8 +244,10 @@ Prefer `time_limit_ms` (milliseconds, matching `manifest.json`). Passing large v
 Pass `export_formats` to export one or more judge formats in a single call (default `["polygon"]`), and optional `export_data_mode` (`"hardlink"` default to avoid 3x workspace disk duplication with automatic copy fallback, `"copy"`, or `"zip"` for compressed uploadable archives under `exports/<fmt>.zip`):
 
 - `polygon`: writes workspace `problem.xml` plus a self-contained `exports/polygon/` directory (or `exports/polygon.zip` in `zip` mode) with all referenced statements, sources, resources, and test files (including `<groups>`/`<dependencies>`/`<tests>` when `subtasks` are defined, and `<communication>` for communication problems).
-- `hydro`: exports under `exports/hydro/` (or `exports/hydro.zip` in `zip` mode): `problem.yaml` (without internal tool tags), `problem_zh.md`, `testdata/config.yaml` with subtasks and judge sources; interactive exports omit empty/placeholder `.ans` files and validate `type: interactive` & `interactor`.
-- `qoj`: exports under `exports/qoj/` (or `exports/qoj.zip` in `zip` mode): `problem.conf`, `statement.md`, 1-based contiguous `data/1.in..N.in`, `two_stage`/`with_implementer`/`interaction_mode`, and subtask dependencies; interactive exports omit empty/placeholder `.ans` files and validate `use_builtin_judger on` & `interaction_mode on`.
+- `hydro`: exports under `exports/hydro/` (or `exports/hydro.zip` in `zip` mode): `problem.yaml` (without internal tool tags), `problem_zh.md`, `testdata/config.yaml` with subtasks and judge sources; interactive and communication exports omit missing or dummy/placeholder `.ans` files and validate protocol config.
+- `qoj`: exports under `exports/qoj/` (or `exports/qoj.zip` in `zip` mode): `problem.conf`, `statement.md`, 1-based contiguous `data/1.in..N.in`, `two_stage`/`with_implementer`/`interaction_mode`, and subtask dependencies; interactive and communication exports omit missing or dummy/placeholder `.ans` files and validate `use_builtin_judger on` & protocol mode.
+
+`problem_pack_polygon` exempts both `interactive` and `communication` problems from mandatory `.ans` files and emits `pack_warnings` if undeclared wrong solutions (`wrong_*.cpp`, `wrong-*.cpp`, `wa_*.cpp`, `wa-*.cpp`, `tle_*.cpp`, `tle-*.cpp`, `mle_*.cpp`, `mle-*.cpp`, `re_*.cpp`, `re-*.cpp`, `bf.cpp`) exist under `solutions/`.
 
 ## Manifest
 

@@ -199,17 +199,69 @@ class EmpiricalRatioAnalyzer:
             return 1.0
         return val_to / val_from
 
+    @staticmethod
+    def _valid_positive_num(val: Any, *, min_val: float = 0.0) -> float | None:
+        if isinstance(val, bool) or not isinstance(val, int | float):
+            return None
+        num = float(val)
+        if not math.isfinite(num) or num <= min_val:
+            return None
+        return num
+
     @classmethod
-    def fit_log_linear(cls, samples: list[dict[str, Any]]) -> tuple[float, float]:
+    def _select_fit_metric(
+        cls,
+        samples: list[dict[str, Any]],
+        *,
+        min_n: float = 1.000001,
+        ok_only: bool = False,
+    ) -> str:
+        """Prefer deterministic `instruction_count` when present across scales; fall back to CPU/wall time."""
+        cand = [
+            s
+            for s in samples
+            if (not ok_only or s.get("status") == "ok")
+            and (n_num := cls._valid_positive_num(s.get("n"), min_val=0.0)) is not None
+            and n_num >= min_n
+        ]
+        inst_valid = [
+            s for s in cand if cls._valid_positive_num(s.get("instruction_count"), min_val=0.0) is not None
+        ]
+        inst_distinct_n = {float(s["n"]) for s in inst_valid}
+        if len(inst_valid) >= 2 and len(inst_distinct_n) >= 2 and len(inst_valid) == len(cand):
+            return "instruction_count"
+
+        cpu_valid = [
+            s for s in cand if cls._valid_positive_num(s.get("cpu_time_ms"), min_val=0.01) is not None
+        ]
+        if len(cpu_valid) >= 2 and len({float(s["n"]) for s in cpu_valid}) >= 2:
+            return "cpu_time_ms"
+
+        wall_valid = [
+            s for s in cand if cls._valid_positive_num(s.get("wall_time_ms"), min_val=0.01) is not None
+        ]
+        if len(wall_valid) >= 2 and len({float(s["n"]) for s in wall_valid}) >= 2:
+            return "wall_time_ms"
+
+        if len(inst_valid) >= 2 and len(inst_distinct_n) >= 2:
+            return "instruction_count"
+        return "cpu_time_ms"
+
+    @classmethod
+    def fit_log_linear(
+        cls,
+        samples: list[dict[str, Any]],
+        *,
+        metric: str | None = None,
+    ) -> tuple[float, float]:
+        active_metric = metric or cls._select_fit_metric(samples, min_n=1.000001, ok_only=False)
+        min_val = 0.0 if active_metric == "instruction_count" else 0.01
         valid_points: list[tuple[float, float]] = []
         for s in samples:
-            try:
-                n_val = float(s.get("n", 0) or 0)
-                t_val = float(s.get("cpu_time_ms", 0.0) or 0.0)
-            except (ValueError, TypeError):
-                continue
-            if n_val > 1 and t_val > 0.01 and math.isfinite(n_val) and math.isfinite(t_val):
-                valid_points.append((math.log(n_val), math.log(t_val)))
+            n_val = cls._valid_positive_num(s.get("n"), min_val=1.0)
+            y_val = cls._valid_positive_num(s.get(active_metric), min_val=min_val)
+            if n_val is not None and y_val is not None:
+                valid_points.append((math.log(n_val), math.log(y_val)))
 
         if len(valid_points) < 2:
             return 1.0, 0.0
@@ -260,17 +312,21 @@ class EmpiricalRatioAnalyzer:
         return slope, intercept, r_squared
 
     @classmethod
-    def fit_exponential(cls, samples: list[dict[str, Any]]) -> tuple[float, float, float]:
-        """Fit semi-log exponential model log2(t) = beta * n + c; returns (base=2**beta, beta, r_squared)."""
+    def fit_exponential(
+        cls,
+        samples: list[dict[str, Any]],
+        *,
+        metric: str | None = None,
+    ) -> tuple[float, float, float]:
+        """Fit semi-log exponential model log2(y) = beta * n + c; returns (base=2**beta, beta, r_squared)."""
+        active_metric = metric or cls._select_fit_metric(samples, min_n=1.0, ok_only=False)
+        min_val = 0.0 if active_metric == "instruction_count" else 0.01
         pts: list[tuple[float, float]] = []
         for s in samples:
-            try:
-                n_val = float(s.get("n", 0) or 0)
-                t_val = float(s.get("cpu_time_ms", 0.0) or 0.0)
-            except (ValueError, TypeError):
-                continue
-            if n_val >= 1 and t_val > 0.01 and math.isfinite(n_val) and math.isfinite(t_val):
-                pts.append((n_val, math.log2(t_val)))
+            n_val = cls._valid_positive_num(s.get("n"), min_val=0.999999)
+            y_val = cls._valid_positive_num(s.get(active_metric), min_val=min_val)
+            if n_val is not None and y_val is not None:
+                pts.append((n_val, math.log2(y_val)))
         if len(pts) < 2:
             return 1.0, 0.0, 0.0
         beta, _, r2 = cls._linear_regression(pts)
@@ -585,12 +641,18 @@ class EmpiricalRatioAnalyzer:
         dominant_var: str = "n",
     ) -> dict[str, Any]:
         norm_claimed = normalize_complexity_expression(claimed_complexity, dominant_var=dominant_var)
+        is_exp_claimed = norm_claimed in cls.EXPONENTIAL_BASE_RANGES
+        min_n_required = 1.0 if is_exp_claimed else 1.000001
+
+        ok_samples = [s for s in samples if s.get("status") == "ok"]
         valid_samples = [
-            s for s in samples
-            if s.get("status") == "ok"
-            and s.get("cpu_time_ms") is not None
-            and not isinstance(s.get("cpu_time_ms"), bool)
-            and math.isfinite(float(s.get("cpu_time_ms", 0.0) or 0.0))
+            s
+            for s in ok_samples
+            if (
+                cls._valid_positive_num(s.get("instruction_count"), min_val=0.0) is not None
+                or cls._valid_positive_num(s.get("cpu_time_ms"), min_val=0.0) is not None
+                or cls._valid_positive_num(s.get("wall_time_ms"), min_val=0.0) is not None
+            )
         ]
 
         if not valid_samples:
@@ -607,29 +669,28 @@ class EmpiricalRatioAnalyzer:
                 "remediation_advice": "Check if generator and solution execute properly without immediate crash.",
             }
 
-        failed_payload = cls._check_failed_samples(norm_claimed, samples, fit_metric="cpu_time_ms")
+        active_metric = cls._select_fit_metric(valid_samples, min_n=min_n_required, ok_only=True)
+        failed_payload = cls._check_failed_samples(norm_claimed, samples, fit_metric=active_metric)
         if failed_payload is not None:
             return failed_payload
 
-        is_exp_claimed = norm_claimed in cls.EXPONENTIAL_BASE_RANGES
-        min_n_required = 1.0 if is_exp_claimed else 1.000001
+        min_val = 0.0 if active_metric == "instruction_count" else 0.01
         fittable_samples = [
             s
             for s in valid_samples
-            if isinstance(s.get("n"), int | float)
-            and not isinstance(s.get("n"), bool)
-            and math.isfinite(float(s["n"]))
-            and float(s["n"]) >= min_n_required
-            and float(s["cpu_time_ms"]) > 0.01
+            if (n_num := cls._valid_positive_num(s.get("n"), min_val=0.0)) is not None
+            and n_num >= min_n_required
+            and cls._valid_positive_num(s.get(active_metric), min_val=min_val) is not None
         ]
         distinct_n = {float(s["n"]) for s in fittable_samples}
         if len(fittable_samples) < 2 or len(distinct_n) < 2:
             return {
                 "passed": False,
                 "verdict": "insufficient_samples",
+                "fit_metric": active_metric,
                 "failure_reason": (
                     "Insufficient valid execution samples collected "
-                    "(minimum 2 distinct scales with N > 1 and positive timing required)"
+                    "(minimum 2 distinct scales with N > 1 and positive metric required)"
                 ),
                 "claimed_complexity": norm_claimed,
                 "fitted_complexity": "unknown",
@@ -640,7 +701,7 @@ class EmpiricalRatioAnalyzer:
                 "remediation_advice": "Ensure generator produces distinct scales (N > 1) and solution executes cleanly.",
             }
 
-        alpha, r_squared = cls.fit_log_linear(fittable_samples)
+        alpha, r_squared = cls.fit_log_linear(fittable_samples, metric=active_metric)
         fitted_cat = cls.infer_complexity_category(alpha)
 
         expected_range = cls.COMPLEXITY_ALPHA_RANGES.get(norm_claimed, (0.65, 1.35))
@@ -649,7 +710,7 @@ class EmpiricalRatioAnalyzer:
         exponential_fit: dict[str, Any] | None = None
 
         if is_exp_claimed:
-            exp_base, exp_beta, exp_r2 = cls.fit_exponential(fittable_samples)
+            exp_base, exp_beta, exp_r2 = cls.fit_exponential(fittable_samples, metric=active_metric)
             base_lo, base_hi = cls.EXPONENTIAL_BASE_RANGES[norm_claimed]
             exponential_fit = {
                 "base": round(exp_base, 3),
@@ -671,52 +732,60 @@ class EmpiricalRatioAnalyzer:
                 else:
                     fitted_cat = cls.infer_complexity_category(alpha)
 
-        # 若后段高信噪比测点（后 3 点）在有效规模跨度（>=2x）上呈现显著高阶增长，采用后段拟合结果以防前段底噪平线掩盖真实复杂度
+        is_instruction_metric = active_metric == "instruction_count"
+        # 若后段高信噪比测点（后 3 点）在有效规模跨度（>=2x）上呈现显著高阶增长，采用后段拟合结果以防前段底噪/CRT启动平线掩盖真实复杂度
         if fit_model == "log_linear" and len(fittable_samples) >= 4:
             tail_samples = fittable_samples[-3:]
             tail_n0 = int(tail_samples[0].get("n", 0))
             tail_n1 = int(tail_samples[-1].get("n", 0))
             tail_n_span = (float(tail_n1) / float(tail_n0)) if tail_n0 > 0 else 1.0
-            tail_times = [float(s["cpu_time_ms"]) for s in tail_samples]
-            tail_time_ratio = max(tail_times) / max(min(tail_times), 0.1)
-            tail_alpha, tail_r2 = cls.fit_log_linear(tail_samples)
+            tail_vals = [float(s[active_metric]) for s in tail_samples]
+            tail_val_ratio = max(tail_vals) / max(min(tail_vals), min_val or 1.0)
+            tail_alpha, tail_r2 = cls.fit_log_linear(tail_samples, metric=active_metric)
             if tail_alpha > expected_range[1] and (
                 norm_claimed in ("O(2^n)", "O(n!)")
-                or (tail_n_span >= 2.0 and tail_time_ratio >= 2.0 and tail_r2 >= 0.75)
+                or (tail_n_span >= 2.0 and tail_val_ratio >= 2.0 and tail_r2 >= 0.75)
             ):
                 is_alpha_match = False
                 alpha = tail_alpha
                 fitted_cat = cls.infer_complexity_category(tail_alpha)
                 r_squared = tail_r2
             elif tail_n_span >= 2.0:
-                # 若前段呈平坦进程启动平台（如 Windows CreateProcess ~12ms 固定开销），
-                # 扣除平台底噪后再检查后段净增量斜率，避免低常数 O(n^2) 被启动平台拉平掩盖。
-                t0 = float(fittable_samples[0]["cpu_time_ms"])
-                t1 = float(fittable_samples[1]["cpu_time_ms"])
-                plateau = min(t0, t1)
-                t_last = float(fittable_samples[-1]["cpu_time_ms"])
-                is_flat_head = (
-                    abs(t1 - t0) <= 2.0
-                    and (plateau <= 5.0 or (max(t0, t1) / max(plateau, 0.1)) <= 1.25)
-                    and (t_last - plateau) >= 15.0
-                )
-                if is_flat_head:
+                v0 = float(fittable_samples[0][active_metric])
+                v1 = float(fittable_samples[1][active_metric])
+                plateau = min(v0, v1)
+                v_last = float(fittable_samples[-1][active_metric])
+                if is_instruction_metric:
+                    is_flat_head = (
+                        (max(v0, v1) / max(plateau, 1.0)) <= 1.25
+                        and (v_last - plateau) >= max(1000.0, 0.25 * plateau)
+                    )
+                    offset = max(0.0, plateau - 1.0)
+                    min_net = 10.0
+                else:
+                    is_flat_head = (
+                        abs(v1 - v0) <= 2.0
+                        and (plateau <= 5.0 or (max(v0, v1) / max(plateau, 0.1)) <= 1.25)
+                        and (v_last - plateau) >= 15.0
+                    )
                     offset = max(0.0, plateau - 0.1)
+                    min_net = 1.5
+                if is_flat_head:
                     adjusted_tail = [
                         {
                             "n": s["n"],
-                            "cpu_time_ms": float(s["cpu_time_ms"]) - offset,
+                            active_metric: float(s[active_metric]) - offset,
                         }
                         for s in fittable_samples[-3:]
-                        if (float(s["cpu_time_ms"]) - offset) >= 1.5
+                        if (float(s[active_metric]) - offset) >= min_net
                     ]
                     if len(adjusted_tail) >= 2:
-                        net_alpha, net_r2 = cls.fit_log_linear(adjusted_tail)
+                        net_alpha, net_r2 = cls.fit_log_linear(adjusted_tail, metric=active_metric)
                         n_prev = int(adjusted_tail[-2]["n"])
                         n_last = int(adjusted_tail[-1]["n"])
-                        t_prev_net = float(adjusted_tail[-2]["cpu_time_ms"])
-                        t_last_net = float(adjusted_tail[-1]["cpu_time_ms"])
-                        obs_net_ratio = t_last_net / max(t_prev_net, 0.01)
+                        v_prev_net = float(adjusted_tail[-2][active_metric])
+                        v_last_net = float(adjusted_tail[-1][active_metric])
+                        obs_net_ratio = v_last_net / max(v_prev_net, 0.01)
                         exp_last_ratio = cls.calculate_expected_ratio(
                             norm_claimed, n_prev, n_last, dominant_var=dominant_var
                         )
@@ -736,10 +805,10 @@ class EmpiricalRatioAnalyzer:
             s_to = fittable_samples[i + 1]
             n_from = int(s_from["n"])
             n_to = int(s_to["n"])
-            t_from = float(s_from["cpu_time_ms"])
-            t_to = float(s_to["cpu_time_ms"])
+            y_from = float(s_from[active_metric])
+            y_to = float(s_to[active_metric])
 
-            observed_ratio = (t_to / t_from) if t_from > 0.01 else 1.0
+            observed_ratio = (y_to / y_from) if y_from > min_val else 1.0
             expected_ratio = cls.calculate_expected_ratio(
                 norm_claimed, n_from, n_to, dominant_var=dominant_var
             )
@@ -755,96 +824,77 @@ class EmpiricalRatioAnalyzer:
             )
 
         max_sample = fittable_samples[-1]
-        max_time = float(max_sample["cpu_time_ms"])
-        all_times = [float(s["cpu_time_ms"]) for s in fittable_samples]
-        peak_time = max(all_times)
-        min_time = min(all_times)
+        all_vals = [float(s[active_metric]) for s in fittable_samples]
+        max_val = float(max_sample[active_metric])
+        min_metric_val = min(all_vals)
         max_n = int(max_sample.get("n", 0))
         min_n = int(fittable_samples[0].get("n", 0))
         n_span = (float(max_n) / float(min_n)) if min_n > 0 else 1.0
-        headroom_ratio = max_time / time_limit_ms if time_limit_ms > 0 else 1.0
-        peak_headroom = peak_time / time_limit_ms if time_limit_ms > 0 else 1.0
 
-        extra_meta: dict[str, Any] = {"fit_metric": "cpu_time_ms", "fit_model": fit_model}
+        # Headroom ratio always derives from wall/CPU timing against time_limit_ms (never instruction counts)
+        timing_vals: list[float] = []
+        for s in fittable_samples:
+            t_v = cls._valid_positive_num(s.get("cpu_time_ms"), min_val=0.0)
+            if t_v is None:
+                t_v = cls._valid_positive_num(s.get("wall_time_ms"), min_val=0.0)
+            if t_v is not None:
+                timing_vals.append(t_v)
+        max_time = timing_vals[-1] if timing_vals else 0.0
+        peak_time = max(timing_vals) if timing_vals else 0.0
+        min_time = min(timing_vals) if timing_vals else 0.0
+        headroom_ratio = max_time / time_limit_ms if (time_limit_ms > 0 and timing_vals) else 0.0
+        peak_headroom = peak_time / time_limit_ms if (time_limit_ms > 0 and timing_vals) else 0.0
+
+        extra_meta: dict[str, Any] = {"fit_metric": active_metric, "fit_model": fit_model}
         if exponential_fit is not None:
             extra_meta["exponential_fit"] = exponential_fit
 
         if not is_alpha_match:
-            # 当全部样本耗时均处于 OS 计时底噪区间（<=15ms，或低信噪比 <=35ms 且峰值 <5% TL），
-            # 仅在不存在干净的高信噪比超阶增长信号（R^2>=0.90 且首尾缩放 >=4x 且最大点 >=2ms）时
-            # 才按底噪豁免，既避免 O(1)/O(log n)/O(n log n) 计时粒度抖动误报，又不放过干净的 O(n^2)/O(n^3)/O(3^n) 曲线。
-            if fit_model == "exponential" and exponential_fit is not None:
-                exp_hi = exponential_fit["expected_base_range"][1]
-                has_clean_high_order_signal = (
-                    exponential_fit["base"] > exp_hi
-                    and r_squared >= 0.90
-                    and (max_time / max(min_time, 0.1)) >= 4.0
-                    and max_time >= 2.0
+            if not is_instruction_metric:
+                if fit_model == "exponential" and exponential_fit is not None:
+                    exp_hi = exponential_fit["expected_base_range"][1]
+                    has_clean_high_order_signal = (
+                        exponential_fit["base"] > exp_hi
+                        and r_squared >= 0.90
+                        and (max_val / max(min_metric_val, 0.1)) >= 4.0
+                        and max_val >= 2.0
+                    )
+                else:
+                    has_clean_high_order_signal = (
+                        alpha > expected_range[1]
+                        and r_squared >= 0.90
+                        and (max_val / max(min_metric_val, 0.1)) >= 4.0
+                        and max_val >= 2.0
+                    )
+                in_noise_floor = (
+                    peak_time <= 15.0
+                    or (peak_time <= 35.0 and r_squared < 0.5)
+                    or (
+                        peak_time <= 80.0
+                        and (peak_time / max(min_time, 0.1)) < 2.2
+                    )
                 )
-            else:
-                has_clean_high_order_signal = (
-                    alpha > expected_range[1]
-                    and r_squared >= 0.90
-                    and (max_time / max(min_time, 0.1)) >= 4.0
-                    and max_time >= 2.0
+                warmup_decay_only = (
+                    fit_model == "log_linear"
+                    and alpha < expected_range[0]
+                    and peak_headroom < 0.15
                 )
-            in_noise_floor = (
-                peak_time <= 15.0
-                or (peak_time <= 35.0 and r_squared < 0.5)
-                or (
-                    peak_time <= 80.0
-                    and (peak_time / max(min_time, 0.1)) < 2.2
+                narrow_scale_noise = (
+                    fit_model == "log_linear"
+                    and not is_exp_claimed
+                    and norm_claimed != "O(n!)"
+                    and n_span < 2.0
+                    and peak_headroom < 0.25
+                    and (peak_time / max(min_time, 0.1)) < 3.0
                 )
-            )
-            warmup_decay_only = (
-                fit_model == "log_linear"
-                and alpha < expected_range[0]
-                and peak_headroom < 0.15
-            )
-            narrow_scale_noise = (
-                fit_model == "log_linear"
-                and not is_exp_claimed
-                and norm_claimed != "O(n!)"
-                and n_span < 2.0
-                and peak_headroom < 0.25
-                and (peak_time / max(min_time, 0.1)) < 3.0
-            )
-            if (
-                (in_noise_floor and peak_headroom < 0.05)
-                or warmup_decay_only
-                or narrow_scale_noise
-            ) and not has_clean_high_order_signal:
-                return {
-                    "passed": True,
-                    "verdict": "verified_within_noise_floor",
-                    "claimed_complexity": norm_claimed,
-                    "fitted_complexity": norm_claimed,
-                    "fitted_alpha": round(alpha, 2),
-                    "r_squared": round(r_squared, 3),
-                    "samples": samples,
-                    "growth_ratios": growth_ratios,
-                    "max_scale_headroom_ratio": round(headroom_ratio, 3),
-                    "noise_floor_note": (
-                        f"All scale samples completed within OS timer noise floor "
-                        f"(peak={peak_time:.2f}ms, r2={r_squared:.3f}, headroom={peak_headroom:.3f})."
-                    ),
-                    **extra_meta,
-                }
-
-            # 仅在规模足够大（跨越硬件缓存）且耗时余量充足时允许缓存跳跃容差
-            if (
-                fit_model == "log_linear"
-                and alpha > expected_range[1]
-                and len(fittable_samples) >= 3
-                and headroom_ratio < 0.40
-                and max_n >= 50000
-            ):
-                sub_samples = fittable_samples[:-1]
-                sub_alpha, sub_r2 = cls.fit_log_linear(sub_samples)
-                if expected_range[0] <= sub_alpha <= expected_range[1]:
+                if (
+                    (in_noise_floor and peak_headroom < 0.05)
+                    or warmup_decay_only
+                    or narrow_scale_noise
+                ) and not has_clean_high_order_signal:
                     return {
                         "passed": True,
-                        "verdict": "verified_with_cache_jump",
+                        "verdict": "verified_within_noise_floor",
                         "claimed_complexity": norm_claimed,
                         "fitted_complexity": norm_claimed,
                         "fitted_alpha": round(alpha, 2),
@@ -852,9 +902,37 @@ class EmpiricalRatioAnalyzer:
                         "samples": samples,
                         "growth_ratios": growth_ratios,
                         "max_scale_headroom_ratio": round(headroom_ratio, 3),
-                        "cache_jump_note": "Slight ratio jump observed at maximum scale likely due to L1/L2 cache capacity transition, well within time limit.",
+                        "noise_floor_note": (
+                            f"All scale samples completed within OS timer noise floor "
+                            f"(peak={peak_time:.2f}ms, r2={r_squared:.3f}, headroom={peak_headroom:.3f})."
+                        ),
                         **extra_meta,
                     }
+
+                # 仅在规模足够大（跨越硬件缓存）且耗时余量充足时允许缓存跳跃容差
+                if (
+                    fit_model == "log_linear"
+                    and alpha > expected_range[1]
+                    and len(fittable_samples) >= 3
+                    and headroom_ratio < 0.40
+                    and max_n >= 50000
+                ):
+                    sub_samples = fittable_samples[:-1]
+                    sub_alpha, _ = cls.fit_log_linear(sub_samples, metric=active_metric)
+                    if expected_range[0] <= sub_alpha <= expected_range[1]:
+                        return {
+                            "passed": True,
+                            "verdict": "verified_with_cache_jump",
+                            "claimed_complexity": norm_claimed,
+                            "fitted_complexity": norm_claimed,
+                            "fitted_alpha": round(alpha, 2),
+                            "r_squared": round(r_squared, 3),
+                            "samples": samples,
+                            "growth_ratios": growth_ratios,
+                            "max_scale_headroom_ratio": round(headroom_ratio, 3),
+                            "cache_jump_note": "Slight ratio jump observed at maximum scale likely due to L1/L2 cache capacity transition, well within time limit.",
+                            **extra_meta,
+                        }
 
             if fit_model == "exponential" and exponential_fit is not None:
                 failure_reason = (
@@ -889,7 +967,8 @@ class EmpiricalRatioAnalyzer:
         # 当声称为 O(n) / O(n log n) 等线性对数阶，但全部采样点均落在低信噪比 OS 计时底噪内，
         # fitted_cat 可能因常数启动底噪退化为 O(1)；回退报告 claimed_complexity 避免污染难度评估。
         if (
-            norm_claimed in ("O(n)", "O(n log n)", "O(nlogn)", "O(n sqrt n)", "O(nsqrtn)")
+            not is_instruction_metric
+            and norm_claimed in ("O(n)", "O(n log n)", "O(nlogn)", "O(n sqrt n)", "O(nsqrtn)")
             and alpha < 0.50
             and r_squared < 0.70
             and peak_time <= 35.0
@@ -909,6 +988,7 @@ class EmpiricalRatioAnalyzer:
                     f"Low-SNR timer floor masked growth exponent (peak={peak_time:.2f}ms, r2={r_squared:.3f}); "
                     f"preserving claimed complexity {norm_claimed}."
                 ),
+                **extra_meta,
             }
 
         return {

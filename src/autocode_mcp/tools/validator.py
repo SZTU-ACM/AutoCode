@@ -110,30 +110,54 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
 
         binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
 
-        # 如果没有测试用例，直接返回成功
+        # 如果没有测试用例，直接返回成功（但明确标记正/反例缺失以便门禁阻断）
         if not test_cases:
             has_eof = "readEof" in resolved.code or "seekEof" in resolved.code
+            warnings: list[str] = [
+                "No test cases provided; validator_ready requires both positive (expected_valid=True) "
+                "and negative (expected_valid=False) test cases with accuracy >= 0.9."
+            ]
             return ToolResult.ok(
                 source_path=compile_source,
                 canonical_path=canonical_path,
                 binary_path=binary_path,
                 binary_size=binary_size,
                 accuracy=None,
+                positive_count=0,
+                negative_count=0,
+                has_positive_cases=False,
+                has_negative_cases=False,
+                warnings=warnings,
                 has_eof_check=has_eof,
                 compile_log=compile_result.stderr,
                 message=(
-                    "Validator built successfully (no test cases provided). "
+                    "Validator built successfully (no test cases provided; both positive and negative test cases "
+                    "are required to mark validator_ready). "
                     "Remember to end with inf.readEof(); if trailing whitespace is allowed, use inf.seekEof(); inf.readEof();"
                 ),
             )
 
         # 运行测试用例
         test_results = []
+        invalid_fixtures = []
         correct_count = 0
+        positive_count = 0
+        negative_count = 0
 
         for i, tc in enumerate(test_cases):
             input_data = tc.get("input", "")
-            expected_valid = tc.get("expected_valid", True)
+            if "expected_valid" in tc and tc["expected_valid"] is not None:
+                expected_valid = bool(tc["expected_valid"])
+            elif "should_pass" in tc and tc["should_pass"] is not None:
+                expected_valid = bool(tc["should_pass"])
+            else:
+                expected_valid = True
+            if expected_valid is True:
+                positive_count += 1
+            else:
+                negative_count += 1
+                if isinstance(tc.get("input"), str):
+                    invalid_fixtures.append({"name": f"validator_tc_{i + 1}", "input": tc["input"]})
 
             run_result = await run_binary(binary_path, input_data, timeout=5)
 
@@ -156,18 +180,29 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
 
         score = correct_count
         total = len(test_cases)
+        has_positive_cases = positive_count > 0
+        has_negative_cases = negative_count > 0
 
-        invalid_fixtures = [
-            {"name": f"validator_tc_{idx}", "input": tc["input"]}
-            for idx, tc in enumerate(test_cases, 1)
-            if tc.get("expected_valid") is False and isinstance(tc.get("input"), str)
-        ]
+        warnings = []
+        if not has_positive_cases:
+            warnings.append(
+                "No positive test cases (expected_valid=True) provided; validator_ready requires both positive and negative cases."
+            )
+        if not has_negative_cases:
+            warnings.append(
+                "No negative test cases (expected_valid=False) provided; permissive 'return 0;' validators cannot be marked ready without invalid counterexamples."
+            )
+
         if invalid_fixtures:
             autocode_dir = os.path.join(problem_dir, ".autocode")
             os.makedirs(autocode_dir, exist_ok=True)
             fixtures_path = os.path.join(autocode_dir, "validator_invalid_fixtures.json")
             with open(fixtures_path, "w", encoding="utf-8", newline="\n") as ff:
                 json.dump(invalid_fixtures, ff, ensure_ascii=False, indent=2)
+
+        msg = f"Validator built, score: {score}/{total} (positive={positive_count}, negative={negative_count})"
+        if warnings:
+            msg = f"{msg} — WARNING: {' '.join(warnings)}"
 
         return ToolResult.ok(
             source_path=compile_source,
@@ -179,7 +214,12 @@ class ValidatorBuildTool(Tool, BuildToolMixin):
             score=score,
             total=total,
             accuracy=score / total if total > 0 else 0,
-            message=f"Validator built, score: {score}/{total}",
+            positive_count=positive_count,
+            negative_count=negative_count,
+            has_positive_cases=has_positive_cases,
+            has_negative_cases=has_negative_cases,
+            warnings=warnings,
+            message=msg,
         )
 
 

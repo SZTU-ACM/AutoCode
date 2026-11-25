@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..runtime_store import AUDIT, set_section
+from .guard import effective_require_wrong_solution_kill
 from .hashes import (
+    _file_sha256,
     _invalidate_downstream,
     _saved_relative_path,
     _set_source_hash,
@@ -79,6 +81,10 @@ def _brute_built_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
 def _validator_gate_ok(state: dict[str, Any], _: dict[str, Any]) -> bool:
     if _is_protocol_problem(state, {}):
         return True
+    if state.get("validator_has_positive_cases") is False:
+        return False
+    if state.get("validator_has_negative_cases") is False:
+        return False
     accuracy = state.get("validator_accuracy")
     parsed = _finite_ratio(accuracy)
     return bool(state.get("validator_ready")) and parsed is not None and parsed >= 0.9
@@ -237,6 +243,68 @@ _DOWNSTREAM_INVALIDATING_TOOLS = frozenset(
 )
 
 
+def _apply_effective_quality_gates(state: dict[str, Any], manifest: Any) -> dict[str, Any]:
+    """Synchronize effective quality gate defaults (e.g. smart wrong_solution_kill) into state."""
+    if manifest is None:
+        return state
+    gates = state.get("quality_gates")
+    merged_gates = dict(gates) if isinstance(gates, dict) else {}
+    merged_gates["require_wrong_solution_kill"] = effective_require_wrong_solution_kill(manifest)
+    state["quality_gates"] = merged_gates
+    return state
+
+
+def _sync_dynamic_probe_hashes(problem_dir: str, state: dict[str, Any]) -> bool:
+    """Invalidate std_empirical_verified / brute_probed if backing source or generator drifted.
+
+    Returns True when any state field was modified.
+    """
+    changed = False
+    gen_built = bool(state.get("generator_built"))
+    hashes = state.get("source_hashes")
+    prev_gen = hashes.get("files/gen.cpp") if isinstance(hashes, dict) else None
+    cur_gen = _file_sha256(problem_dir, "files/gen.cpp")
+    gen_drifted = isinstance(prev_gen, str) and bool(prev_gen) and cur_gen != prev_gen
+
+    cur_sol = _file_sha256(problem_dir, "solutions/sol.cpp")
+    std_emp_hash = state.get("std_empirical_hash")
+    if state.get("std_empirical_verified"):
+        if (
+            not gen_built
+            or gen_drifted
+            or (isinstance(std_emp_hash, str) and bool(std_emp_hash) and cur_sol != std_emp_hash)
+        ):
+            state["std_empirical_verified"] = False
+            state["std_empirical_hash"] = None
+            changed = True
+    elif std_emp_hash is not None and (not gen_built or gen_drifted or cur_sol != std_emp_hash):
+        state["std_empirical_hash"] = None
+        changed = True
+
+    cur_brute = _file_sha256(problem_dir, "solutions/brute.cpp")
+    brute_probe_hash = state.get("brute_probed_hash")
+    if state.get("brute_probed"):
+        if (
+            not gen_built
+            or gen_drifted
+            or (
+                isinstance(brute_probe_hash, str)
+                and bool(brute_probe_hash)
+                and cur_brute != brute_probe_hash
+            )
+        ):
+            state["brute_probed"] = False
+            state["brute_probed_hash"] = None
+            changed = True
+    elif brute_probe_hash is not None and (
+        not gen_built or gen_drifted or cur_brute != brute_probe_hash
+    ):
+        state["brute_probed_hash"] = None
+        changed = True
+
+    return changed
+
+
 def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_input: dict[str, Any]) -> None:
     relative = _saved_relative_path(problem_dir, tool_input.get("path"))
     if relative is None:
@@ -250,6 +318,10 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "std_empirical_verified": False,
+                "std_empirical_hash": None,
+                "brute_probed": False,
+                "brute_probed_hash": None,
                 "sol_source_hash": None,
                 "sol_analyzed_hash": None,
                 "std_audited_hash": None,
@@ -258,6 +330,8 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "std_claimed_complexity": None,
                 "validator_ready": False,
                 "validator_accuracy": None,
+                "validator_has_positive_cases": False,
+                "validator_has_negative_cases": False,
                 "generator_built": False,
                 "checker_ready": False,
                 "checker_accuracy": None,
@@ -330,6 +404,8 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "sol_built": False,
                 "solution_analyzed": False,
                 "std_audited": False,
+                "std_empirical_verified": False,
+                "std_empirical_hash": None,
                 "sol_source_hash": None,
                 "sol_analyzed_hash": None,
                 "std_audited_hash": None,
@@ -342,16 +418,33 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
             {
                 "brute_built": False,
                 "brute_audited": False,
+                "brute_probed": False,
+                "brute_probed_hash": None,
                 "brute_source_hash": None,
                 "brute_audited_hash": None,
             }
         )
         _set_source_hash(state, "solutions/brute.cpp", None)
     elif relative == "files/val.cpp":
-        state.update({"validator_ready": False, "validator_accuracy": None})
+        state.update(
+            {
+                "validator_ready": False,
+                "validator_accuracy": None,
+                "validator_has_positive_cases": False,
+                "validator_has_negative_cases": False,
+            }
+        )
         _set_source_hash(state, "files/val.cpp", None)
     elif relative == "files/gen.cpp":
-        state["generator_built"] = False
+        state.update(
+            {
+                "generator_built": False,
+                "std_empirical_verified": False,
+                "std_empirical_hash": None,
+                "brute_probed": False,
+                "brute_probed_hash": None,
+            }
+        )
         _set_source_hash(state, "files/gen.cpp", None)
     elif relative == "files/checker.cpp":
         state.update({"checker_ready": False, "checker_accuracy": None})
@@ -375,7 +468,14 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
 
     if relative in ({"files/interactor.cpp", "files/communicator.cpp"} | custom_comm_files):
         _invalidate_downstream(problem_dir, state)
-        state.update({"interactor_ready": False, "interaction_scenarios": {}})
+        state.update(
+            {
+                "interactor_ready": False,
+                "interaction_scenarios": {},
+                "std_empirical_verified": False,
+                "std_empirical_hash": None,
+            }
+        )
         _set_source_hash(state, relative, None)
     elif relative in ({"files/grader.cpp", "files/problem.h"} | custom_grader_files):
         _invalidate_downstream(problem_dir, state)
@@ -386,6 +486,10 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "solution_analyzed": False,
                 "std_audited": False,
                 "brute_audited": False,
+                "std_empirical_verified": False,
+                "std_empirical_hash": None,
+                "brute_probed": False,
+                "brute_probed_hash": None,
                 "sol_source_hash": None,
                 "sol_analyzed_hash": None,
                 "std_audited_hash": None,
@@ -465,7 +569,7 @@ PRE_GATES: dict[str, list[tuple[str, Gate]]] = {
         ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须运行 solution_analyze。")),
         ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
-        ("validator", (_validator_gate_ok, "必须先完成 validator_build，并且 validator accuracy >= 0.9。")),
+        ("validator", (_validator_gate_ok, "必须先完成 validator_build，包含正例与反例测试用例且 accuracy >= 0.9。")),
         ("interactor", (_interactor_gate_ok, "交互题与通信题（非 grader_linked）必须先完成 interactor_build 并可用。")),
     ],
     "stress_test_run": [
@@ -473,7 +577,7 @@ PRE_GATES: dict[str, list[tuple[str, Gate]]] = {
         ("brute_built", (_brute_built_ok, "brute 模式下必须先构建 brute。")),
         ("solution_analyzed", (lambda s, i: bool(s.get("solution_analyzed")), "必须运行 solution_analyze。")),
         ("audits", (_audit_gate_ok, "必须先完成 solution_audit_std（以及 brute 模式下 solution_audit_brute）。")),
-        ("validator", (_validator_gate_ok, "必须先完成 validator_build(accuracy >= 0.9)。")),
+        ("validator", (_validator_gate_ok, "必须先完成 validator_build(正例+反例且 accuracy >= 0.9)。")),
         ("interactor", (_interactor_gate_ok, "交互题与通信题（非 grader_linked）必须先完成 interactor_build 并可用。")),
         ("generator", (lambda s, i: bool(s.get("generator_built")), "必须先完成 generator_build。")),
         ("checker", (_stress_spj_checker_ready_ok, "SPJ 且 stress_comparison=checker 时需先完成 checker_build。")),
@@ -517,7 +621,7 @@ NEXT_ACTIONS: dict[str, str] = {
     "std_audited": "调用 solution_audit_std",
     "audits": "调用 solution_audit_std（brute 模式下还需调用 solution_audit_brute）",
     "validator_ready": "调用 validator_build",
-    "validator": "调用 validator_build 并确保 accuracy >= 0.9",
+    "validator": "调用 validator_build 并提供正例与反例使 accuracy >= 0.9",
     "non_interactive": "交互题或通信题请使用 interactor_build / grader，不要调用 checker_build",
     "interactive": "交互题或非 grader_linked 通信题才可调用 interactor_build",
     "interactor": "调用 interactor_build 并通过交互场景检查",
@@ -546,6 +650,7 @@ def preflight(
     if tool_name == "problem_audit" and bool(tool_input.get("standalone")):
         return []
     state = load_workflow_state(problem_dir)
+    _sync_dynamic_probe_hashes(problem_dir, state)
     violations: list[GateViolation] = []
     if strict_manifest and tool_name != "problem_create":
         if state.get("manifest_error"):
@@ -566,6 +671,11 @@ def preflight(
                 )
             )
             return violations
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    _apply_effective_quality_gates(state, manifest)
     for gate_name, (predicate, reason) in PRE_GATES.get(tool_name, []):
         if not predicate(state, tool_input):
             violations.append(GateViolation(gate_name, reason, NEXT_ACTIONS.get(gate_name, reason)))

@@ -1,6 +1,9 @@
 import asyncio
 import os
+import re
+import shutil
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -10,6 +13,111 @@ from .process import disable_posix_core_dumps, terminate_pid_tree
 
 
 class DynamicExecutionMonitor:
+    VALID_METRICS = frozenset({"auto", "cpu_time", "perf", "cachegrind"})
+    _PERF_SIGNAL_LINE_RE = re.compile(
+        r"(?m)^(?P<prog>.+?):\s*(?:Aborted|Segmentation fault|Floating point exception|"
+        r"Illegal instruction|Bus error|Killed|Trace/breakpoint trap|Terminated|"
+        r"Bad system call)(?:\s*\(core dumped\))?\s*$"
+    )
+
+    @classmethod
+    def _perf_stderr_indicates_signal(cls, stderr_text: str, effective_cmd: list[str]) -> bool:
+        """Return True if ``perf`` reported a child fatal signal while returning exit code 0."""
+        if not stderr_text or not effective_cmd:
+            return False
+        target = effective_cmd[0]
+        target_base = os.path.basename(target)
+        for match in cls._PERF_SIGNAL_LINE_RE.finditer(stderr_text):
+            prog = match.group("prog").strip()
+            if prog in (target, target_base):
+                return True
+        return False
+
+    @classmethod
+    def resolve_metric_backend(cls, metric: str | None = None) -> str:
+        """Resolve execution metric mode from explicit arg or AUTOCODE_METRIC env var."""
+        raw = metric if metric is not None else os.environ.get("AUTOCODE_METRIC", "auto")
+        normalized = str(raw).strip().lower() if raw is not None else "auto"
+        return normalized if normalized in cls.VALID_METRICS else "auto"
+
+    @staticmethod
+    def build_perf_command(
+        cmd: list[str],
+        *,
+        perf_bin: str = "perf",
+        output_file: str | None = None,
+    ) -> list[str]:
+        """Build a safe `perf stat -x , -e instructions` command wrapper."""
+        built = [perf_bin, "stat", "-x", ",", "-e", "instructions"]
+        if output_file:
+            built.extend(["-o", output_file])
+        built.append("--")
+        built.extend(cmd)
+        return built
+
+    @staticmethod
+    def build_cachegrind_command(
+        cmd: list[str],
+        *,
+        valgrind_bin: str = "valgrind",
+        cachegrind_out: str | None = None,
+        log_file: str | None = None,
+    ) -> list[str]:
+        """Build a safe `valgrind --tool=cachegrind` command wrapper with zero CWD artifacts."""
+        cg_out = cachegrind_out if cachegrind_out else os.devnull
+        built = [
+            valgrind_bin,
+            "--tool=cachegrind",
+            f"--cachegrind-out-file={cg_out}",
+        ]
+        if log_file:
+            built.append(f"--log-file={log_file}")
+        built.extend(cmd)
+        return built
+
+    @staticmethod
+    def parse_perf_stat_instructions(text: str) -> int | None:
+        """Parse `perf stat -x , -e instructions` CSV output, summing hybrid PMU rows."""
+        if not text:
+            return None
+        total = 0
+        found = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            if "instructions" not in parts[2].lower():
+                continue
+            raw_val = parts[0]
+            if not raw_val or raw_val.startswith("<"):
+                continue
+            cleaned_num = raw_val.replace("_", "").replace(" ", "")
+            if not re.fullmatch(r"\d+", cleaned_num):
+                continue
+            val = int(cleaned_num)
+            if val > 0:
+                total += val
+                found = True
+        return total if found and total > 0 else None
+
+    @staticmethod
+    def parse_cachegrind_irefs(text: str) -> int | None:
+        """Parse deterministic instruction read count (`I refs` / `Ir`) from Cachegrind output."""
+        if not text:
+            return None
+        match = re.search(r"I\s+refs\s*:\s*([0-9][0-9,\s_]*)", text)
+        if match:
+            digits = re.sub(r"[,_\s]", "", match.group(1))
+            if digits.isdigit() and int(digits) > 0:
+                return int(digits)
+        if re.search(r"^events:\s*.*\bIr\b", text, re.MULTILINE):
+            summary_m = re.search(r"^summary:\s*([0-9]+)\b", text, re.MULTILINE)
+            if summary_m and int(summary_m.group(1)) > 0:
+                return int(summary_m.group(1))
+        return None
     @classmethod
     def get_cpu_times_ms(cls, proc: psutil.Process) -> float:
         try:
@@ -123,11 +231,143 @@ class DynamicExecutionMonitor:
         memory_limit_mb: float = 512.0,
         cwd: str | None = None,
         baseline_overhead_ms: float = 0.0,
+        metric: str | None = None,
+    ) -> dict[str, Any]:
+        abs_cwd = os.path.abspath(cwd) if cwd is not None else None
+        effective_cmd = cls._abs_cmd(cmd, abs_cwd)
+        requested = cls.resolve_metric_backend(metric)
+
+        wrapper_kind = "cpu_time"
+        wrapper_bin: str | None = None
+        if requested in ("auto", "perf") and sys.platform.startswith("linux"):
+            perf_bin = shutil.which("perf")
+            if perf_bin:
+                wrapper_kind = "perf"
+                wrapper_bin = perf_bin
+        elif (
+            requested == "cachegrind"
+            and sys.platform != "win32"
+            and not (effective_cmd and effective_cmd[0].startswith("-"))
+        ):
+            vg_bin = shutil.which("valgrind")
+            if vg_bin:
+                wrapper_kind = "cachegrind"
+                wrapper_bin = vg_bin
+
+        if wrapper_kind == "cpu_time" or wrapper_bin is None:
+            res = await cls._run_monitored_once(
+                effective_cmd,
+                input_file_path,
+                time_limit_ms=time_limit_ms,
+                memory_limit_mb=memory_limit_mb,
+                abs_cwd=abs_cwd,
+                baseline_overhead_ms=baseline_overhead_ms,
+            )
+            res["instruction_count"] = None
+            res["metric_backend"] = "cpu_time"
+            return res
+
+        with tempfile.TemporaryDirectory(prefix="autocode_metric_") as tmp_dir:
+            if wrapper_kind == "perf":
+                stat_file = os.path.join(tmp_dir, "perf_stat.csv")
+                wrapped_cmd = cls.build_perf_command(
+                    effective_cmd, perf_bin=wrapper_bin, output_file=stat_file
+                )
+            else:
+                stat_file = os.path.join(tmp_dir, "cachegrind.log")
+                wrapped_cmd = cls.build_cachegrind_command(
+                    effective_cmd,
+                    valgrind_bin=wrapper_bin,
+                    cachegrind_out=os.devnull,
+                    log_file=stat_file,
+                )
+
+            wrapper_time_limit_ms = (
+                max(time_limit_ms * 10.0, 15000.0)
+                if wrapper_kind == "cachegrind"
+                else time_limit_ms
+            )
+            res = await cls._run_monitored_once(
+                wrapped_cmd,
+                input_file_path,
+                time_limit_ms=wrapper_time_limit_ms,
+                memory_limit_mb=memory_limit_mb,
+                abs_cwd=abs_cwd,
+                baseline_overhead_ms=baseline_overhead_ms,
+            )
+
+            if (
+                wrapper_kind == "perf"
+                and res.get("status") == "ok"
+                and cls._perf_stderr_indicates_signal(
+                    str(res.get("stderr") or ""), effective_cmd
+                )
+            ):
+                bare_res = await cls._run_monitored_once(
+                    effective_cmd,
+                    input_file_path,
+                    time_limit_ms=time_limit_ms,
+                    memory_limit_mb=memory_limit_mb,
+                    abs_cwd=abs_cwd,
+                    baseline_overhead_ms=baseline_overhead_ms,
+                )
+                if bare_res.get("status") != "ok":
+                    bare_res["instruction_count"] = None
+                    bare_res["metric_backend"] = "cpu_time"
+                    return bare_res
+
+            metric_text = ""
+            if os.path.isfile(stat_file):
+                try:
+                    with open(stat_file, encoding="utf-8", errors="replace") as mf:
+                        metric_text = mf.read()
+                except OSError:
+                    metric_text = ""
+            if not metric_text.strip():
+                metric_text = str(res.get("stderr") or "")
+
+            inst_count = (
+                cls.parse_perf_stat_instructions(metric_text)
+                if wrapper_kind == "perf"
+                else cls.parse_cachegrind_irefs(metric_text)
+            )
+
+            if inst_count is not None:
+                res["instruction_count"] = inst_count
+                res["metric_backend"] = wrapper_kind
+                return res
+
+            if res.get("status") == "runtime_error":
+                # Wrapper likely failed permissions or startup; re-run bare command under cpu_time
+                fallback_res = await cls._run_monitored_once(
+                    effective_cmd,
+                    input_file_path,
+                    time_limit_ms=time_limit_ms,
+                    memory_limit_mb=memory_limit_mb,
+                    abs_cwd=abs_cwd,
+                    baseline_overhead_ms=baseline_overhead_ms,
+                )
+                fallback_res["instruction_count"] = None
+                fallback_res["metric_backend"] = "cpu_time"
+                return fallback_res
+
+            res["instruction_count"] = None
+            res["metric_backend"] = "cpu_time"
+            return res
+
+    @classmethod
+    async def _run_monitored_once(
+        cls,
+        effective_cmd: list[str],
+        input_file_path: str,
+        *,
+        time_limit_ms: float = 2000.0,
+        memory_limit_mb: float = 512.0,
+        abs_cwd: str | None = None,
+        baseline_overhead_ms: float = 0.0,
     ) -> dict[str, Any]:
         timeout_sec = max(0.1, time_limit_ms / 1000.0)
         max_output_bytes = 10 * 1024 * 1024  # 10MB 输出上限，防止管道填满挂起
-        abs_cwd = os.path.abspath(cwd) if cwd is not None else None
-        effective_cmd = cls._abs_cmd(cmd, abs_cwd)
 
         popen_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
@@ -532,4 +772,6 @@ class DynamicExecutionMonitor:
                 "cpu_time_ms": final_cpu_ms,
                 "wall_time_ms": round(wall_ms, 2),
                 "memory_mb": round(peak_memory_mb, 2),
+                "instruction_count": None,
+                "metric_backend": "cpu_time",
             }

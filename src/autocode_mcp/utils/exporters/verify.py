@@ -85,7 +85,10 @@ def verify_exported_packages(
         tc_node = root.find(".//judging/testset/test-count")
         in_pat_node = root.find(".//judging/testset/input-path-pattern")
         ans_pat_node = root.find(".//judging/testset/answer-path-pattern")
-        is_xml_interactive = root.find(".//judging/testset/interactor") is not None and root.find(".//judging/testset/communication") is None
+        is_xml_protocol = (
+            root.find(".//judging/testset/interactor") is not None
+            or root.find(".//judging/testset/communication") is not None
+        )
         try:
             tl_val = int(tl_node.text.strip()) if (tl_node is not None and tl_node.text) else None
             ml_bytes = int(ml_node.text.strip()) if (ml_node is not None and ml_node.text) else None
@@ -140,7 +143,7 @@ def verify_exported_packages(
             in_pat = (in_pat_node.text or "").strip() if in_pat_node is not None else "tests/%02d.in"
             ans_pat = (ans_pat_node.text or "").strip() if ans_pat_node is not None else "tests/%02d.ans"
             in_pat_ok = bool(_SAFE_POLYGON_TEST_PAT_RE.fullmatch(in_pat))
-            ans_pat_ok = is_xml_interactive or bool(_SAFE_POLYGON_TEST_PAT_RE.fullmatch(ans_pat))
+            ans_pat_ok = is_xml_protocol or bool(_SAFE_POLYGON_TEST_PAT_RE.fullmatch(ans_pat))
             if not in_pat_ok:
                 c_errors.append(f"{label}: unsafe or invalid input-path-pattern: {in_pat!r}")
             if not ans_pat_ok:
@@ -153,7 +156,7 @@ def verify_exported_packages(
                         container_path, in_rel, zip_names=zip_names
                     ):
                         missing_tests.append(in_rel)
-                    if not is_xml_interactive:
+                    if not is_xml_protocol:
                         ans_rel = ans_pat % idx
                         if not _is_safe_export_rel_path(ans_rel) or not _export_has_member(
                             container_path, ans_rel, zip_names=zip_names
@@ -356,6 +359,8 @@ def verify_exported_packages(
                 ml_val = _safe_qoj_int("memory_limit")
                 n_tests_val = _safe_qoj_int("n_tests")
                 is_qoj_interactive = parsed.get("interaction_mode", "").lower() == "on"
+                is_qoj_communication = bool(parsed.get("communication_mode", "").strip())
+                is_qoj_protocol = is_qoj_interactive or is_qoj_communication
                 output_suf = parsed.get("output_suf", "ans").lstrip(".") or "ans"
                 output_suf_safe = bool(_SAFE_QOJ_SUF_RE.fullmatch(output_suf))
                 if not output_suf_safe:
@@ -396,7 +401,7 @@ def verify_exported_packages(
                             ):
                                 q_errors.append(f"qoj export missing data/{idx}.in")
                                 break
-                            if not is_qoj_interactive and output_suf_safe and not _export_has_member(
+                            if not is_qoj_protocol and output_suf_safe and not _export_has_member(
                                 q_container,
                                 f"data/{idx}.{output_suf}",
                                 zip_names=q_zip_names,

@@ -18,6 +18,7 @@ from ..utils.communication_runner import (
     safe_resolve_under_root,
 )
 from ..utils.platform import get_exe_extension
+from ..utils.problem_layout import discover_wrong_solution_files
 from ..workflow import (
     AutoCodeManifest,
     current_platform,
@@ -190,11 +191,8 @@ def _compute_dataset_fingerprint(
         "files/grader.cpp",
         "files/problem.h",
     ]
-    sols_dir = Path(problem_dir) / "solutions"
-    if sols_dir.is_dir() and not sols_dir.is_symlink():
-        for wf in sorted(sols_dir.glob("wrong_*.cpp")):
-            if wf.is_file() and not wf.is_symlink() and is_safe_stem(wf.stem):
-                source_rels.append(f"solutions/{wf.name}")
+    for wf in discover_wrong_solution_files(Path(problem_dir), search_dirs=("solutions",)):
+        source_rels.append(f"solutions/{wf.name}")
     if manifest is not None:
         if manifest.protocol is not None:
             for p_rel in (
@@ -243,17 +241,9 @@ def _discover_wrong_solution_names(
                 if s.path:
                     declared_stems.add(Path(s.path).stem)
     disk_wrongs: list[str] = []
-    sols_dir = Path(problem_dir) / "solutions"
-    if sols_dir.is_dir() and not sols_dir.is_symlink():
-        for wf in sorted(sols_dir.glob("wrong_*.cpp")):
-            if (
-                wf.is_file()
-                and not wf.is_symlink()
-                and is_safe_stem(wf.stem)
-                and safe_resolve_under_root(problem_dir, f"solutions/{wf.name}") is not None
-                and wf.stem not in disk_wrongs
-            ):
-                disk_wrongs.append(wf.stem)
+    for wf in discover_wrong_solution_files(Path(problem_dir), search_dirs=("solutions",)):
+        if wf.stem not in disk_wrongs:
+            disk_wrongs.append(wf.stem)
     undeclared = [name for name in disk_wrongs if name not in declared_stems]
 
     combined: list[str] = []

@@ -30,6 +30,22 @@ class GateIssue:
     reason: str
 
 
+def effective_require_wrong_solution_kill(manifest: AutoCodeManifest) -> bool:
+    """Return whether ``wrong_solution_kill`` is effectively enabled for ``manifest``.
+
+    When ``manifest.solutions`` contains at least one ``role == "wrong"`` entry and
+    ``"require_wrong_solution_kill"`` was not explicitly set in
+    ``manifest.quality_gates.model_fields_set``, treat it as enabled (``True``).
+    An explicit ``False`` in the manifest still opts out.
+    """
+    gates = manifest.quality_gates
+    if "require_wrong_solution_kill" in gates.model_fields_set:
+        return bool(gates.require_wrong_solution_kill)
+    if any(sol.role == "wrong" for sol in manifest.solutions):
+        return True
+    return bool(gates.require_wrong_solution_kill)
+
+
 def check_gates(
     manifest: AutoCodeManifest,
     workflow_state: dict,
@@ -56,7 +72,7 @@ def check_gates(
 
     signal_rules = [
         ("limit_semantics", gates.require_limit_semantics),
-        ("wrong_solution_kill", gates.require_wrong_solution_kill),
+        ("wrong_solution_kill", effective_require_wrong_solution_kill(manifest)),
         ("validator_check", gates.require_validator_check),
     ]
     for name, enabled in signal_rules:

@@ -110,6 +110,7 @@ def export_hydro(
 
     is_interactive = manifest_is_interactive(manifest)
     is_communication = manifest_is_communication(manifest)
+    answers_optional = is_interactive or is_communication
     spj_checker = manifest_uses_testlib_checker(manifest)
     comm_mode = (
         (manifest.protocol.mode if manifest.protocol else "run_twice")
@@ -118,7 +119,7 @@ def export_hydro(
     )
 
     safe_pairs = _collect_safe_test_pairs(
-        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
+        problem_dir, in_files, answer_ext, allow_missing_answer=answers_optional
     )
 
     zip_target: str | None = None
@@ -181,7 +182,7 @@ def export_hydro(
             stage_mode_used.add(
                 _stage_data_file(src_in, os.path.join(testdata_dir, in_file), effective_stage_arg)
             )
-            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
+            if answers_optional and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
                 if ans_file is not None:
                     omitted_empty_answers.append(ans_file)
                 case_pairs.append((in_file, None))

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +24,11 @@ from ..utils.communication_runner import resolve_participant_binaries, safe_reso
 from ..utils.exporters import verify_exported_packages
 from ..utils.mutation import run_mutation_testing
 from ..utils.platform import get_exe_extension
+from ..utils.problem_layout import (
+    DiscoveredTestPair,
+    discover_test_pairs,
+    stage_polygon_tests_to_dir,
+)
 from ..workflow import (
     check_gates,
     current_platform,
@@ -110,6 +117,7 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
         *,
         layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
         enable_mutation_testing: bool | None = None,
+        strict: bool = False,
     ) -> ToolResult:
         problem_path = Path(problem_dir)
         if not problem_path.is_dir():
@@ -161,9 +169,42 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
         workflow_state = {} if (standalone or autocode_escaped) else (get_section(problem_path, WORKFLOW) or {})
         tests_manifest = {} if autocode_escaped else (get_section(problem_path, TEST_MANIFEST) or {})
 
+        raw_tests_dir = (
+            self._resolve_tests_dir(problem_path, standalone=standalone, layout=detected_layout)
+            if not autocode_escaped
+            else None
+        )
+        escaped_tests = (
+            self._find_escaped_entries(problem_path, raw_tests_dir)
+            if (standalone and raw_tests_dir is not None)
+            else []
+        )
+        discovered_pairs: list[DiscoveredTestPair] = []
+        if standalone and raw_tests_dir is not None and not escaped_tests:
+            discovered_pairs = discover_test_pairs(
+                problem_path,
+                tests_dir=raw_tests_dir,
+                allow_missing_answer=True,
+            )
+
         structural_signals = self._structural_signals(
             problem_path, manifest, standalone=standalone, layout=detected_layout
         )
+        if (
+            standalone
+            and raw_tests_dir is not None
+            and not escaped_tests
+            and not structural_signals["tests_present"]["passed"]
+            and discovered_pairs
+        ):
+            structural_signals["tests_present"] = self._signal(
+                True,
+                {
+                    "total": len(discovered_pairs),
+                    "tests_dir": str(raw_tests_dir),
+                    "format": "polygon_or_custom",
+                },
+            )
         if manifest_inferred:
             structural_signals["manifest"] = self._signal(
                 True,
@@ -190,119 +231,165 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
 
         has_tests_manifest = bool(isinstance(tests_manifest, dict) and tests_manifest.get("tests"))
         max_duplicate_ratio = manifest.audit_gates.max_duplicate_input_ratio
-        static_quality = self._static_quality_signals(
-            problem_path,
-            standalone=standalone,
-            has_tests_manifest=has_tests_manifest,
-            layout=detected_layout,
-            max_near_duplicate_ratio=max_duplicate_ratio,
-        )
-        quality_signals.update(static_quality)
-        duplicate_signal = static_quality.get("duplicate_inputs", {})
-        duplicate_evidence = duplicate_signal.get("evidence", {}) if isinstance(duplicate_signal, dict) else {}
-        if mode == "full":
-            exact_dups = duplicate_evidence.get("exact_duplicates") or []
-            near_ratio = float(
-                duplicate_evidence.get(
-                    "near_duplicate_ratio",
-                    duplicate_evidence.get("duplicate_ratio", 0.0),
-                )
-            )
-            if duplicate_signal.get("executed") and (
-                bool(exact_dups)
-                or near_ratio > max_duplicate_ratio
-                or not duplicate_signal.get("passed")
+
+        with contextlib.ExitStack() as stage_stack:
+            staged_tests_dir: Path | None = None
+            staged_answer_ext: str | None = None
+            if (
+                standalone
+                and raw_tests_dir is not None
+                and not escaped_tests
+                and discovered_pairs
+                and not any(p.is_file() and p.suffix == ".in" for p in raw_tests_dir.iterdir())
             ):
-                dup_reason = (
-                    f"exact duplicate test inputs detected (zero tolerance): {exact_dups[:5]}"
-                    if exact_dups
-                    else "duplicate input ratio exceeds audit_gates.max_duplicate_input_ratio"
+                stage_root = stage_stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="autocode_poly_stage_",
+                        ignore_cleanup_errors=True,
+                    )
                 )
-                blocking.append({"gate": "duplicate_inputs", "reason": dup_reason})
-            for signal_name in ("scale_distribution", "purpose_coverage"):
-                signal = static_quality.get(signal_name, {})
-                if signal.get("executed") and not signal.get("passed"):
+                staged_tests_dir = Path(stage_root) / "tests"
+                staged_answer_ext = stage_polygon_tests_to_dir(
+                    problem_path,
+                    discovered_pairs,
+                    staged_tests_dir,
+                    source_tests_dir=raw_tests_dir,
+                )
+
+            static_quality = self._static_quality_signals(
+                problem_path,
+                standalone=standalone,
+                has_tests_manifest=has_tests_manifest,
+                layout=detected_layout,
+                max_near_duplicate_ratio=max_duplicate_ratio,
+            )
+            if staged_tests_dir is not None:
+                stage_verifier = ProblemVerifyTestsTool()
+                dup_res = stage_verifier._check_duplicate_inputs(
+                    str(staged_tests_dir), max_near_ratio=max_duplicate_ratio
+                )
+                scale_res = stage_verifier._check_scale_distribution(str(staged_tests_dir))
+                static_quality["duplicate_inputs"] = {
+                    "executed": True,
+                    "passed": bool(dup_res.get("passed")),
+                    "evidence": dup_res,
+                }
+                static_quality["scale_distribution"] = {
+                    "executed": True,
+                    "passed": bool(scale_res.get("passed")),
+                    "evidence": scale_res,
+                }
+            quality_signals.update(static_quality)
+            duplicate_signal = static_quality.get("duplicate_inputs", {})
+            duplicate_evidence = duplicate_signal.get("evidence", {}) if isinstance(duplicate_signal, dict) else {}
+            if mode == "full":
+                exact_dups = duplicate_evidence.get("exact_duplicates") or []
+                near_ratio = float(
+                    duplicate_evidence.get(
+                        "near_duplicate_ratio",
+                        duplicate_evidence.get("duplicate_ratio", 0.0),
+                    )
+                )
+                if duplicate_signal.get("executed") and (
+                    bool(exact_dups)
+                    or near_ratio > max_duplicate_ratio
+                    or not duplicate_signal.get("passed")
+                ):
+                    dup_reason = (
+                        f"exact duplicate test inputs detected (zero tolerance): {exact_dups[:5]}"
+                        if exact_dups
+                        else "duplicate input ratio exceeds audit_gates.max_duplicate_input_ratio"
+                    )
+                    blocking.append({"gate": "duplicate_inputs", "reason": dup_reason})
+                for signal_name in ("scale_distribution", "purpose_coverage"):
+                    signal = static_quality.get(signal_name, {})
+                    if signal.get("executed") and not signal.get("passed"):
+                        blocking.append(
+                            {
+                                "gate": signal_name,
+                                "reason": f"quality signal `{signal_name}` not satisfied",
+                            }
+                        )
+
+            run_mut = (
+                enable_mutation_testing
+                if enable_mutation_testing is not None
+                else bool(manifest.audit_gates.enable_mutation_testing)
+            )
+            if standalone:
+                await self._run_standalone_live_checks(
+                    problem_path=problem_path,
+                    manifest=manifest,
+                    tests_manifest=tests_manifest if isinstance(tests_manifest, dict) else {},
+                    mode=mode,
+                    layout=detected_layout,
+                    quality_signals=quality_signals,
+                    blocking=blocking,
+                    warnings=warnings,
+                    run_mutation=bool(mode == "full" and run_mut),
+                    staged_tests_dir=staged_tests_dir,
+                    staged_answer_ext=staged_answer_ext,
+                )
+            elif mode == "full":
+                self._require_full_verify_gates(
+                    manifest=manifest,
+                    workflow_state=workflow_state,
+                    quality_signals=quality_signals,
+                    blocking=blocking,
+                    next_actions=next_actions,
+                )
+                await self._require_special_artifact_gates(
+                    problem_path=problem_path,
+                    manifest=manifest,
+                    quality_signals=quality_signals,
+                    blocking=blocking,
+                    next_actions=next_actions,
+                )
+                empirical_signal = await self._empirical_complexity_signal(problem_path, manifest)
+                quality_signals["empirical_complexity"] = empirical_signal
+                if empirical_signal.get("executed") and not empirical_signal.get("passed"):
+                    evidence = empirical_signal.get("evidence")
+                    failure_reason = (
+                        str(
+                            evidence.get("failure_reason")
+                            or evidence.get("message")
+                            or "empirical complexity verification failed"
+                        )
+                        if isinstance(evidence, dict)
+                        else "empirical complexity verification failed"
+                    )
                     blocking.append(
                         {
-                            "gate": signal_name,
-                            "reason": f"quality signal `{signal_name}` not satisfied",
+                            "gate": "empirical_complexity",
+                            "reason": failure_reason,
                         }
                     )
-
-        run_mut = (
-            enable_mutation_testing
-            if enable_mutation_testing is not None
-            else bool(manifest.audit_gates.enable_mutation_testing)
-        )
-        if standalone:
-            await self._run_standalone_live_checks(
-                problem_path=problem_path,
-                manifest=manifest,
-                tests_manifest=tests_manifest if isinstance(tests_manifest, dict) else {},
-                mode=mode,
-                layout=detected_layout,
-                quality_signals=quality_signals,
-                blocking=blocking,
-                warnings=warnings,
-                run_mutation=bool(mode == "full" and run_mut),
-            )
-        elif mode == "full":
-            self._require_full_verify_gates(
-                manifest=manifest,
-                workflow_state=workflow_state,
-                quality_signals=quality_signals,
-                blocking=blocking,
-                next_actions=next_actions,
-            )
-            await self._require_special_artifact_gates(
-                problem_path=problem_path,
-                manifest=manifest,
-                quality_signals=quality_signals,
-                blocking=blocking,
-                next_actions=next_actions,
-            )
-            empirical_signal = await self._empirical_complexity_signal(problem_path, manifest)
-            quality_signals["empirical_complexity"] = empirical_signal
-            if empirical_signal.get("executed") and not empirical_signal.get("passed"):
-                evidence = empirical_signal.get("evidence")
-                failure_reason = (
-                    str(
-                        evidence.get("failure_reason")
-                        or evidence.get("message")
-                        or "empirical complexity verification failed"
+                    next_actions.append(
+                        {
+                            "tool_name": "solution_analyze",
+                            "tool": "solution_analyze",
+                            "action": "verify_empirical_complexity",
+                            "recommended_arguments": {
+                                "problem_dir": str(problem_path),
+                                "solution_type": "sol",
+                            },
+                            "arguments": {
+                                "problem_dir": str(problem_path),
+                                "solution_type": "sol",
+                            },
+                            "priority": "high",
+                        }
                     )
-                    if isinstance(evidence, dict)
-                    else "empirical complexity verification failed"
-                )
-                blocking.append(
-                    {
-                        "gate": "empirical_complexity",
-                        "reason": failure_reason,
-                    }
-                )
-                next_actions.append(
-                    {
-                        "tool_name": "solution_analyze",
-                        "tool": "solution_analyze",
-                        "action": "verify_empirical_complexity",
-                        "recommended_arguments": {
-                            "problem_dir": str(problem_path),
-                            "solution_type": "sol",
-                        },
-                        "arguments": {
-                            "problem_dir": str(problem_path),
-                            "solution_type": "sol",
-                        },
-                        "priority": "high",
-                    }
-                )
 
         statement_consistency = self._statement_consistency(problem_path, manifest, tests_manifest)
         if statement_consistency["needs_human_review"]:
             warnings.append(
                 {
                     "gate": "statement_consistency",
-                    "reason": "natural-language statement/constraint equivalence needs human review",
+                    "reason": str(
+                        statement_consistency.get("review_reason")
+                        or "natural-language statement/constraint equivalence needs human review"
+                    ),
                 }
             )
         if manifest.audit_gates.require_statement_consistency and not statement_consistency["passed"]:
@@ -386,11 +473,22 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             tests_dir_for_exp = self._resolve_tests_dir(
                 problem_path, standalone=standalone, layout=detected_layout
             )
-            exp_test_count = (
-                len(list(tests_dir_for_exp.glob("*.in")))
-                if tests_dir_for_exp is not None
-                else None
-            )
+            if tests_dir_for_exp is not None:
+                in_count = len(list(tests_dir_for_exp.glob("*.in")))
+                if in_count > 0:
+                    exp_test_count = in_count
+                elif not self._find_escaped_entries(problem_path, tests_dir_for_exp):
+                    exp_test_count = len(
+                        discover_test_pairs(
+                            problem_path,
+                            tests_dir=tests_dir_for_exp,
+                            allow_missing_answer=True,
+                        )
+                    )
+                else:
+                    exp_test_count = 0
+            else:
+                exp_test_count = None
             raw_packaged_tl = workflow_state.get("packaged_time_limit_ms")
             packaged_tl = (
                 int(raw_packaged_tl)
@@ -491,8 +589,47 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
                         }
                     )
 
+        completeness_warnings: list[dict[str, str]] = []
+        if standalone:
+            exe_ext = get_exe_extension()
+            uses_protocol = manifest_uses_protocol_judge(manifest)
+            validator_needed = (not uses_protocol) or bool(manifest.quality_gates.require_validator_check)
+            has_validator = (
+                self._find_validator_source(problem_path, standalone=True) is not None
+                or self._safe_file(problem_path, f"files/val{exe_ext}") is not None
+            )
+            if validator_needed and not has_validator:
+                completeness_warnings.append(
+                    {
+                        "gate": "validator_check",
+                        "reason": (
+                            "standalone package is missing a test validator (val.cpp); "
+                            "input constraints are unverified"
+                        ),
+                    }
+                )
+            has_wrong_entries = any(s.role == "wrong" for s in manifest.solutions)
+            if not has_wrong_entries:
+                completeness_warnings.append(
+                    {
+                        "gate": "wrong_solution_kill",
+                        "reason": (
+                            "standalone package has no wrong solutions (wrong_*.cpp / wrong-*.cpp / "
+                            "problem.xml rejected); test strength against buggy solutions is unverified"
+                        ),
+                    }
+                )
+            if completeness_warnings:
+                if strict:
+                    existing_gates = {b.get("gate") for b in blocking}
+                    for cw in completeness_warnings:
+                        if cw["gate"] not in existing_gates:
+                            blocking.append(dict(cw))
+                else:
+                    warnings.extend(dict(cw) for cw in completeness_warnings)
+
         decision = "go" if not blocking else "no_go"
-        report = {
+        report: dict[str, Any] = {
             "decision": decision,
             "mode": mode,
             "standalone": standalone,
@@ -512,6 +649,9 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             "communication_metrics": communication_metrics,
             "next_actions": next_actions,
         }
+        if standalone:
+            report["completeness_warnings"] = completeness_warnings
+            report["strict"] = strict
 
         resolved_report_path = self._write_report(problem_path, report, report_path)
         if resolved_report_path:

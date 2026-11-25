@@ -148,11 +148,11 @@ uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v3.3.0
 # uv tool install autocode_mcp-3.3.0-py3-none-any.whl
 ```
 
-对任意外部题包执行**只读自动验题**（支持 `--layout auto|autocode|standard_cn|polygon|hydro`、可选 `--mutation-check` 单点变异测试，以及 `--format json|markdown|summary`）：
+对任意外部题包执行**只读自动验题**（支持 `--layout auto|autocode|standard_cn|polygon|hydro`、可选 `--mutation-check` 单点变异测试、`--strict` 严格完整性门控，以及 `--format json|markdown|summary`）：
 
 ```bash
 autocode-audit /path/to/problem_dir \
-  --standalone --layout auto --mutation-check \
+  --standalone --layout auto --mutation-check --strict \
   --format markdown --report audit_report.json
 ```
 
@@ -353,8 +353,8 @@ AutoCode 暴露 22 个 MCP 原子工具。日常自动出题时无需手动调�
 # 对 AutoCode 题目工作区执行全量审计
 autocode-audit <problem_dir> --mode full --format markdown --report audit_report.json
 
-# 对任意外部题包执行零写入独立验题
-autocode-audit <problem_dir> --standalone --layout auto --mutation-check --format markdown
+# 对任意外部题包执行零写入独立验题（追加 --strict 可将缺失 validator/错解从告警升级为阻断项）
+autocode-audit <problem_dir> --standalone --layout auto --mutation-check --strict --format markdown
 ```
 
 若在 `manifest.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包导出。

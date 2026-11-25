@@ -42,6 +42,25 @@ from .base import Tool, ToolResult, input_schema_from_model
 from .problem_helpers import _LIMIT_STRATEGY_TYPES
 from .schemas import ProblemPackPolygonInput
 
+_WRONG_SOLUTION_PREFIXES = (
+    "wrong_",
+    "wrong-",
+    "wa_",
+    "wa-",
+    "tle_",
+    "tle-",
+    "mle_",
+    "mle-",
+    "re_",
+    "re-",
+)
+
+
+def _is_wrong_solution_filename(fname: str) -> bool:
+    if not fname.endswith(".cpp"):
+        return False
+    return fname == "bf.cpp" or fname.startswith(_WRONG_SOLUTION_PREFIXES)
+
 
 def _pack_polygon_files(problem_dir: str) -> dict[str, list[str]]:
     """创建 Polygon 标准目录并拷贝源文件，返回操作汇总。"""
@@ -412,8 +431,8 @@ class ProblemPackPolygonTool(Tool):
         if manifest_model is None:
             manifest_model = default_manifest(os.path.basename(os.path.normpath(problem_dir)))
 
-        # 交互题允许无 .ans 文件（或由 Hydro/QOJ 导出器忽略空 .ans）；非交互题强制要求成对答案文件
-        if not manifest_is_interactive(manifest_model):
+        # 交互题与通信题允许无 .ans 文件（或由导出器忽略空/缺失 .ans）；标准题与 SPJ 强制要求成对答案文件
+        if not (manifest_is_interactive(manifest_model) or manifest_is_communication(manifest_model)):
             missing_answers = [
                 in_file for in_file in in_files if not os.path.exists(
                     os.path.join(tests_dir, f"{os.path.splitext(in_file)[0]}{answer_ext}")
@@ -730,7 +749,7 @@ class ProblemPackPolygonTool(Tool):
             except (ValueError, OSError) as exc:
                 return ToolResult.fail(f"QOJ export failed: {exc}")
 
-        # Scan for undeclared solutions/wrong_*.cpp on disk to prevent manifest/problem.xml desync
+        # Scan for undeclared wrong solutions on disk to prevent manifest/problem.xml desync
         pack_warnings: list[str] = []
         declared_sol_paths = {PurePosixPath(s.path.replace("\\", "/")).as_posix().lstrip("./") for s in manifest_model.solutions}
         sols_dir = os.path.join(problem_dir, "solutions")
@@ -738,8 +757,8 @@ class ProblemPackPolygonTool(Tool):
             undeclared_wrongs = sorted(
                 f"solutions/{fname}"
                 for fname in os.listdir(sols_dir)
-                if fname.startswith("wrong_")
-                and fname.endswith(".cpp")
+                if os.path.isfile(os.path.join(sols_dir, fname))
+                and _is_wrong_solution_filename(fname)
                 and f"solutions/{fname}" not in declared_sol_paths
             )
             if undeclared_wrongs:

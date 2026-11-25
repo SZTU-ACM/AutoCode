@@ -58,6 +58,9 @@ Orchestration requirements:
 - If the MCP server returns a gate denial, or a Claude hook reports one early, treat it as authoritative and fix the missing gate.
 - Prefer MCP structured results and workflow state over file-presence assumptions.
 - Stop progression immediately when any gate fails; provide a fix-first plan.
+- Require both positive (`expected_valid=True`) and negative (`expected_valid=False`) cases for `validator_build` (a `return 0;` validator cannot pass `validator_ready` on positive-only tests).
+- After `generator_build`, re-running `solution_analyze`, `solution_audit_std`, or `solution_audit_brute` with unchanged canonical source SHA-256 executes dynamic empirical fitting (`std_empirical_verified`) and brute probes (`brute_probed`) without resetting prior gates, while failing closed if a dynamic probe fails.
+- When `manifest.solutions` declares any `role == "wrong"` solution and `quality_gates.require_wrong_solution_kill` is omitted, treat `wrong_solution_kill` as effectively enabled (`True`) unless explicitly set to `false` in the manifest.
 
 ## Test-Quality Requirements
 

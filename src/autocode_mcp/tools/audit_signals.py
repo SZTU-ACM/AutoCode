@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +26,8 @@ from ..workflow.guard import signal_satisfied as _guard_signal_satisfied
 from .audit_discovery import _AuditDiscoveryMixin
 from .complexity import (
     _higher_complexity,
+    _strip_cpp_comments_and_strings,
+    analyze_cpp_interprocedural,
     estimate_static_complexity,
     extract_constraint_numbers,
     extract_n_max_from_constraints,
@@ -311,26 +314,33 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
         manifest: AutoCodeManifest,
         quality_signals: dict[str, dict],
     ) -> dict[str, object]:
-        sol_source = self._solution_source(problem_path, "sol")
+        """Assemble objective, evidence-only problem difficulty signals without pseudo-Elo tables."""
+        sol_source = self._solution_source(problem_path, "sol") or self._find_main_solution_source(
+            problem_path, manifest
+        )
         code = sol_source.read_text(encoding="utf-8", errors="replace") if sol_source else ""
-        complexity, tags = estimate_static_complexity(code) if code else ("unknown", [])
+        static_complexity, tags = estimate_static_complexity(code) if code else ("unknown", [])
+        complexity = static_complexity
 
         empirical_signal = quality_signals.get("empirical_complexity", {})
-        if self._signal_satisfied(empirical_signal):
-            emp_ev = empirical_signal.get("evidence", {})
-            emp_verdict = emp_ev.get("verdict")
-            fitted_comp = emp_ev.get("fitted_complexity")
-            r2 = emp_ev.get("r_squared")
-            low_snr_noise = (
-                emp_verdict in ("verified_within_noise_floor", "verified_with_cache_jump")
-                or (isinstance(r2, int | float) and float(r2) < 0.5)
-                or (
-                    fitted_comp == "O(1)"
-                    and complexity not in ("unknown", "O(1)", "O(log n)")
-                )
+        empirical_satisfied = self._signal_satisfied(empirical_signal)
+        emp_ev = empirical_signal.get("evidence", {}) if isinstance(empirical_signal, dict) else {}
+        if not isinstance(emp_ev, dict):
+            emp_ev = {}
+        emp_verdict = emp_ev.get("verdict")
+        fitted_comp = emp_ev.get("fitted_complexity")
+        r2 = emp_ev.get("r_squared")
+        low_snr_noise = (
+            emp_verdict in ("verified_within_noise_floor", "verified_with_cache_jump")
+            or (isinstance(r2, int | float) and not isinstance(r2, bool) and float(r2) < 0.5)
+            or (
+                fitted_comp == "O(1)"
+                and static_complexity not in ("unknown", "O(1)", "O(log n)")
             )
-            if fitted_comp and not low_snr_noise:
-                complexity = str(fitted_comp)
+        )
+        empirical_adopted = bool(empirical_satisfied and fitted_comp and not low_snr_noise)
+        if empirical_adopted:
+            complexity = str(fitted_comp)
 
         constraint_numbers = self._constraint_numbers(manifest.constraints)
         raw_largest = max(constraint_numbers) if constraint_numbers else None
@@ -340,59 +350,99 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
         largest_value_bound = raw_largest if (raw_largest and n_max and raw_largest > n_max) else None
         wrong_count = sum(1 for s in manifest.solutions if s.role == "wrong")
         limit_ratio = self._limit_ratio(problem_path)
+        tl_ms = float(manifest.time_limit_ms) if manifest.time_limit_ms > 0 else 2000.0
+        tl_headroom_ratio = self._extract_tl_headroom_ratio(emp_ev, quality_signals, tl_ms)
+        wrong_kill_summary = self._summarize_wrong_kill(quality_signals.get("wrong_solution_kill", {}))
 
-        base = {
-            "unknown": 1200,
-            "O(1)": 800,
-            "O(log n)": 900,
-            "O(n)": 1100,
-            "O(n log n)": 1400,
-            "O(n sqrt n)": 1550,
-            "O(n^2)": 1700,
-            "O(n^3)": 2100,
-            "O(2^n)": 2400,
-            "O(n!)": 2600,
-        }.get(complexity, 1200)
-        if n_max and n_max >= 200000:
-            base += 100
-        if len(tags) >= 2:
-            base += 100
-        if wrong_count >= 2:
-            base += 100
-        if limit_ratio is not None and limit_ratio >= 0.5:
-            base += 100
-        rating = min(3500, max(800, int(round(base / 100) * 100)))
+        statement_present = self._safe_file(problem_path, manifest.statement_path) is not None
+        tutorial_present = self._safe_file(problem_path, manifest.tutorial_path) is not None
 
-        confidence = 0.35
+        # Confidence measures purely evidence completeness (invariant to wrong_count and complexity value)
+        confidence = 0.0
         if code:
-            confidence += 0.25
+            confidence += 0.30
         if n_max or constraint_numbers:
             confidence += 0.15
         if self._signal_satisfied(quality_signals.get("answer_consistency", {})):
-            confidence += 0.1
+            confidence += 0.20
         if self._signal_satisfied(quality_signals.get("limit_semantics", {})):
-            confidence += 0.1
-        if self._signal_satisfied(empirical_signal):
-            confidence += 0.1
-        confidence = min(1.0, confidence)
+            confidence += 0.15
+        if empirical_satisfied:
+            confidence += 0.15
+        if statement_present:
+            confidence += 0.05
+        confidence = round(min(1.0, max(0.0, confidence)), 3)
+
+        cognitive_dimensions = self._build_cognitive_dimensions(
+            code=code,
+            manifest=manifest,
+            tags=tags,
+            complexity=complexity,
+            static_complexity=static_complexity,
+            fitted_complexity=str(fitted_comp) if fitted_comp else None,
+            empirical_adopted=empirical_adopted,
+            n_max=n_max,
+            largest_value_bound=largest_value_bound,
+            statement_present=statement_present,
+            tutorial_present=tutorial_present,
+            wrong_kill_summary=wrong_kill_summary,
+        )
 
         reasons = [
-            f"estimated_complexity={complexity}",
+            "rating_method=evidence_only_v2 (uncalibrated; calibration_required=True)",
+            f"estimated_complexity={complexity} (static={static_complexity})",
             f"algorithm_tags={tags or ['unknown']}",
         ]
-        if n_max:
-            reasons.append(f"largest_numeric_constraint={n_max}")
+        if n_max is not None:
+            reasons.append(f"n_max={n_max}")
+        if largest_value_bound is not None:
+            reasons.append(f"largest_value_bound={largest_value_bound}")
+        if tl_headroom_ratio is not None:
+            reasons.append(f"tl_headroom_ratio={tl_headroom_ratio:.4f}")
         if wrong_count:
             reasons.append(f"wrong_solution_count={wrong_count}")
         if limit_ratio is not None:
             reasons.append(f"limit_case_ratio={limit_ratio:.2f}")
 
+        structural_evidence: dict[str, object] = {
+            "static_complexity": static_complexity,
+            "empirical_complexity": {
+                "executed": bool(empirical_signal.get("executed", False))
+                if isinstance(empirical_signal, dict)
+                else False,
+                "passed": bool(empirical_signal.get("passed", False))
+                if isinstance(empirical_signal, dict)
+                else False,
+                "status": emp_ev.get("status"),
+                "verdict": emp_verdict,
+                "fitted_complexity": fitted_comp,
+                "r_squared": r2,
+                "fit_metric": emp_ev.get("fit_metric"),
+                "adopted": empirical_adopted,
+            },
+            "n_max": n_max,
+            "largest_value_bound": largest_value_bound,
+            "time_limit_ms": manifest.time_limit_ms,
+            "memory_limit_mb": manifest.memory_limit_mb,
+            "tl_headroom_ratio": tl_headroom_ratio,
+            "limit_case_ratio": limit_ratio,
+            "wrong_solution_count": wrong_count,
+            "wrong_kill": wrong_kill_summary,
+            "solution_source": str(sol_source) if sol_source else None,
+            "solution_lines": len(code.splitlines()) if code else 0,
+        }
+
         return {
-            "rating": rating,
-            "band": self._difficulty_band(rating),
+            "rating": None,
+            "band": "uncalibrated",
+            "calibration_required": True,
+            "rating_method": "evidence_only_v2",
             "confidence": confidence,
             "estimated_complexity": complexity,
             "algorithm_tags": tags,
+            "reasons": reasons,
+            "structural_evidence": structural_evidence,
+            "cognitive_dimensions": cognitive_dimensions,
             "constraint_scale": {
                 "largest_numeric_constraint": n_max,
                 **({"largest_value_bound": largest_value_bound} if largest_value_bound else {}),
@@ -405,9 +455,197 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
                 "wrong_solution_count": wrong_count,
                 "limit_case_ratio": limit_ratio,
             },
-            "reasons": reasons,
-            "why_not_lower": "higher complexity/tags/data-strength evidence prevents a lower default rating",
-            "why_not_higher": "no calibrated submission statistics are available in v1",
+        }
+
+    @staticmethod
+    def _extract_tl_headroom_ratio(
+        emp_ev: dict[str, Any],
+        quality_signals: dict[str, dict],
+        tl_ms: float,
+    ) -> float | None:
+        if tl_ms <= 0:
+            return None
+        direct_ratio = emp_ev.get("max_scale_headroom_ratio")
+        if isinstance(direct_ratio, int | float) and not isinstance(direct_ratio, bool):
+            return round(float(direct_ratio), 4)
+        samples = emp_ev.get("samples")
+        if isinstance(samples, list):
+            times = [
+                float(s["cpu_time_ms"])
+                for s in samples
+                if isinstance(s, dict)
+                and s.get("status") == "ok"
+                and isinstance(s.get("cpu_time_ms"), int | float)
+                and not isinstance(s.get("cpu_time_ms"), bool)
+            ]
+            if times:
+                return round(max(times) / tl_ms, 4)
+        wrong_sig = quality_signals.get("wrong_solution_kill", {})
+        wrong_ev = wrong_sig.get("evidence", {}) if isinstance(wrong_sig, dict) else {}
+        details = wrong_ev.get("details", []) if isinstance(wrong_ev, dict) else []
+        if isinstance(details, list):
+            std_times = [
+                float(item["std_max_time_ms"])
+                for item in details
+                if isinstance(item, dict)
+                and isinstance(item.get("std_max_time_ms"), int | float)
+                and not isinstance(item.get("std_max_time_ms"), bool)
+            ]
+            if std_times:
+                return round(max(std_times) / tl_ms, 4)
+        return None
+
+    @staticmethod
+    def _summarize_wrong_kill(wrong_sig: object) -> dict[str, Any]:
+        if not isinstance(wrong_sig, dict):
+            return {
+                "executed": False,
+                "passed": None,
+                "total_checked": 0,
+                "killed_count": 0,
+                "survived_count": 0,
+                "kill_rate": None,
+                "details": [],
+            }
+        executed = bool(wrong_sig.get("executed", False))
+        passed = bool(wrong_sig.get("passed")) if executed else None
+        ev = wrong_sig.get("evidence", {})
+        raw_details = ev.get("details", []) if isinstance(ev, dict) else []
+        summarized: list[dict[str, Any]] = []
+        killed_count = 0
+        if isinstance(raw_details, list):
+            for item in raw_details:
+                if not isinstance(item, dict):
+                    continue
+                is_killed = bool(item.get("killed", False))
+                if is_killed:
+                    killed_count += 1
+                summarized.append(
+                    {
+                        "name": str(item.get("name", "unknown")),
+                        "expected": str(item.get("expected") or "fail"),
+                        "killed": is_killed,
+                        "killing_verdict": item.get("killing_verdict"),
+                        "max_time_ms": item.get("max_time_ms"),
+                        "max_ratio_to_std": item.get("max_ratio_to_std"),
+                    }
+                )
+        total = len(summarized)
+        survived_count = max(0, total - killed_count)
+        kill_rate = round(killed_count / total, 4) if total > 0 else None
+        return {
+            "executed": executed,
+            "passed": passed,
+            "total_checked": total,
+            "killed_count": killed_count,
+            "survived_count": survived_count,
+            "kill_rate": kill_rate,
+            "details": summarized,
+        }
+
+    @staticmethod
+    def _build_cognitive_dimensions(
+        *,
+        code: str,
+        manifest: AutoCodeManifest,
+        tags: list[str],
+        complexity: str,
+        static_complexity: str,
+        fitted_complexity: str | None,
+        empirical_adopted: bool,
+        n_max: int | None,
+        largest_value_bound: int | None,
+        statement_present: bool,
+        tutorial_present: bool,
+        wrong_kill_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build LiveCodeBench-Pro-inspired Knowledge / Logic / Observation signal dimensions."""
+        ds_tags = {
+            "tree_data_structure",
+            "fenwick_tree",
+            "segment_tree",
+            "heap",
+            "hash_table",
+            "stack_queue",
+            "monotonic_stack",
+            "monotonic_queue",
+            "dsu",
+            "bitset",
+            "binary_lifting",
+        }
+        paradigm_tags = {
+            "dynamic_programming",
+            "bitmask_dp",
+            "bitmask",
+            "divide_and_conquer",
+            "binary_search",
+            "sorting",
+            "two_pointers",
+            "graph_traversal",
+            "dijkstra",
+            "bfs",
+            "dfs",
+            "backtracking",
+            "permutation_enumeration",
+            "recursion",
+        }
+        cleaned = _strip_cpp_comments_and_strings(code) if code else ""
+        summary = (
+            analyze_cpp_interprocedural(code, ignore_multitest=True, ignore_small_const=True)
+            if code
+            else None
+        )
+        branch_count = len(re.findall(r"\b(?:if|else|switch)\b", cleaned)) if cleaned else 0
+        mod_detected = bool(
+            re.search(r"\b(?:998244353|1000000007|1'000'000'007|MOD|mod)\b", cleaned)
+        )
+        requires_64bit = bool(
+            (n_max is not None and n_max > 2_147_483_647)
+            or (largest_value_bound is not None and largest_value_bound > 2_147_483_647)
+        )
+
+        return {
+            "knowledge_signals": {
+                "algorithm_tags": list(tags),
+                "data_structures": [t for t in tags if t in ds_tags],
+                "paradigms": [t for t in tags if t in paradigm_tags],
+                "requires_64bit_values": requires_64bit,
+                "modular_arithmetic_detected": mod_detected,
+            },
+            "logic_signals": {
+                "loop_nesting_depth": summary.max_depth if summary else 0,
+                "call_graph_depth": summary.call_graph_depth if summary else 0,
+                "function_count": summary.function_count if summary else 0,
+                "branch_count": branch_count,
+                "solution_lines": len(code.splitlines()) if code else 0,
+                "problem_type": manifest.problem_type,
+                "has_subtasks": bool(manifest.subtasks),
+                "requires_interprocedural_reasoning": bool(
+                    summary and summary.call_graph_depth >= 1 and summary.max_depth >= 2
+                ),
+            },
+            "observation_signals": {
+                "requires_llm_statement_calibration": True,
+                "statement_present": statement_present,
+                "tutorial_present": tutorial_present,
+                "low_complexity_high_scale": bool(
+                    n_max is not None
+                    and n_max >= 100_000
+                    and complexity in ("O(1)", "O(log n)", "O(n)", "O(n log n)")
+                ),
+                "wrong_solutions_killed": int(wrong_kill_summary.get("killed_count", 0)),
+                "wrong_solutions_survived": int(wrong_kill_summary.get("survived_count", 0)),
+                "complexity_divergence": bool(
+                    empirical_adopted
+                    and static_complexity != "unknown"
+                    and fitted_complexity is not None
+                    and fitted_complexity != static_complexity
+                ),
+                "calibration_note": (
+                    "Observation depth and mathematical/constructive insight cannot be inferred from "
+                    "asymptotic complexity alone; calibrate using statement, editorial, and benchmark anchors."
+                ),
+            },
         }
 
     def _solution_source(self, problem_path: Path, name: str) -> Path | None:
@@ -447,19 +685,6 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
 
     def _max_complexity(self, left: str, right: str) -> str:
         return _higher_complexity(left, right)
-
-    def _difficulty_band(self, rating: int) -> str:
-        if rating < 1000:
-            return "入门"
-        if rating < 1400:
-            return "基础"
-        if rating < 1800:
-            return "中等"
-        if rating < 2200:
-            return "较难"
-        if rating < 2600:
-            return "困难"
-        return "高难"
 
     def _signal(self, passed: bool, evidence: dict) -> dict:
         return {"executed": True, "passed": passed, "evidence": evidence}
