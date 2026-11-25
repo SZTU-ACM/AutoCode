@@ -558,7 +558,7 @@ def test_standalone_isolated_empirical_detects_mismatch_with_zero_writes(tmp_pat
     emp = out.data["quality_signals"]["empirical_complexity"]
     assert emp["executed"] is True
     assert emp["evidence"]["isolated_standalone"] is True
-    assert emp["passed"] is False
+    assert emp["passed"] is False, f"unexpected standalone empirical pass: {emp}"
     assert out.data["decision"] == "no_go"
     assert any(b["gate"] == "empirical_complexity" for b in out.data["blocking_issues"])
 

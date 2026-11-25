@@ -171,7 +171,7 @@ async def test_small_constant_quadratic_solution_blocked_e2e():
 
         assert result.success
         empirical = result.data.get("empirical_verification", {})
-        assert empirical.get("passed") is False
+        assert empirical.get("passed") is False, f"unexpected empirical pass: {empirical}"
         assert empirical.get("verdict") == "ratio_mismatch"
         assert empirical.get("fitted_complexity") in (
             "O(n^2)",
