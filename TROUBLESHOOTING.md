@@ -27,7 +27,7 @@ Compilation failed with error
    g++ --version
    ```
 
-### C++20 标准不支持
+### C++20 标准不支持（含 RHEL / TencentOS 默认旧版 `g++`）
 
 **错误信息：**
 ```
@@ -36,13 +36,14 @@ error: unrecognized command line option "-std=c++20"
 
 **解决方案：**
 
-1. 升级到 GCC 10+：
+1. AutoCode 编译器解析器会在 Linux 上自动探测系统 `g++` 主版本：若 `g++ < 10`，会自动搜索 `/opt/rh/gcc-toolset-*` / `/opt/rh/devtoolset-*` 或版本化 `g++-14`/`g++-12`（并优先选择同时附带 `libasan.a` 等 Sanitizer 运行时的完整 toolset）。
+2. 如需手动安装或升级：
    ```bash
    gcc --version  # 需要 10.0 或更高
+   # RHEL / TencentOS / Rocky: dnf install gcc-toolset-12-gcc-c++ gcc-toolset-12-libasan-devel
+   # Debian / Ubuntu: sudo apt install g++
    ```
-
-2. 或降级到 C++17：
-   - 修改 `compiler.py` 中的 `std` 参数默认值
+3. macOS 若默认 Apple Clang 不支持 `<bits/stdc++.h>`，可在 `.autocode/manifest.json` 中显式配置 `"compiler": "g++-14"`（Homebrew GCC）。
 
 ### 编译超时
 
@@ -87,20 +88,27 @@ Execution timeout after 30s
 2. 优化算法复杂度
 3. 检查是否有死循环或低效代码
 
-### 内存限制错误（仅 Linux）
+### 内存限制与 RSS 检测问题（Linux / macOS / Windows）
 
-**错误信息：**
-```
-Binary not found or prlimit unavailable
-```
+**说明：**
+- **Linux**：AutoCode 默认优先读取 `/proc/<pid>/status` `VmHWM` 并在开启限额时叠加 `prlimit --as/--data` 与 1ms 自适应峰值采样，避免容器化/父进程场景下 `os.wait4` 继承父进程 RSS 导致误报 MLE；如缺少 `prlimit` 请安装 `util-linux`（`sudo apt install util-linux`）。
+- **macOS**：通过子进程 `os.wait4` `ru_maxrss` 获取真实峰值内存；编译缓存命中时会以原子方式写入新 inode，避免 Apple Silicon 上重复覆盖可执行文件触发 Gatekeeper/codesign 校验异常。
+- **Windows**：通过 Win32 Job Object 施加进程树内存上限，并将 `STATUS_COMMITMENT_LIMIT`（`0xC000012D` / `0xC0000017`）等退出码自动归类为 MLE。
 
-**解决方案：**
+## 沙箱、可选增强与外部工具
 
-1. 安装 `prlimit`：
-   ```bash
-   sudo apt install util-linux
-   ```
-2. Windows 平台内存限制不支持，仅依赖超时控制
+### 沙箱后端不可用（`--sandbox`）
+
+- AutoCode 支持 `--sandbox auto|none|bwrap|nsjail|isolate|apple_container`：
+  - 使用 `--sandbox auto` 时会自动探测宿主机可用后端并在缺少二进制时平滑降级为 `none`。
+  - 显式指定 `--sandbox bwrap` 等后端但在容器内缺少用户命名空间权限时，AutoCode 会自动探测 `--unshare-user-try` 与 `--proc /proc` 挂载可用性；若宿主策略彻底禁止特权命名空间，可降级为 `--sandbox none`（仅限可信工作区或一次性 GitHub-hosted runner）。
+
+### 可选增强依赖与多语言/排版工具
+
+- **AST 变异与调用图分析**：安装 `uv sync --extra ast`（`tree-sitter` + `tree-sitter-cpp`），缺失时自动回退正则/关键字保守分支。
+- **Z3 形式化约束（`constraints.h`）**：安装 `uv sync --extra formal`（`z3-solver`），缺失时跳过 SMT 求解并明确上报状态。
+- **性能剖析与 PDF 渲染**：`cachegrind` 依赖 `valgrind`，PDF 编译依赖 `typst`；若未安装 `typst`，可执行 `python -m autocode_mcp.cli.render_pdf <dir> --emit-typ` 仅生成 `.typ` 源码。
+- **多语言评测**：`python` 复用当前解释器，`pypy` / `rust` / `java` 分别按需探测 `pypy3` / `rustc` / `javac` 与 `java`。
 
 ## 测试问题
 
@@ -192,9 +200,14 @@ PermissionError: [Errno 13] Permission denied
 
 **调试步骤：**
 
-1. 查看 Server 日志的完整错误信息
+1. 查看 Server 日志与 `.autocode/logs/` 中的完整输出
 2. 验证 `input_schema` 参数是否正确
 3. 检查 `problem_dir` 路径是否存在且有写权限
+
+### Streamable HTTP 传输被拒绝（HTTP 421 / 403）
+
+- 使用 `autocode-mcp --transport http` 时，服务端默认仅绑定 `127.0.0.1:8765` 并启用 Host/Origin DNS Rebinding 防护。
+- 若客户端携带非标准 Origin，可通过 `--allowed-origin <origin>` 白名单显式放行（不建议绑定公网网卡）。
 
 ## CI 与安全边界
 

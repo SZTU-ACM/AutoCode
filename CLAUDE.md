@@ -4,9 +4,9 @@
 
 ## 项目定位
 
-AutoCode 是一个面向 Claude Code、Codex、DeepSeek Harness (DSH) 与 Antigravity (`agy`) 的多宿主插件系统，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server；各宿主共享 22 个 MCP 工具、Skills 与 server 级门禁，Claude 额外使用 Agent 和 hooks，Antigravity 使用薄壳 `.antigravity-plugin/` + `rules/AGENTS.md`。
+AutoCode 是一个面向 Claude Code、Codex、DeepSeek Harness (DSH) 与 Antigravity (`agy`) 的多宿主插件系统，面向竞赛编程出题工作流。仓库内部同时包含 `autocode-mcp` MCP server；各宿主共享 22 个 MCP 工具（附带 MCP 2026 `ToolAnnotations` / `outputSchema` / `structuredContent`、有界异步 Tasks、3 个零外部 CDN `ui://autocode/*` MCP Apps 与可选无状态 Streamable HTTP）、Skills 与 server 级门禁，Claude 额外使用 Agent 和 hooks，Antigravity 使用薄壳 `.antigravity-plugin/` + `rules/AGENTS.md`。
 
-AutoCode 的核心目标是将人工智能生成的题面、解法、validator、generator、checker/interactor/communicator/grader、对拍、测试数据与多 OJ（Polygon / Hydro / QOJ）打包纳入可验证、可审计且具备严格阶段校验的出题流程，覆盖标准题（`standard`）、特殊判题（`spj`）、交互题（`interactive`）与通信题（`communication`：`run_twice` / `grader_linked` / `multi_process`）。
+AutoCode 的核心目标是将人工智能生成的题面、解法（支持 `cpp` / `python` / `pypy` / `rust` / `java`）、validator、generator（内置 `testlib.h` 与 `jngen.h`）、checker/interactor/communicator/grader、对拍（含反例缩减与多 Sanitizer UB 探针）、测试数据（含 `gcov` 分支覆盖率与单点/AST 变异测试）与多 OJ（Polygon / Hydro / QOJ / ICPC-Kattis / IOI CMS）打包纳入可验证、可审计且具备严格阶段校验的出题流程，覆盖标准题（`standard`）、特殊判题（`spj`）、交互题（`interactive`）与通信题（`communication`：`run_twice` / `grader_linked` / `multi_process`）。
 
 重点风险：
 
@@ -19,8 +19,8 @@ AutoCode 的核心目标是将人工智能生成的题面、解法、validator�
 ## 开发命令
 
 ```bash
-# 安装依赖
-uv sync
+# 安装依赖（含可选 ast: tree-sitter-cpp 与 formal: z3-solver）
+uv sync --all-extras
 
 # 运行核心测试
 uv run pytest tests/ -q
@@ -44,8 +44,9 @@ uv run python scripts/build_plugin_bundle.py --target agy --check --output /tmp/
 uv run python scripts/build_plugin_bundle.py --target dsh --output /tmp/autocode-dsh-bundle
 uv run python scripts/build_plugin_bundle.py --target dsh --check --output /tmp/autocode-dsh-bundle
 
-# 运行 MCP Server（本地开发/测试）
+# 运行 MCP Server（默认 stdio；可选本地无状态 Streamable HTTP）
 uv run autocode-mcp
+uv run autocode-mcp --transport http --host 127.0.0.1 --port 8765
 
 # 校验题目 manifest 与统一工作流门禁状态（可选 --status / --strict-gates / --reconcile）
 uv run autocode-verify examples/exact-sample
@@ -53,9 +54,16 @@ uv run autocode-verify examples/communication-sample
 uv run autocode-verify <problem_dir> --status --strict-gates
 uv run autocode-verify <problem_dir> --reconcile
 
-# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计，支持布局适配、--strict 严格门控、变异强度检测与 --format markdown 报告）
+# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计，支持布局适配、--sandbox 隔离、--strict 严格门控、变异强度检测与 --format markdown 报告）
 uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
-uv run autocode-audit /path/to/external-problem --standalone --layout auto --mutation-check --strict --format markdown
+uv run autocode-audit /path/to/external-problem --standalone --layout auto --sandbox auto --mutation-check --strict --format markdown
+
+# Polygon REST 同步、Typst PDF 渲染、进化数据生成、GEPA 技能优化与离线评测基准
+uv run python -m autocode_mcp.cli.polygon_sync --help
+uv run python -m autocode_mcp.cli.render_pdf <problem_dir> --emit-typ
+uv run python scripts/evolve_generator.py --help
+uv run python scripts/optimize_skills_gepa.py --help
+uv run python evals/standalone_benchmark.py --format summary
 
 # 构建 wheel 并运行打包/CLI 冒烟测试（隔离虚拟环境 wheel 安装烟测由 CI test-packaging 守护；不发布 PyPI）
 uv build
@@ -73,16 +81,18 @@ AutoCode/
 ├── rules/                 # Antigravity (agy) AGENTS.md rules
 ├── agents/                # Claude / Antigravity plugin agent definitions
 ├── hooks/                 # Claude hook config
-├── scripts/               # Hook/runtime helper & bundle/version sync scripts
+├── scripts/               # Hook/runtime helper、bundle/version sync、evolve_generator.py 与 optimize_skills_gepa.py
 ├── skills/                # Shared skills (Claude / Codex / DSH / Antigravity)
-├── examples/              # exact / checker / interactive / communication smoke samples
+├── examples/              # exact / checker / interactive / communication smoke samples & Problem CI
+├── evals/                 # 离线 TPR/TNR 基准、Harbor 任务与 Promptfoo 多宿主评测套件
 ├── src/autocode_mcp/      # MCP server 源代码
-│   ├── cli/               # autocode-verify / autocode-audit CLI
-│   ├── tools/             # 22 个 MCP 工具实现
-│   ├── templates/         # 内置模板（testlib.h、interactor、communicator、grader、problem.h 等）
-│   ├── workflow/          # manifest.json 模型与权威门禁（enforcement.py / guard.py）
-│   └── utils/             # 编译、JudgeRunner、CommunicationRunner、Hydro/QOJ 导出器等
-├── tests/                 # 测试用例（含真实 C++ 交互/通信端到端测试）
+│   ├── cli/               # autocode-verify / autocode-audit / polygon_sync / render_pdf CLI
+│   ├── tools/             # 22 个 MCP 工具实现与 Pydantic input/output schemas
+│   ├── ui/                # 零外部 CDN 的交互式 ui://autocode/* MCP Apps HTML 资源
+│   ├── templates/         # 内置模板（testlib.h、jngen.h、interactor、communicator、grader、problem.h 等）
+│   ├── workflow/          # manifest.json 模型与权威门禁（hashes/state_io/gates/reconcile/enforcement/guard）
+│   └── utils/             # 编译、JudgeRunner、CommunicationRunner、多语言、沙箱后端、SMT/AST 变异与 5 OJ 导出器
+├── tests/                 # 测试用例（含真实 C++ 交互/通信端到端与红队防篡改回归测试）
 ├── .mcp.json              # 本地 MCP 接入配置（开发/兼容用）
 ├── mcp_config.json        # Antigravity (agy) MCP 配置（bundle 根输出）
 ├── settings.json          # Claude plugin 默认 agent
@@ -161,12 +171,12 @@ AutoCode 当前暴露 22 个 MCP 工具：
    - 交互题 / 通信题（`run_twice` / `multi_process`）：`interactor_build`（可搭配可选 `validator_build` 校验 `.in` 测试输入；禁止 `checker_build`）。
    - 通信题（`grader_linked`）：编写 `files/grader.cpp` 与 `files/problem.h` 后通过 `solution_build` 联合编译（可选 `validator_build`）。
 6. `generator_build`
-7. `checker_build` 与 `stress_test_run`：非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`。支持一键 `enable_sanitizers=True` 在隔离的 `.autocode/san_bin/` 中自动探测并运行 ASan/UBSan（Linux 预加载容器自动回退 `-static-libasan -static-libubsan` 并强制通过负对照探针）。交互题通过 `InteractiveRunner` 真实双向管道运行；通信题通过 `CommunicationRunner` 按 `run_twice`（独立进程隔离多阶段）/ `grader_linked` / `multi_process` 运行并校验通信预算。
+7. `checker_build` 与 `stress_test_run`：非 SPJ 须在 `stress_test_run(completed_rounds == total_rounds)` **之后**再 `checker_build(accuracy >= 0.9)`。支持一键 `enable_sanitizers=True` 在隔离的 `.autocode/san_bin/` 中自动探测并运行多 Sanitizer 探针（ASan/UBSan/MSan/TSan；Linux 预加载容器自动回退 `-static-libasan -static-libubsan` 并强制通过负对照探针），发现反例后可通过 `CounterexampleShrinker` 自动最小化反例。交互题通过 `InteractiveRunner` 真实双向管道运行；通信题通过 `CommunicationRunner` 按 `run_twice`（独立进程隔离多阶段）/ `grader_linked` / `multi_process` 运行并校验通信预算；多语言选手解通过 `lang_runner.py` 支持 `cpp`/`python`/`pypy`/`rust`/`java`。
 8. `problem_validate(validation_passed)`（交互/通信题自动验证协议与实跑样例；超长预览自动截断并将完整详情落盘 `.autocode/logs/`）
-9. `problem_generate_tests(generated_test_count > 0)`（支持 `mode="replace"|"append"|"register_existing"`，自定义生成器类型如 `"5"`/`"hack"`，自动保留 `locked: true` 与 `tests/hack/*.in` 人工 Hack 测试点）
-10. `problem_verify_tests(passed)`（默认跑齐当前 `manifest.json` 门禁要求的全部检查项，支持 `verify_types=["all"]` 与 `boundary_coverage`；分项重跑按数据/源码内容指纹合并更新 `verify_signals` 而不覆盖其它已通过项；自动扫描并编译缺失/过期的 `solutions/wrong_*.cpp`，报告 `wrong_ms / std_ms` 倍率与 `max_memory_mb`；建议在常规错解外额外构造 2~3 份**近正解单点变异错解**检验数据强度）
-11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、基于 LaTeX 数值范围与 `val.cpp` 上下界比对的 `statement_consistency`、按 `(sol, gen, config, platform)` 哈希缓存的 `empirical_complexity`、导出包回读一致性检查、`state_drift` 跨平台告警、`communication_metrics`、`host_performance_bias` 与难度证据；不适用自测标记 `status: "not_applicable"`；支持 `standalone=True` / `autocode-audit --standalone` 对任意外部题包只读审计）
-12. `problem_pack_polygon`（统一推荐 `time_limit_ms` 毫秒参数，严禁误传毫秒到废弃秒参数 `time_limit`：超出 `60s` 或相对 `manifest.time_limit_ms` 偏离 >10 倍默认拒绝；支持 `export_formats=["polygon", "hydro", "qoj"]` 与 `export_data_mode="hardlink"|"copy"|"zip"`；Hydro 不自动注入内部工具 tag；导出完成后自动回读校验 Polygon/Hydro/QOJ 的 TL、ML 与文件完整性）
+9. `problem_generate_tests(generated_test_count > 0)`（支持 `mode="replace"|"append"|"register_existing"`，自定义生成器类型如 `"5"`/`"hack"`，自动保留 `locked: true` 与 `tests/hack/*.in` 人工 Hack 测试点；支持 `jngen.h` 及 `scripts/evolve_generator.py` 进化数据生成）
+10. `problem_verify_tests(passed)`（默认跑齐当前 `manifest.json` 门禁要求的全部检查项，支持 `verify_types=["all"]` 与 `boundary_coverage`、`gcov` 分支覆盖率与 `test_compactor` 去重压缩；分项重跑按数据/源码内容指纹合并更新 `verify_signals` 而不覆盖其它已通过项；自动扫描并编译缺失/过期的 `solutions/wrong_*.cpp`，支持 `expected_verdict`（`AC|WA|TLE|MLE|RE|PE`）精确拦截判定，报告 `wrong_ms / std_ms` 倍率与 `max_memory_mb`；建议在常规错解外额外构造 2~3 份**近正解单点变异错解**检验数据强度）
+11. `problem_audit(mode="full")`（收集最终 `go`/`no_go`、质量信号、基于 LaTeX / Z3 SMT 与 `constraints.h` / `val.cpp` 上下界比对的 `statement_consistency`、按 `(sol, gen, config, platform)` 哈希缓存且结合 AST/调用图与硬件计数器 `perf`/`cachegrind` 的 `empirical_complexity`、导出包回读一致性检查、`state_drift` 跨平台告警、`communication_metrics`、`originality` 原创性审计、`host_performance_bias` 与难度证据；不适用自测标记 `status: "not_applicable"`；支持 `standalone=True` / `autocode-audit --standalone` 配合 `--sandbox` 对任意外部题包只读审计，含 Polygon `problem.xml` 与无后缀 `01`/`01.a` 数据）
+12. `problem_pack_polygon`（统一推荐 `time_limit_ms` 毫秒参数，严禁误传毫秒到废弃秒参数 `time_limit`：超出 `60s` 或相对 `manifest.time_limit_ms` 偏离 >10 倍默认拒绝；支持 `export_formats=["polygon", "hydro", "qoj", "icpc", "kattis", "icpc_kattis", "cms"]` 与 `export_data_mode="hardlink"|"copy"|"zip"`；Hydro 不自动注入内部工具 tag；导出完成后自动回读校验各目标 OJ 的 TL、ML 与文件完整性）
 
 关键门禁：
 
@@ -187,11 +197,12 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 - `agents/autocode-workflow.md`：主流程协调与门禁执行。
 
-只读审计 Agent：
+只读与红队审计 Agent：
 
 - `agents/autocode-idea-auditor.md`：立项前审查题意是否可判定、可验证、可生成。
 - `agents/autocode-solution-auditor.md`：std/brute 复杂度、正确性假设和对拍策略审计。
 - `agents/autocode-package-auditor.md`：打包前检查题面、测试、错解杀伤和 manifest 一致性。
+- `agents/autocode-redteam-auditor.md`：红队对抗审题，检索边界漏洞、错解逃逸路径与门禁弱点。
 
 核心 Skills：
 
@@ -203,6 +214,9 @@ AutoCode 当前暴露 22 个 MCP 工具：
 - `skills/testdata-quality/SKILL.md`
 - `skills/problem-validate/SKILL.md`
 - `skills/problem-difficulty-rating/SKILL.md`
+- `skills/redteam-hacking/SKILL.md`
+- `skills/evolutionary-testdata/SKILL.md`
+- `skills/agent-skill-governance/SKILL.md`
 
 ## Manifest
 
@@ -212,7 +226,8 @@ AutoCode 当前暴露 22 个 MCP 工具：
 
 - `problem_type`（`standard` | `spj` | `interactive` | `communication`）、`oracle_mode`（`brute` | `interactor_only` | `reference_solutions`）、`protocol`（`mode`、`passes`、`pass_headers`、`max_bits`、`max_bytes`、`max_rounds`、`max_queries`、`communicator_file`、`grader_file`、`header_file`、`participant_solutions`）与 `subtasks`（子任务分值、约束、依赖、`test_indices`/`groups`）：驱动交互/通信引擎与多 OJ 子任务导出。
 - `special_judge` / `stress_comparison`（`exact` | `checker`）/ 可选 `stress_checker_bidirectional`：控制对拍、终测、错解杀伤与样例校验是否走 testlib checker（须 `checker_build` 且存在 `files/checker`）。仅 `special_judge` 而 `stress_comparison=exact` 时终测等仍以字符串比对标答文件为主。
-- `solutions` 中 `role=wrong` 的条目可设 `expected`：`fail`（默认，至少一测应判非 AC 或与 `.ans` 不一致）或 `pass`（全部测例须 AC 或与 `.ans` 一致），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
+- `solutions` 条目支持 `language`（`cpp` | `python` | `pypy` | `rust` | `java`）、`role=wrong` 下的 `expected`（`fail` | `pass`）与精确 `expected_verdict`（`AC` | `WA` | `TLE` | `MLE` | `RE` | `PE`），与 `problem_verify_tests` 的 `wrong_solution_kill` 语义一致。
+- `sandbox`（可选）：配置执行隔离后端（`none` | `bwrap` | `nsjail` | `isolate` | `apple_container` | `docker`）与 `extra_args`，CLI 可通过 `--sandbox auto|...` 覆盖。
 - `load_manifest` 若遇 `manifest.json` 无法按 UTF-8 读取，会抛出 `ValueError`（含原因）；MCP 工具与 `autocode-verify` 会返回结构化错误信息，杜绝未捕获的裸 traceback。
 - `audit_gates` 控制 full audit、validator/checker/interactor 自测、题面一致性与难度置信度等发布前门禁。
 - `compiler`（可选）：配置自定义 C++ 编译器路径/命令（如 macOS Homebrew `g++-14`）；所有构建工具默认按 `显式 compiler 参数 > manifest.compiler > g++` 解析，`problem_create` 与 `solution_build` 会自动检测 Apple Clang 并提前提示避免 `<bits/stdc++.h>`。
@@ -228,11 +243,11 @@ uv run autocode-verify <problem_dir>
 
 `autocode-verify` 会输出 `problem_type`、`oracle_mode`、`protocol_mode`、`subtask_count`、`spj_warnings` 与 `protocol_warnings`，便于 CI 解析。
 
-完整审计 / 外部题包独立审计（`--format json|markdown|summary`，默认 `json`；支持 `--strict` 将独立验题完整性告警升级为阻断项；Problem CI 示例模板位于 `examples/ci/autocode-problem-audit.yml`）：
+完整审计 / 外部题包独立审计（`--format json|markdown|summary`，默认 `json`；支持 `--strict` 将独立验题完整性告警升级为阻断项、`--sandbox auto|none|bwrap|nsjail|isolate|apple_container` 指定执行沙箱；Problem CI 示例模板位于 `examples/ci/autocode-problem-audit.yml`）：
 
 ```bash
 uv run autocode-audit <problem_dir> --mode full --report audit_report.json
-uv run autocode-audit <external_problem_dir> --standalone --strict --format markdown
+uv run autocode-audit <external_problem_dir> --standalone --sandbox auto --strict --format markdown
 ```
 
 ## 关键约束

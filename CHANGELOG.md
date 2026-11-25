@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-25
+
+### Added
+
+- **MCP 2026 协议升级（PR #25, Wave 3）**：
+  - 全部 22 个 MCP 工具附带显式 `ToolAnnotations`（`title`、`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint`）、Pydantic 派生并内联 `$defs` 的 `outputSchema` 及 `structuredContent`。
+  - 新增有界异步 `McpTaskManager`（`tasks/get`、`tasks/list`、`tasks/result`、`tasks/cancel`），支持长耗时工具（`stress_test_run`、`problem_generate_tests`、`problem_audit`、`problem_verify_tests`）的任务化执行与安全取消，同时保持非任务调用同步返回。
+  - 新增 3 个零外部 CDN 的自包含 MCP Apps UI 资源（`ui://autocode/complexity-plot`、`ui://autocode/audit-dashboard`、`ui://autocode/protocol-replay`，`text/html;profile=mcp-app`），并通过工具 `_meta.ui.resourceUri` 关联。
+  - `autocode-mcp` 新增可选无状态 Streamable HTTP 传输（`--transport http --host 127.0.0.1 --port 8765`，含 loopback Host/Origin DNS Rebinding 防护，默认保持 `stdio`）。
+- **红队审计、精确判定、覆盖率与反例缩减/变异引擎（PR #24, Wave 2, #10）**：
+  - 新增 `agents/autocode-redteam-auditor.md` 与 `skills/redteam-hacking/SKILL.md`，强化赛前对抗审题与漏洞构造。
+  - 内置 `src/autocode_mcp/templates/jngen.h` 竞赛生成器库。
+  - `SolutionEntry` 新增精确预期判定 `expected_verdict`（`AC|WA|TLE|MLE|RE|PE`）与 `gcov` 分支覆盖率统计（`utils/coverage.py`）。
+  - 新增确定性反例缩减器 `CounterexampleShrinker`（`utils/shrinker.py`）、基于可选 `tree-sitter-cpp`（`--extra ast`）的 AST 变异与多 Sanitizer UB 探针（ASan/UBSan/MSan/TSan），以及测试集压缩器 `utils/test_compactor.py`。
+- **可插拔多平台沙箱与形式化约束/原创性审计（PR #24, Wave 2, #21）**：
+  - 新增 `src/autocode_mcp/utils/sandbox/` 后端注册表（`bwrap`、`nsjail`、`isolate`、`apple_container`、`none`），`autocode-audit` 新增 `--sandbox auto|none|bwrap|nsjail|isolate|apple_container` 与 `manifest.sandbox` 配置。
+  - 新增可选 Z3 SMT 约束校验与 `constraints.h` 双向生成（`--extra formal`、`utils/smt_constraints.py`），以及题面歧义与本地原创性比对（`utils/originality.py`）。
+- **多语言评测引擎、进化数据生成与多 OJ 互操作（PR #25, Wave 3, #20）**：
+  - 新增 `utils/lang_runner.py` 支持 5 种语言（`cpp`、`python`、`pypy`、`rust`、`java`）及分语言时间倍率。
+  - 新增进化测试数据生成器 `scripts/evolve_generator.py` 与 `skills/evolutionary-testdata/SKILL.md`。
+  - 新增 ICPC/Kattis（`exports/icpc/`、`exports/kattis/`、`exports/icpc_kattis/`）与 IOI CMS（`exports/cms/`）导出器（`utils/exporters/{icpc_kattis,cms}.py`）。
+  - 新增 Polygon REST API 凭据安全同步 CLI（`python -m autocode_mcp.cli.polygon_sync`）与 Markdown→Typst PDF 渲染 CLI（`python -m autocode_mcp.cli.render_pdf`）。
+- **独立审计增强、AST/调用图复杂度分析与评测基准套件（PR #23, #25, Waves 1 & 3, #11 #12 #14 #15 #16 #19）**：
+  - 新增 `utils/problem_layout.py` 支持 Polygon `problem.xml`、无后缀 `01`/`01.a` 测试对与统一错解发现；`autocode-audit` 新增 `--strict` 严格门控、独立 ASan/UBSan、实证复杂度与通信题变异测试。
+  - 新增进程级硬件性能计数器（`perf stat` / `valgrind --tool=cachegrind`）与跨过程 AST/调用图复杂度分析。
+  - 新增 `evals/` 基准套件（`standalone_benchmark.py` 离线 TPR/TNR 基准、4 题型 `harbor_tasks/`、`promptfoo.yaml` 多宿主矩阵）与 `scripts/optimize_skills_gepa.py` 技能优化脚本。
+
+### Changed
+
+- **基础契约硬化与惰性编译缓存（PR #22, Wave 0, #13 #17 #18）**：
+  - `CompileCache` 改为惰性初始化（import 零磁盘副作用）与原子 `os.replace` 恢复；统一 `resource_limit.py` 跨平台资源限制与时间/内存传播。
+  - 重构核心 Skills 渐进式披露结构（`references/` 分层，补全 `skills/agent-skill-governance/SKILL.md`）。
+- **工作流门禁与校验器闭环（PR #23, Wave 1）**：
+  - 强化 `validator_build` 边界检测、题面与 `val.cpp` 范围一致性检查，以及多场景门禁防篡改回归守护（`tests/test_gate_redteam.py`）。
+
+### Fixed
+
+- **三平台（Linux / macOS / Windows）实战硬化（PR #22–#25）**：
+  - **Linux**：修复 `os.wait4` 继承父进程 RSS 导致误报 MLE（改用 `/proc/<pid>/status` `VmHWM` + 1ms 自适应采样 + `prlimit`）；支持 RHEL/TencentOS 默认旧版 `g++ (<10)` 自动升级至含完整 ASan 运行时的 `gcc-toolset`/`devtoolset`；修复 `perf stat` 吞没 `SIGABRT`、`gcov -b` 误计合成 `(throw)` 分支、容器内 `bwrap` 缺少 `--unshare-user-try` 及 `--proc /proc` 探测、`cachegrind` 启动超时、以及 Clang 22 MSan `libstdc++` 误报。
+  - **macOS**：修复 Apple Silicon 缓存命中时原子写入新 inode 避免 Gatekeeper/codesign 缓存冲突；保留 `os.wait4` 精确子进程 `ru_maxrss`。
+  - **Windows**：新增 `os.replace` `PermissionError` 退避重试、`STATUS_COMMITMENT_LIMIT` MLE 退出码归类、UB 探针 `-static` 链接与 Typst/编译器子进程 UTF-8 强制解码。
+  - **文档与安全**：修正交互题 `interactor.cpp` 使用 `std::cout` + `std::cout.flush()` 指引并强化 PR CI 安全边界告警。
+
 ## [3.3.0] - 2026-11-23
 
 ### Added
