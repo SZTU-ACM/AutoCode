@@ -566,15 +566,14 @@ class _AuditStandaloneMixin(_AuditSignalsMixin):
                     }
                     if mut_res.get("executed") and mut_res.get("survived_mutants", 0) > 0:
                         surv_ids = [str(s.get("id")) for s in mut_res.get("survivors", [])[:5]]
-                        warnings.append(
-                            {
-                                "gate": "mutation_testing",
-                                "reason": (
-                                    f"{mut_res['survived_mutants']}/{mut_res['compiled_mutants']} single-point "
-                                    f"mutants survived all tests ({surv_ids}); consider strengthening hack/edge test cases."
-                                ),
-                            }
+                        mut_reason = (
+                            f"{mut_res['survived_mutants']}/{mut_res['compiled_mutants']} single-point "
+                            f"mutants survived all tests ({surv_ids}); consider strengthening hack/edge test cases."
                         )
+                        if manifest.audit_gates.fail_on_mutation_survival:
+                            blocking.append({"gate": "mutation_testing", "reason": mut_reason})
+                        else:
+                            warnings.append({"gate": "mutation_testing", "reason": mut_reason})
                     if mut_res.get("executed") and mut_res.get("judge_error_mutants", 0) > 0:
                         warnings.append(
                             {

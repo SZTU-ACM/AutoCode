@@ -41,9 +41,13 @@ jobs:
       - name: Run zero-write standalone audit
         run: |
           set +e
+          # `--sandbox auto` probes Linux sandboxes (bwrap/nsjail/isolate) when available
+          # and gracefully falls back to `none`. For strict sandbox isolation on ubuntu-latest,
+          # install `bubblewrap` (e.g. `sudo apt-get install -y bubblewrap`) and pass `--sandbox bwrap`.
           "$HOME/.local/bin/autocode-audit" "$PROBLEM_DIR" \
             --standalone \
             --layout auto \
+            --sandbox auto \
             --mutation-check \
             --format markdown \
             --report "$(pwd)/audit_report.json" > audit_report.md

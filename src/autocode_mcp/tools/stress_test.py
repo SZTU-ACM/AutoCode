@@ -6,10 +6,15 @@ Stress Test 工具 - 对拍测试。
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import shutil
+import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -26,16 +31,23 @@ from ..utils.communication_runner import (
     safe_resolve_under_root,
 )
 from ..utils.compiler import (
+    CompileResult,
+    _find_suggested_gcc_compilers,
+    _resolve_compiler,
     compile_cpp,
+    detect_compiler_info_async,
     probe_sanitizer_support_async,
     resolve_effective_compiler,
     run_batch,
     run_binary,
     run_binary_with_args,
+    validate_compiler_spec,
 )
 from ..utils.judge_runner import InteractiveRunner
 from ..utils.logs import safe_prepare_autocode_subdir, safe_spill_json
 from ..utils.platform import get_exe_extension
+from ..utils.process import terminate_pid_tree
+from ..utils.shrinker import ShrinkResult, shrink_counterexample
 from ..workflow import (
     AutoCodeManifest,
     load_manifest,
@@ -91,6 +103,477 @@ class _StressRoundResult:
     gen_detail: dict | None = None
     validator_detail: dict | None = None
     stats: dict | None = None
+
+
+_ALLOWED_UB_PROBE_FLAGS = frozenset(
+    {
+        "-O0",
+        "-O1",
+        "-O2",
+        "-fsanitize=signed-integer-overflow",
+        "-fsanitize-undefined-trap-on-error",
+        "-fsanitize=memory",
+        "-fno-omit-frame-pointer",
+        "-g",
+    }
+)
+
+
+async def _compile_custom_probe_binary(
+    source_path: str,
+    binary_path: str,
+    *,
+    compiler: str,
+    flags: Sequence[str],
+    std: str = "c++20",
+    include_dirs: Sequence[str] | None = None,
+    extra_sources: Sequence[str] | None = None,
+    timeout: int = 30,
+) -> CompileResult:
+    """Compile a C++ source into an isolated UB-probe binary with validated flags."""
+    if not os.path.exists(source_path):
+        return CompileResult(success=False, error=f"Source file not found: {source_path}")
+    normalized_extra = list(extra_sources or [])
+    for extra_src in normalized_extra:
+        if not os.path.exists(extra_src):
+            return CompileResult(success=False, error=f"Extra source file not found: {extra_src}")
+    try:
+        validated_compiler = validate_compiler_spec(compiler)
+    except ValueError as exc:
+        return CompileResult(success=False, error=f"Invalid compiler: {exc}")
+
+    checked_flags: list[str] = []
+    for fl in flags:
+        if fl not in _ALLOWED_UB_PROBE_FLAGS:
+            return CompileResult(success=False, error=f"Disallowed UB probe flag: {fl!r}")
+        checked_flags.append(fl)
+
+    effective_compiler = _resolve_compiler(validated_compiler)
+    include_flags: list[str] = []
+    for inc_dir in include_dirs or []:
+        if inc_dir and os.path.isdir(inc_dir):
+            include_flags.extend(["-I", inc_dir])
+    if os.path.exists(TEMPLATES_DIR):
+        include_flags.extend(["-isystem", TEMPLATES_DIR])
+
+    cmd = [
+        effective_compiler,
+        f"-std={std}",
+        *checked_flags,
+        "-Wall",
+        "-Wextra",
+        *include_flags,
+        source_path,
+        *normalized_extra,
+        "-o",
+        binary_path,
+    ]
+    if sys.platform == "win32" and not any(
+        f in checked_flags for f in ("-fsanitize=address", "-fsanitize=memory")
+    ):
+        cmd.append("-static")
+    popen_kwargs: dict[str, Any] = {}
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **popen_kwargs,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
+            if process.pid:
+                await terminate_pid_tree(process.pid)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except Exception:
+                pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return CompileResult(success=False, error=f"Compilation timeout after {timeout}s")
+        out_text = stdout.decode("utf-8", errors="replace")
+        err_text = stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            return CompileResult(
+                success=False,
+                error=f"Compilation failed with code {process.returncode}",
+                stdout=out_text,
+                stderr=err_text,
+            )
+        return CompileResult(success=True, binary_path=binary_path, stdout=out_text, stderr=err_text)
+    except OSError as exc:
+        return CompileResult(success=False, error=f"Compilation error: {exc}")
+
+
+async def _discover_differential_compilers(
+    primary_spec: str,
+) -> tuple[str, dict[str, Any], str | None, dict[str, Any] | None]:
+    """Resolve primary compiler and an optional secondary compiler from the opposite GCC/Clang family."""
+    primary_eff = _resolve_compiler(primary_spec)
+    primary_info = await detect_compiler_info_async(primary_eff)
+    primary_family = (
+        "gcc"
+        if primary_info.get("is_gcc")
+        else ("clang" if primary_info.get("is_clang") else "other")
+    )
+    primary_real = (
+        os.path.realpath(str(primary_info["resolved_path"]))
+        if primary_info.get("resolved_path")
+        else primary_eff
+    )
+
+    candidates: list[str] = []
+    if primary_family != "gcc":
+        candidates.extend(_find_suggested_gcc_compilers())
+        gpp = shutil.which("g++")
+        if gpp:
+            candidates.append(gpp)
+    if primary_family != "clang":
+        for name in ("clang++", "clang++-19", "clang++-18", "clang++-17", "clang++-16", "clang++-15", "clang++-14"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            validated = validate_compiler_spec(cand)
+        except ValueError:
+            continue
+        info = await detect_compiler_info_async(validated)
+        if not info.get("available"):
+            continue
+        resolved = info.get("resolved_path") or validated
+        real_path = os.path.realpath(str(resolved))
+        if real_path == primary_real or real_path in seen:
+            continue
+        seen.add(real_path)
+        cand_family = "gcc" if info.get("is_gcc") else ("clang" if info.get("is_clang") else "other")
+        if cand_family in ("gcc", "clang") and cand_family != primary_family:
+            return primary_eff, primary_info, validated, info
+
+    return primary_eff, primary_info, None, None
+
+
+async def run_ub_differential_probe(
+    sol_source: str | os.PathLike[str],
+    inputs: Sequence[str],
+    *,
+    compiler: str | None = None,
+    manifest: AutoCodeManifest | None = None,
+    include_dirs: Sequence[str] | None = None,
+    extra_sources: Sequence[str] | None = None,
+    std: str = "c++20",
+    timeout_sec: float = 5.0,
+    memory_mb: float = 256.0,
+    max_inputs: int = 8,
+    enable_msan: bool = True,
+) -> dict[str, Any]:
+    """Compare ``-O0`` vs ``-O2``, GCC vs Clang, signed-overflow UB trap, and optional Linux MSan.
+
+    Builds and executes all probe binaries strictly inside an isolated temporary
+    directory without modifying ``problem_dir``.
+    """
+    sol_path = Path(sol_source)
+    if not sol_path.is_file():
+        return {
+            "executed": False,
+            "passed": True,
+            "ub_detected": False,
+            "reason": f"solution source not found: {sol_source}",
+            "profiles_compiled": [],
+            "profiles_skipped": [],
+            "mismatches": [],
+            "ub_traps": [],
+        }
+
+    sampled = [item for item in inputs if isinstance(item, str)][: max(1, int(max_inputs))]
+    if not sampled:
+        return {
+            "executed": False,
+            "passed": True,
+            "ub_detected": False,
+            "reason": "no inputs provided for UB differential probe",
+            "profiles_compiled": [],
+            "profiles_skipped": [],
+            "mismatches": [],
+            "ub_traps": [],
+        }
+
+    try:
+        primary_spec = resolve_effective_compiler(compiler, manifest)
+    except ValueError as exc:
+        return {
+            "executed": False,
+            "passed": True,
+            "ub_detected": False,
+            "reason": f"invalid compiler specification: {exc}",
+            "profiles_compiled": [],
+            "profiles_skipped": [],
+            "mismatches": [],
+            "ub_traps": [],
+        }
+
+    primary_eff, primary_info, sec_spec, sec_info = await _discover_differential_compilers(
+        primary_spec
+    )
+    eff_inc: list[str] = []
+    for d in [str(sol_path.parent), *(include_dirs or [])]:
+        if d and d not in eff_inc:
+            eff_inc.append(d)
+    eff_extra = list(extra_sources or []) or None
+    exe_ext = get_exe_extension()
+    eff_mem = (
+        float(manifest.memory_limit_mb)
+        if manifest is not None and manifest.memory_limit_mb > 0
+        else float(memory_mb)
+    )
+    per_run_timeout = max(0.5, float(timeout_sec))
+
+    profiles_compiled: list[str] = []
+    profiles_skipped: list[dict[str, str]] = []
+    compilers_tested: list[str] = []
+    diff_binaries: list[tuple[str, str]] = []
+    trap_binaries: list[tuple[str, str]] = []
+
+    with tempfile.TemporaryDirectory(
+        prefix="autocode_ub_probe_", ignore_cleanup_errors=True
+    ) as tmpdir:
+        # 1. Primary compiler -O0 and -O2
+        for opt in ("O0", "O2"):
+            pname = f"primary_{opt}"
+            pbin = os.path.join(tmpdir, f"{pname}{exe_ext}")
+            comp = await compile_cpp(
+                str(sol_path),
+                pbin,
+                compiler=primary_spec,
+                std=std,
+                opt_level=opt,
+                include_dirs=eff_inc,
+                extra_sources=eff_extra,
+                use_cache=False,
+            )
+            if comp.success:
+                profiles_compiled.append(pname)
+                diff_binaries.append((pname, pbin))
+                if primary_eff not in compilers_tested:
+                    compilers_tested.append(primary_eff)
+            else:
+                profiles_skipped.append(
+                    {"profile": pname, "reason": (comp.error or comp.stderr)[:200]}
+                )
+
+        # 2. Secondary compiler family (GCC vs Clang) when available
+        if sec_spec is not None and sec_info is not None:
+            for opt in ("O0", "O2"):
+                sname = f"secondary_{opt}"
+                sbin = os.path.join(tmpdir, f"{sname}{exe_ext}")
+                comp = await compile_cpp(
+                    str(sol_path),
+                    sbin,
+                    compiler=sec_spec,
+                    std=std,
+                    opt_level=opt,
+                    include_dirs=eff_inc,
+                    extra_sources=eff_extra,
+                    use_cache=False,
+                )
+                if comp.success:
+                    profiles_compiled.append(sname)
+                    diff_binaries.append((sname, sbin))
+                    if sec_spec not in compilers_tested:
+                        compilers_tested.append(sec_spec)
+                else:
+                    profiles_skipped.append(
+                        {"profile": sname, "reason": (comp.error or comp.stderr)[:200]}
+                    )
+        else:
+            profiles_skipped.append(
+                {
+                    "profile": "cross_compiler",
+                    "reason": "no distinct secondary GCC/Clang compiler detected on host",
+                }
+            )
+
+        # 3. Signed integer overflow trap profile
+        trap_bin = os.path.join(tmpdir, f"ub_trap{exe_ext}")
+        trap_comp = await _compile_custom_probe_binary(
+            str(sol_path),
+            trap_bin,
+            compiler=primary_spec,
+            flags=("-O2", "-fsanitize=signed-integer-overflow", "-fsanitize-undefined-trap-on-error"),
+            std=std,
+            include_dirs=eff_inc,
+            extra_sources=eff_extra,
+        )
+        if trap_comp.success:
+            profiles_compiled.append("ub_trap")
+            trap_binaries.append(("ub_trap", trap_bin))
+        else:
+            profiles_skipped.append(
+                {"profile": "ub_trap", "reason": (trap_comp.error or trap_comp.stderr)[:200]}
+            )
+
+        # 4. Optional Linux Clang MSan profile (with runtime mmap smoke check)
+        clang_compiler: str | None = None
+        if primary_info.get("is_clang"):
+            clang_compiler = primary_spec
+        elif sec_spec is not None and sec_info is not None and sec_info.get("is_clang"):
+            clang_compiler = sec_spec
+        if enable_msan and sys.platform.startswith("linux") and clang_compiler is not None:
+            smoke_src = os.path.join(tmpdir, "msan_smoke.cpp")
+            smoke_bin = os.path.join(tmpdir, f"msan_smoke{exe_ext}")
+            Path(smoke_src).write_text(
+                "#include <iostream>\n"
+                "#include <string>\n"
+                "#include <vector>\n"
+                "int main() {\n"
+                "    long long x;\n"
+                "    if (!(std::cin >> x)) return 1;\n"
+                "    std::vector<long long> v = {x, x + 1};\n"
+                "    std::string s = std::to_string(v[1]);\n"
+                "    std::cout << s << '\\n';\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            smoke_comp = await _compile_custom_probe_binary(
+                smoke_src,
+                smoke_bin,
+                compiler=clang_compiler,
+                flags=("-O1", "-fsanitize=memory", "-fno-omit-frame-pointer", "-g"),
+                std=std,
+            )
+            smoke_ok = False
+            if smoke_comp.success:
+                smoke_run = await run_binary(
+                    smoke_bin, "42\n", timeout=2.0, memory_mb=eff_mem, disable_as_limit=True
+                )
+                smoke_ok = smoke_run.success and smoke_run.stdout.strip() == "43"
+            if smoke_ok:
+                msan_bin = os.path.join(tmpdir, f"msan{exe_ext}")
+                msan_comp = await _compile_custom_probe_binary(
+                    str(sol_path),
+                    msan_bin,
+                    compiler=clang_compiler,
+                    flags=("-O1", "-fsanitize=memory", "-fno-omit-frame-pointer", "-g"),
+                    std=std,
+                    include_dirs=eff_inc,
+                    extra_sources=eff_extra,
+                )
+                if msan_comp.success:
+                    profiles_compiled.append("msan")
+                    trap_binaries.append(("msan", msan_bin))
+                else:
+                    profiles_skipped.append(
+                        {"profile": "msan", "reason": (msan_comp.error or msan_comp.stderr)[:200]}
+                    )
+            else:
+                profiles_skipped.append(
+                    {"profile": "msan", "reason": "Linux MSan runtime smoke check unavailable"}
+                )
+        elif enable_msan:
+            profiles_skipped.append(
+                {
+                    "profile": "msan",
+                    "reason": "MSan requires Linux + Clang runtime",
+                }
+            )
+
+        if not diff_binaries and not trap_binaries:
+            return {
+                "executed": False,
+                "passed": True,
+                "ub_detected": False,
+                "reason": "no UB differential profiles compiled",
+                "profiles_compiled": profiles_compiled,
+                "profiles_skipped": profiles_skipped,
+                "compilers_tested": compilers_tested,
+                "inputs_tested": 0,
+                "mismatches": [],
+                "ub_traps": [],
+            }
+
+        mismatches: list[dict[str, Any]] = []
+        ub_traps: list[dict[str, Any]] = []
+
+        for idx, inp in enumerate(sampled):
+            outputs_by_profile: dict[str, str] = {}
+            status_by_profile: dict[str, str] = {}
+            any_diff_ok = False
+
+            for pname, pbin in diff_binaries:
+                run = await run_binary(pbin, inp, timeout=per_run_timeout, memory_mb=eff_mem)
+                norm_out = run.stdout.replace("\r\n", "\n").strip()
+                if run.timed_out:
+                    status_by_profile[pname] = "tle"
+                elif run.success:
+                    status_by_profile[pname] = "ok"
+                    any_diff_ok = True
+                else:
+                    status_by_profile[pname] = f"re:{run.return_code}"
+                outputs_by_profile[pname] = norm_out
+
+            signatures = {
+                (status_by_profile[pname], outputs_by_profile[pname])
+                for pname, _ in diff_binaries
+                if status_by_profile[pname] != "tle"
+            }
+            if len(signatures) > 1:
+                mismatches.append(
+                    {
+                        "input_index": idx,
+                        "input_preview": inp[:240],
+                        "outputs_by_profile": {
+                            k: v[:240] for k, v in outputs_by_profile.items()
+                        },
+                        "status_by_profile": status_by_profile,
+                        "reason": (
+                            "output/status divergence across optimization or compiler profiles "
+                            "(likely undefined behavior)"
+                        ),
+                    }
+                )
+
+            for tname, tbin in trap_binaries:
+                trun = await run_binary(
+                    tbin,
+                    inp,
+                    timeout=per_run_timeout,
+                    memory_mb=eff_mem,
+                    disable_as_limit=(tname == "msan"),
+                )
+                if not trun.timed_out and not trun.success and (any_diff_ok or not diff_binaries):
+                    ub_traps.append(
+                        {
+                            "input_index": idx,
+                            "input_preview": inp[:240],
+                            "profile": tname,
+                            "return_code": trun.return_code,
+                            "stderr": (trun.stderr or trun.error or "")[:300],
+                            "reason": (
+                                "signed-integer-overflow / UB trap triggered"
+                                if tname == "ub_trap"
+                                else "MSan detected uninitialized memory read"
+                            ),
+                        }
+                    )
+
+    ub_detected = bool(mismatches or ub_traps)
+    return {
+        "executed": True,
+        "passed": not ub_detected,
+        "ub_detected": ub_detected,
+        "profiles_compiled": profiles_compiled,
+        "profiles_skipped": profiles_skipped,
+        "compilers_tested": compilers_tested,
+        "inputs_tested": len(sampled),
+        "mismatches": mismatches,
+        "ub_traps": ub_traps,
+    }
 
 
 
@@ -406,6 +889,8 @@ class StressTestRunTool(Tool):
         *,
         problem_dir: str = "",
         sanitizer_info: dict[str, Any] | None = None,
+        shrink_result: ShrinkResult | None = None,
+        ub_probe_info: dict[str, Any] | None = None,
     ) -> ToolResult:
         """gen/sol/brute 失败时构造与串行实现一致的结构化失败结果。"""
         gr = res.global_round
@@ -415,6 +900,16 @@ class StressTestRunTool(Tool):
         if sanitizer_info is not None:
             san_extra["sanitizers_enabled"] = True
             san_extra["sanitizer_info"] = sanitizer_info
+        if shrink_result is not None:
+            sh_p, sh_tr = _truncate_stress_field(shrink_result.shrunk_input)
+            san_extra["shrunk_input"] = sh_p
+            san_extra["original_size"] = shrink_result.original_size
+            san_extra["shrunk_size"] = shrink_result.shrunk_size
+            san_extra["shrink_steps"] = shrink_result.shrink_steps
+        else:
+            sh_tr = False
+        if ub_probe_info is not None:
+            san_extra["ub_differential_probe"] = ub_probe_info
         if res.status == "gen_failed":
             gd = res.gen_detail or {}
             error_detail = gd.get("error", "Unknown error")
@@ -467,12 +962,16 @@ class StressTestRunTool(Tool):
                     extra[k] = gd[k]
             raw_err = str(gd.get("stderr") or gd.get("error") or "")
             err_p, err_tr = _truncate_stress_field(raw_err)
-            if in_tr or err_tr:
-                log_path = _spill_stress_payload(
-                    problem_dir,
-                    gr,
-                    {"status": "sol_failed", "round": gr, "input_data": res.input_data, "stderr": raw_err},
-                )
+            if in_tr or err_tr or sh_tr:
+                spill_body: dict[str, Any] = {
+                    "status": "sol_failed",
+                    "round": gr,
+                    "input_data": res.input_data,
+                    "stderr": raw_err,
+                }
+                if shrink_result is not None:
+                    spill_body["shrunk_input"] = shrink_result.shrunk_input
+                log_path = _spill_stress_payload(problem_dir, gr, spill_body)
                 extra["truncated"] = True
                 if log_path:
                     extra["failure_log_path"] = log_path
@@ -556,6 +1055,8 @@ class StressTestRunTool(Tool):
         stress_profiles: list[dict] | None = None,
         concurrency_limit: int = 4,
         enable_sanitizers: bool = False,
+        *,
+        enable_ub_probe: bool = False,
     ) -> ToolResult:
         """执行对拍测试。"""
         exe_ext = get_exe_extension()
@@ -842,12 +1343,72 @@ class StressTestRunTool(Tool):
         validator_failed = False
         validator_failure_detail: dict[str, object] = {}
         n_max_advisory = self._build_n_max_advisory(effective_n_max, complexity_context)
+        eff_mem_mb = (
+            float(manifest_model.memory_limit_mb)
+            if (
+                manifest_model is not None
+                and manifest_model.memory_limit_mb
+                and manifest_model.memory_limit_mb > 0
+            )
+            else 256.0
+        )
+        shrink_result: ShrinkResult | None = None
+        ub_probe_info: dict[str, Any] | None = None
+        sampled_inputs: list[str] = []
 
         # 统计信息收集
         round_stats: list[dict] = []
         profile_reports: list[dict] = []
 
         with tempfile.TemporaryDirectory(dir=problem_dir) as temp_dir:
+            async def _mismatch_predicate(cand_input: str) -> bool:
+                s_run = await run_binary(
+                    sol_exe,
+                    cand_input,
+                    timeout=timeout,
+                    memory_mb=eff_mem_mb,
+                    env=san_env,
+                    disable_as_limit=san_disable_as,
+                )
+                if s_run.timed_out or not s_run.success:
+                    return False
+                b_run = await run_binary(
+                    brute_exe,
+                    cand_input,
+                    timeout=timeout,
+                    memory_mb=eff_mem_mb,
+                    env=san_env,
+                    disable_as_limit=san_disable_as,
+                )
+                if b_run.timed_out or not b_run.success:
+                    return False
+                if use_checker_stress:
+                    sh_in = os.path.join(temp_dir, "shrink_in.txt")
+                    sh_sol = os.path.join(temp_dir, "shrink_sol.txt")
+                    sh_br = os.path.join(temp_dir, "shrink_brute.txt")
+                    with open(sh_in, "w", encoding="utf-8", newline="") as fi:
+                        fi.write(cand_input)
+                    with open(sh_sol, "w", encoding="utf-8", newline="\n") as fs:
+                        fs.write(s_run.stdout)
+                    with open(sh_br, "w", encoding="utf-8", newline="\n") as fb:
+                        fb.write(b_run.stdout)
+                    v1, _ = await run_testlib_checker(
+                        checker_exe, sh_in, sh_sol, sh_br, timeout=timeout
+                    )
+                    v2_ok = True
+                    if manifest_model is not None and getattr(
+                        manifest_model, "stress_checker_bidirectional", False
+                    ):
+                        v2, _ = await run_testlib_checker(
+                            checker_exe, sh_in, sh_br, sh_sol, timeout=timeout
+                        )
+                        v2_ok = v2 == "AC"
+                    return v1 != "AC" or not v2_ok
+                return (
+                    s_run.stdout.replace("\r\n", "\n").strip()
+                    != b_run.stdout.replace("\r\n", "\n").strip()
+                )
+
             global_round = 0
             for profile in profiles:
                 profile_name = str(profile.get("name") or f"profile-{len(profile_reports) + 1}")
@@ -906,8 +1467,65 @@ class StressTestRunTool(Tool):
                         if res.status == "ok":
                             if res.stats is not None:
                                 round_stats.append(res.stats)
+                            if (
+                                (enable_sanitizers or enable_ub_probe)
+                                and len(sampled_inputs) < 3
+                                and res.input_data
+                            ):
+                                sampled_inputs.append(res.input_data)
                             continue
                         if res.status in ("gen_failed", "sol_failed", "brute_failed"):
+                            if (
+                                res.status == "sol_failed"
+                                and not is_protocol
+                                and res.input_data is not None
+                            ):
+                                gd_sf = res.gen_detail or {}
+                                had_san_sf = bool(gd_sf.get("sanitizer_error"))
+                                had_to_sf = bool(gd_sf.get("timed_out"))
+
+                                async def _sol_fail_pred(
+                                    cand_input: str,
+                                    _san: bool = had_san_sf,
+                                    _to: bool = had_to_sf,
+                                ) -> bool:
+                                    r = await run_binary(
+                                        sol_exe,
+                                        cand_input,
+                                        timeout=timeout,
+                                        memory_mb=eff_mem_mb,
+                                        env=san_env,
+                                        disable_as_limit=san_disable_as,
+                                    )
+                                    if _san:
+                                        return (r.timed_out or not r.success) and _has_sanitizer_diagnostic(
+                                            r.stderr or r.error or ""
+                                        )
+                                    if _to:
+                                        return bool(r.timed_out)
+                                    return not r.timed_out and not r.success
+
+                                shrink_result = await shrink_counterexample(
+                                    res.input_data,
+                                    _sol_fail_pred,
+                                    validator_exe=val_exe if os.path.isfile(val_exe) else None,
+                                    validator_timeout=min(float(timeout), 5.0),
+                                    max_evaluations=20 if had_to_sf else 60,
+                                    timeout_sec=min(float(timeout), 3.0 if had_to_sf else 5.0),
+                                    memory_mb=eff_mem_mb,
+                                )
+                                if enable_ub_probe:
+                                    ub_sol = safe_resolve_under_root(
+                                        problem_dir, f"solutions/{effective_sol_name}.cpp"
+                                    )
+                                    if ub_sol and os.path.isfile(ub_sol):
+                                        ub_probe_info = await run_ub_differential_probe(
+                                            ub_sol,
+                                            [shrink_result.shrunk_input],
+                                            manifest=manifest_model,
+                                            timeout_sec=min(float(timeout), 5.0),
+                                            memory_mb=eff_mem_mb,
+                                        )
                             # 这些失败在串行实现中直接返回，此处同样立即返回。
                             return self._build_round_failure(
                                 res,
@@ -917,6 +1535,8 @@ class StressTestRunTool(Tool):
                                 effective_brute_name,
                                 problem_dir=problem_dir,
                                 sanitizer_info=san_probe,
+                                shrink_result=shrink_result,
+                                ub_probe_info=ub_probe_info,
                             )
                         # validator_failed / mismatch：记录并停止后续批次
                         failed_round = res.global_round
@@ -940,6 +1560,68 @@ class StressTestRunTool(Tool):
                 if failed_round:
                     break
 
+            if (
+                failed_round
+                and not validator_failed
+                and not is_protocol
+                and last_input is not None
+            ):
+                shrink_result = await shrink_counterexample(
+                    last_input,
+                    _mismatch_predicate,
+                    validator_exe=val_exe if os.path.isfile(val_exe) else None,
+                    validator_timeout=min(float(timeout), 5.0),
+                    max_evaluations=80,
+                    timeout_sec=min(float(timeout), 8.0),
+                    memory_mb=eff_mem_mb,
+                )
+                if enable_ub_probe:
+                    ub_sol = safe_resolve_under_root(
+                        problem_dir, f"solutions/{effective_sol_name}.cpp"
+                    )
+                    if ub_sol and os.path.isfile(ub_sol):
+                        ub_probe_info = await run_ub_differential_probe(
+                            ub_sol,
+                            [shrink_result.shrunk_input],
+                            manifest=manifest_model,
+                            timeout_sec=min(float(timeout), 5.0),
+                            memory_mb=eff_mem_mb,
+                        )
+
+        if (
+            not failed_round
+            and (enable_sanitizers or enable_ub_probe)
+            and not is_protocol
+            and sampled_inputs
+        ):
+            ub_sol = safe_resolve_under_root(problem_dir, f"solutions/{effective_sol_name}.cpp")
+            if ub_sol and os.path.isfile(ub_sol):
+                ub_probe_info = await run_ub_differential_probe(
+                    ub_sol,
+                    sampled_inputs,
+                    manifest=manifest_model,
+                    timeout_sec=min(float(timeout), 5.0),
+                    memory_mb=eff_mem_mb,
+                )
+                if ub_probe_info.get("ub_detected"):
+                    return ToolResult.fail(
+                        f"{effective_sol_name} triggered UB differential probe divergence/trap",
+                        completed_rounds=total_rounds,
+                        total_rounds=total_rounds,
+                        effective_n_max=effective_n_max,
+                        statistics=self._compute_summary(round_stats),
+                        stress_profiles=profile_reports,
+                        n_max_warning=n_max_advisory,
+                        n_max_advisory=n_max_advisory,
+                        complexity_context=complexity_context,
+                        ub_differential_probe=ub_probe_info,
+                        **(
+                            {"sanitizers_enabled": True, "sanitizer_info": san_probe}
+                            if san_probe is not None
+                            else {}
+                        ),
+                    )
+
         return self._format_result(
             failed_round,
             validator_failed,
@@ -955,6 +1637,8 @@ class StressTestRunTool(Tool):
             complexity_context,
             problem_dir=problem_dir,
             sanitizer_info=san_probe,
+            shrink_result=shrink_result,
+            ub_probe_info=ub_probe_info,
         )
 
     async def _generate_input(
@@ -1136,6 +1820,8 @@ class StressTestRunTool(Tool):
         *,
         problem_dir: str = "",
         sanitizer_info: dict[str, Any] | None = None,
+        shrink_result: ShrinkResult | None = None,
+        ub_probe_info: dict[str, Any] | None = None,
     ) -> ToolResult:
         """格式化测试结果。"""
         statistics = self._compute_summary(round_stats or [])
@@ -1143,24 +1829,33 @@ class StressTestRunTool(Tool):
         if sanitizer_info is not None:
             san_extra["sanitizers_enabled"] = True
             san_extra["sanitizer_info"] = sanitizer_info
+        if shrink_result is not None:
+            sh_p, sh_tr = _truncate_stress_field(shrink_result.shrunk_input)
+            san_extra["shrunk_input"] = sh_p
+            san_extra["original_size"] = shrink_result.original_size
+            san_extra["shrunk_size"] = shrink_result.shrunk_size
+            san_extra["shrink_steps"] = shrink_result.shrink_steps
+        else:
+            sh_tr = False
+        if ub_probe_info is not None:
+            san_extra["ub_differential_probe"] = ub_probe_info
 
         if failed_round:
             in_p, in_tr = _truncate_stress_field(last_input)
             sol_p, sol_tr = _truncate_stress_field(sol_output)
             br_p, br_tr = _truncate_stress_field(brute_output)
             spill_extra: dict[str, Any] = {}
-            if in_tr or sol_tr or br_tr:
-                log_path = _spill_stress_payload(
-                    problem_dir,
-                    failed_round,
-                    {
-                        "status": "validator_failed" if validator_failed else "mismatch",
-                        "round": failed_round,
-                        "input_data": last_input,
-                        "sol_output": sol_output,
-                        "brute_output": brute_output,
-                    },
-                )
+            if in_tr or sol_tr or br_tr or sh_tr:
+                spill_payload: dict[str, Any] = {
+                    "status": "validator_failed" if validator_failed else "mismatch",
+                    "round": failed_round,
+                    "input_data": last_input,
+                    "sol_output": sol_output,
+                    "brute_output": brute_output,
+                }
+                if shrink_result is not None:
+                    spill_payload["shrunk_input"] = shrink_result.shrunk_input
+                log_path = _spill_stress_payload(problem_dir, failed_round, spill_payload)
                 spill_extra["truncated"] = True
                 if log_path:
                     spill_extra["mismatch_log_path"] = log_path
