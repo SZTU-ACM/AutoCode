@@ -10,10 +10,10 @@
 
 它围绕两条核心主线展开：
 
-1. **自动出题（AI 辅助命题流水线）**：接入 Claude Code、Codex、DeepSeek Harness (`dsh`) 或 Antigravity (`agy`) 后，将 AI 生成的题面、解法、校验器、生成器、对拍、测试数据与多 OJ 打包放进一条可验证、可审计、会阻止跳步的出题流水线。
-2. **自动验题（零 AI 依赖的独立验题引擎）**：通过命令行 `autocode-audit --standalone` 直接对任意现有题包（Polygon / Hydro / QOJ / 国内常见 `data/ + std.cpp` 布局）执行只读质量审计与数据强度检测，不修改原题包目录，也可直接接入命题仓库的 GitHub Actions PR 审题流。
+1. **自动出题（AI 辅助命题流水线）**：接入 Claude Code、Codex、DeepSeek Harness (`dsh`) 或 Antigravity (`agy`) 后，将 AI 生成的题面、解法、校验器、生成器、对拍、测试数据与 5 大 OJ 格式（Polygon / Hydro / QOJ / ICPC-Kattis / IOI CMS）打包放进一条可验证、可审计、会阻止跳步的出题流水线。
+2. **自动验题（零 AI 依赖的独立验题引擎）**：通过命令行 `autocode-audit --standalone` 直接对任意现有题包（Polygon `problem.xml` / 无后缀 `01`+`01.a` / Hydro / QOJ / 国内常见 `data/ + std.cpp` 布局）执行只读质量审计与数据强度检测，支持可插拔执行沙箱（`--sandbox`）与严格门控（`--strict`），不修改原题包目录，也可直接接入命题仓库的 GitHub Actions PR 审题流。
 
-仓库内部包含 `autocode-mcp` MCP Server（22 个原子工具）及 `autocode-audit`、`autocode-verify` 独立命令行工具，所有受支持的 AI 客户端共享同一套工作流 Agent、Skills 与服务端门禁。
+仓库内部包含 `autocode-mcp` MCP Server（22 个原子工具、MCP 2026 Tasks/Apps 与可选无状态 Streamable HTTP）及 `autocode-audit`、`autocode-verify` 等独立命令行工具，所有受支持的 AI 客户端共享同一套工作流 Agent、Skills 与服务端门禁。
 
 ## 为什么需要 AutoCode
 
@@ -27,7 +27,7 @@ AI 可以快速给出题目想法和代码，但竞赛题真正难的是“可�
 - Generator 只有随机数据，覆盖不到边界、构造、极限和 TLE 场景，或 `extreme` 与 `tle` 样例只是把参数放大而无语义差异。
 - 错解没有被终测数据杀掉，或测试数据存在覆盖缺口、无法拦截标程的单点边界变异。
 - 交互题缺少刷新/死锁/超限校验，通信题未严格核验轮次与比特/字节预算。
-- 导出 Polygon / Hydro / QOJ 题包前才发现题面、题解、manifest、子任务、时限单位（`ms` vs `s`）或判题组件不一致。
+- 导出 Polygon / Hydro / QOJ / ICPC-Kattis / CMS 题包前才发现题面、题解、manifest、子任务、时限单位（`ms` vs `s`）或判题组件不一致。
 
 AutoCode 的目标是把这些风险前置暴露，而不是等到出题完成甚至开赛后再人工返工。
 
@@ -37,18 +37,18 @@ AutoCode 把“自动出题”和“自动验题”拆成一组必须通过的�
 
 | 风险 | AutoCode 的处理方式 |
 |------|---------------------|
-| 题意不可判定、约束缺失 | `autocode-idea-auditor` 和 `idea-feasibility` 在实现前做只读审计 |
-| 题面样例错误、范围漂移 | `problem_validate` 与审计器核验题面范围与 `val.cpp` 一致性，并用标程实际验证样例 |
-| 标程复杂度误判或隐藏 UB | `solution_analyze` 结合多规模实测拟合时间复杂度，支持隔离 ASan / UBSan 探针排查越界与未定义行为 |
+| 题意不可判定、重复撞题或约束歧义 | `autocode-idea-auditor`、`idea-feasibility` 与 `originality.py` / Z3 SMT 约束分析在实现前做只读审计 |
+| 题面样例错误、范围漂移 | `problem_validate`、`smt_constraints.py`（`constraints.h` 双向生成）与审计器核验题面范围与 `val.cpp` 一致性，并用标程实际验证样例 |
+| 标程复杂度误判或隐藏 UB | `solution_analyze` 结合 AST/调用图、多规模实测与硬件性能计数器（`perf` / `cachegrind`）拟合时间复杂度，支持多 Sanitizer（ASan/UBSan/MSan/TSan）UB 探针 |
 | 标程或暴力解不可信 | `solution_audit_std` / `solution_audit_brute` 审计解法假设与暴力独立性 |
-| 标程存在边界 bug | `stress_test_run` 用 `sol` / `brute` 多 profile 自动对拍 |
-| 测试数据覆盖弱 | `problem_generate_tests` 生成 `tiny / random / extreme / tle` 多策略数据，并保证极限类比例 |
-| `type=3` / `type=4` 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限与 TLE 数据差异 |
-| 错解未被杀掉或数据存在薄弱点 | `wrong_solution_kill` 统计所有错解拦截结果；`--mutation-check` 对标程做单点变异测试定位数据覆盖缺口 |
-| 交互死锁或通信预算越界 | `InteractiveRunner` 检测双进程死锁与异常退出；`CommunicationRunner` 原生校验 `run_twice` / `grader_linked` / `multi_process` 的比特、字节与轮次预算 |
-| AI 出题工作流跳步 | 服务端门禁与客户端 hooks 协同拦截，缺少前置验证步骤会直接拒绝后置调用 |
-| 现有外部题包赛前复核困难 | `autocode-audit --standalone` 零 AI 依赖只读审题，支持多布局自动识别与 PR 自动门禁 |
-| 导出多 OJ 格式漂移 | `problem_pack_polygon` 支持导出 Polygon / Hydro / QOJ 并在导出后自动回读校验 |
+| 标程存在边界 bug | `stress_test_run` 用 `sol` / `brute` 多 profile 自动对拍（内置 `testlib.h` 与 `jngen.h`），并支持 `CounterexampleShrinker` 确定性缩减反例 |
+| 测试数据覆盖弱 | `problem_generate_tests` 与进化生成器 `scripts/evolve_generator.py` 生成 `tiny / random / extreme / tle` 数据，保证极限类比例与 `gcov` 分支覆盖率 |
+| `type=3` / `type=4` 语义重复 | `problem_verify_tests` 的 `limit_semantics` 检查极限与 TLE 数据差异，并提供 `test_compactor` 消除冗余 |
+| 错解未被杀掉或数据存在薄弱点 | `wrong_solution_kill` 按精确 `expected_verdict`（`AC|WA|TLE|MLE|RE|PE`）统计拦截结果；`--mutation-check`（含 AST 变异）定位数据覆盖缺口 |
+| 交互死锁或通信预算越界 | `InteractiveRunner` 检测双进程死锁与异常退出；`CommunicationRunner` 原生校验 `run_twice` / `grader_linked` / `multi_process` 的比特、字节与轮次预算；支持 `cpp`/`python`/`pypy`/`rust`/`java` |
+| AI 出题工作流跳步或弱门禁绕过 | `autocode-redteam-auditor` 红队审题与服务端工具链门禁/hooks 协同拦截 |
+| 现有外部题包赛前复核困难 | `autocode-audit --standalone` 零 AI 依赖只读审题，支持多布局自动识别、`--sandbox` 隔离与 PR 自动门禁 |
+| 导出多 OJ 格式漂移 | `problem_pack_polygon` 支持导出 Polygon / Hydro / QOJ / ICPC-Kattis / CMS 并在导出后自动回读校验；支持 Polygon REST 同步与 Typst PDF 渲染 |
 
 核心原则：**AI 负责生成候选内容，AutoCode 负责让每一步必须被验证。**
 
@@ -58,7 +58,7 @@ AutoCode 适合：
 
 - **需要自动出题的命题人**：想用 AI 加速出题，但要求题面、样例、复杂度、对拍、测试数据与错解拦截全部经过实测验证。
 - **赛前审题人与命题组**：想用 `autocode-audit --standalone` 对人工或 AI 产出的外部题包做独立只读自动验题，或接入 GitHub PR 自动审题门禁。
-- **竞赛组织者与教练**：需要将题目从 idea 稳定推进到可直接导入 Polygon / Hydro / QOJ 的标准题包。
+- **竞赛组织者与教练**：需要将题目从 idea 稳定推进到可直接导入 Polygon / Hydro / QOJ / ICPC-Kattis / CMS 的标准题包。
 - **多客户端 AI 开发者**：希望在 Claude Code、Codex、DeepSeek Harness (`dsh`) 或 Antigravity (`agy`) 中使用同一套可验证的命题工作流。
 
 ## 快速开始
@@ -69,7 +69,7 @@ AutoCode 适合：
 - [`uv`](https://docs.astral.sh/uv/)
 - 支持 C++20 的 `g++`（推荐 GCC 10+；macOS 如使用 Homebrew GCC 可在 `manifest.json` 中配置 `compiler`）
 
-`testlib.h` 已内置在 `src/autocode_mcp/templates/`，无需额外下载。
+`testlib.h` 与 `jngen.h` 已内置在 `src/autocode_mcp/templates/`，无需额外下载。可选增强依赖（`tree-sitter-cpp` AST 变异/分析与 `z3-solver` 形式化约束）可通过 `uv sync --extra ast --extra formal` 或 `uv sync --all-extras` 安装。
 
 ### 自动出题：安装 AI 插件
 
@@ -106,10 +106,10 @@ cp -R ./autocode-marketplace/plugins/autocode-agy ~/.gemini/config/plugins/autoc
 
 安装完成后，各客户端均会启用同一套 AutoCode 能力：
 
-- 工作流与审计 Agent：`autocode-workflow`、`autocode-idea-auditor`、`autocode-solution-auditor`、`autocode-package-auditor`
-- 工作流 Skills：`autocode-workflow`、`idea-feasibility`、`solution-complexity-audit`、`stress-strategy`、`statement-audit`、`testdata-quality`
+- 工作流与审计 Agent：`autocode-workflow`、`autocode-idea-auditor`、`autocode-solution-auditor`、`autocode-package-auditor`、`autocode-redteam-auditor`
+- 工作流 Skills：`autocode-workflow`、`idea-feasibility`、`solution-complexity-audit`、`stress-strategy`、`statement-audit`、`testdata-quality`、`problem-validate`、`problem-difficulty-rating`、`redteam-hacking`、`evolutionary-testdata`、`agent-skill-governance`
 - 流程门禁：服务端工具链门禁及各客户端对应的 Hooks / Rules
-- MCP Server：`autocode-mcp`（22 个原子工具）
+- MCP Server：`autocode-mcp`（22 个原子工具，附带 `ToolAnnotations` / `outputSchema` / MCP Tasks 与 3 个零 CDN `ui://autocode/*` MCP Apps）
 
 #### 让 AI 帮你安装（或更新）
 
@@ -142,17 +142,17 @@ cp -R ./autocode-marketplace/plugins/autocode-agy ~/.gemini/config/plugins/autoc
 
 ```bash
 # 从 GitHub Release Tag 直接安装（推荐）
-uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v3.3.0
+uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v4.0.0
 
 # 或者从 GitHub Releases 下载预构建 wheel 离线安装
-# uv tool install autocode_mcp-3.3.0-py3-none-any.whl
+# uv tool install autocode_mcp-4.0.0-py3-none-any.whl
 ```
 
-对任意外部题包执行**只读自动验题**（支持 `--layout auto|autocode|standard_cn|polygon|hydro`、可选 `--mutation-check` 单点变异测试、`--strict` 严格完整性门控，以及 `--format json|markdown|summary`）：
+对任意外部题包执行**只读自动验题**（支持 `--layout auto|autocode|standard_cn|polygon|hydro`、`--sandbox auto|none|bwrap|nsjail|isolate|apple_container`、可选 `--mutation-check` 单点变异测试、`--strict` 严格完整性门控，以及 `--format json|markdown|summary`）：
 
 ```bash
 autocode-audit /path/to/problem_dir \
-  --standalone --layout auto --mutation-check --strict \
+  --standalone --layout auto --sandbox auto --mutation-check --strict \
   --format markdown --report audit_report.json
 ```
 
@@ -184,7 +184,7 @@ problem_create
   -> problem_generate_tests
   -> problem_verify_tests(passed)
   -> problem_audit(mode=full, decision=go)
-  -> problem_pack_polygon(polygon / hydro / qoj)
+  -> problem_pack_polygon(polygon / hydro / qoj / icpc_kattis / cms)
 ```
 
 交互题差异：
@@ -196,18 +196,19 @@ validator_build / checker_build
 
 交互题不是简单地“没有标准输入输出”。`statements/README.md` 必须把协议写成可执行契约：谁先输出、隐藏参数范围、每种查询和最终答案的格式、judge 响应含义、查询次数上限、每次输出后的 flush、最终答案后的退出规则，以及非法格式、越界参数、查询超限、提前 EOF、未 flush/阻塞时的判定。样例应写成交互 transcript，明确哪些行来自 judge、哪些行来自选手。
 
-`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `std::cout` 向选手管道发送交互数据并在每次响应后执行 `std::cout.flush()`（或 `std::flush` / `std::endl`），用 `ouf` 读取选手输出，用 `tout`（`argv[2]`）写入可选的诊断日志（不会发送给选手），所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的判定。
+`files/interactor.cpp` 必须使用 testlib 的 `registerInteraction(argc, argv)`：用 `inf` 读测试输入，用可选 `ans` 读参考数据，用 `std::cout` 向选手管道发送交互数据并在每次响应后执行 `std::cout.flush()`（或 `std::flush` / `std::endl`），用 `ouf` 读选手输出，用 `tout`（`argv[2]`）写入可选的诊断日志（不会发送给选手），所有分支用 `quitf(_ok/_wa/_pe/_fail, ...)` 结束。`interactor_build` 支持 `interaction_scenarios`，可用脚本化 `contestant_output` 验证 interactor 对 AC、错误答案、非法命令、越界查询、查询超限和提前 EOF 的判定。
 
-通信题支持：
+通信题与多语言支持：
 
 - 原生支持三类通信模式：两阶段进程隔离（`run_twice`）、头文件与 Grader 联合编译（`grader_linked`）、以及多方并发进程通信（`multi_process`）。
 - 内置 `CommunicationRunner` 自动执行通信协议校验，强制核验比特、字节、轮次与查询次数预算。
+- `lang_runner.py` 原生支持 5 种语言评测（`cpp`、`python`、`pypy`、`rust`、`java`）及分语言时限倍率，并支持通过 `--sandbox` / `manifest.sandbox` 启用 `bwrap` / `nsjail` / `isolate` / `apple_container` 隔离。
 
 独立自动验题路径（无需 `.autocode/` 目录，零写入只读）：
 
 ```text
-外部题包 (Polygon / Hydro / QOJ / standard_cn)
-  -> autocode-audit --standalone --layout auto
+外部题包 (Polygon problem.xml / Hydro / QOJ / standard_cn)
+  -> autocode-audit --standalone --layout auto --sandbox auto
   -> 结构与约束审计 + ASan/UBSan + 复杂度实测 + 错解矩阵 + 可选单点变异测试
   -> 输出 decision=go / no_go (JSON / Markdown / Summary)
 ```
@@ -306,8 +307,8 @@ uv run autocode-verify examples/exact-sample
 - `no_empty`：没有空文件。
 - `limit_ratio`：最终数据中 `type=3/4` 至少占一半。
 - `limit_semantics`：`type=3` 和 `type=4` 不能高度重合。
-- `wrong_solution_kill`：对 manifest 中 `role=wrong` 的解法跑终测。默认 `expected` 为 `fail`，要求至少一测未通过 checker 或与 `.ans` 不一致；若某条目标解在终测上应合法，可设 `expected: "pass"`，此时要求全部测例通过。
-- **进阶自动验题能力**：支持隔离 ASan / UBSan 标程检测、多规模实证复杂度拟合、C++ 单点变异测试（`--mutation-check`）识别薄弱测试点，以及导出至 Polygon / Hydro / QOJ 后的自动回读校验。
+- `wrong_solution_kill`：对 manifest 中 `role=wrong` 的解法跑终测，支持精确期望判定 `expected_verdict`（`AC|WA|TLE|MLE|RE|PE`）或 `expected`（`fail`/`pass`），要求至少一测命中预期异常或按严格规则拦截。
+- **进阶自动验题能力**：支持隔离 ASan/UBSan/MSan/TSan 多 Sanitizer UB 探针、AST/调用图与硬件计数器复杂度拟合、C++ 单点/AST 变异测试（`--mutation-check`）、`gcov` 分支覆盖率与反例缩减、可选 Z3 SMT 约束校验与 `constraints.h` 双向生成、以及导出 Polygon / Hydro / QOJ / ICPC-Kattis / CMS 后的自动回读校验。
 
 `problem_generate_tests` 支持：
 
@@ -353,11 +354,18 @@ AutoCode 暴露 22 个 MCP 原子工具。日常自动出题时无需手动调�
 # 对 AutoCode 题目工作区执行全量审计
 autocode-audit <problem_dir> --mode full --format markdown --report audit_report.json
 
-# 对任意外部题包执行零写入独立验题（追加 --strict 可将缺失 validator/错解从告警升级为阻断项）
-autocode-audit <problem_dir> --standalone --layout auto --mutation-check --strict --format markdown
+# 对任意外部题包执行零写入独立验题（追加 --strict 升级省略项为阻断，--sandbox auto 启用可用沙箱）
+autocode-audit <problem_dir> --standalone --layout auto --sandbox auto --mutation-check --strict --format markdown
 ```
 
 若在 `manifest.json` 中设置 `audit_gates.require_full_audit=true`，`problem_pack_polygon` 会要求最近一次 `problem_audit(mode=full)` 为 `go` 后才允许打包导出。
+
+### 附加 CLI 与评测套件
+
+- **Polygon REST 同步**：`uv run python -m autocode_mcp.cli.polygon_sync --help`（凭据仅从环境变量读取，支持拉取与预检推送）。
+- **Typst PDF 题面渲染**：`uv run python -m autocode_mcp.cli.render_pdf <problem_dir>`（将 Markdown 题面/题解转为 `.typ` 并调用 `typst` 编译 PDF）。
+- **进化测试数据与技能优化**：`scripts/evolve_generator.py` 与 `scripts/optimize_skills_gepa.py`。
+- **离线基准评测套件**：`uv run python evals/standalone_benchmark.py --format summary`（详见 [evals/README.md](evals/README.md)）。
 
 ## 示例目录
 
@@ -374,11 +382,14 @@ autocode-audit <problem_dir> --standalone --layout auto --mutation-check --stric
 插件资产与 `autocode-mcp` 源码同仓管理。本地启动 server 用于开发调试：
 
 ```bash
-uv sync
+uv sync --all-extras
 uv run autocode-mcp
+
+# 可选：启动本地无状态 Streamable HTTP 传输（默认仅绑定 loopback 127.0.0.1:8765，含 Host/Origin DNS Rebinding 防护）
+uv run autocode-mcp --transport http --host 127.0.0.1 --port 8765
 ```
 
-当前仅支持本地 stdio 传输，不支持 HTTP/SSE 或远程连接。更多开发者规范与架构说明请参阅 [CLAUDE.md](CLAUDE.md)。
+`autocode-mcp` 默认使用标准 `stdio` 传输，同时支持本地无状态 Streamable HTTP（`--transport http`）、MCP 2026 `ToolAnnotations` / `outputSchema` / 异步 Tasks，以及 3 个零外部 CDN 的交互式 `ui://autocode/*` MCP Apps 资源。更多开发者规范与架构说明请参阅 [CLAUDE.md](CLAUDE.md)。
 
 ## 贡献
 

@@ -12,10 +12,10 @@ Define the standalone, zero-AI, read-only auditing capability (`autocode-audit -
 - **THEN** no `.autocode/` directory, compiled binaries, or temporary artifacts are written inside `<external_dir>`
 
 ### Requirement: Multi-layout package adaptation and verification checks
-The standalone audit SHALL support `--layout auto|autocode|standard_cn|polygon|hydro`, enforce path containment and symlink escape checks, run live validator/solution/wrong-solution verification, statement-to-validator consistency checks, empirical complexity checks (when configured/applicable), and optional `--mutation-check` single-point C++ mutation testing.
+The standalone audit SHALL support `--layout auto|autocode|standard_cn|polygon|hydro` (including Polygon `problem.xml` and extensionless `01`/`01.a` pairs), optional `--strict` completeness gating (promoting missing validators or wrong solutions from warnings to blocking issues), pluggable sandbox backends via `--sandbox auto|none|bwrap|nsjail|isolate|apple_container`, path containment and symlink escape checks, live validator/solution/wrong-solution verification (with ASan/UBSan and empirical complexity checks), statement-to-validator consistency checks, and optional `--mutation-check` single-point/AST C++ mutation testing (including communication problems).
 
 #### Scenario: Layout auto-detection and wrong-solution / mutation checks
-- **WHEN** an external package in `standard_cn`, `polygon`, or `hydro` layout is audited with `--standalone --layout auto --mutation-check`
+- **WHEN** an external package in `standard_cn`, `polygon`, or `hydro` layout is audited with `--standalone --layout auto --sandbox auto --mutation-check --strict`
 - **THEN** the adapter discovers statement, solutions, validator/checker/interactor, and testdata safely in isolated temp builds and reports deterministic `decision` (`go` | `no_go`), `blocking_issues`, and `quality_signals`
 
 ### Requirement: Deterministic CLI exit code contract
