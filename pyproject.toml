@@ -25,6 +25,7 @@ ast = [
     "tree-sitter>=0.23",
     "tree-sitter-cpp>=0.23",
 ]
+formal = ["z3-solver>=4.13"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

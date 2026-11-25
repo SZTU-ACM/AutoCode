@@ -11,6 +11,7 @@ from ..utils.checker_judge import run_testlib_checker as run_testlib_checker
 from ..utils.compiler import compile_cpp as compile_cpp
 from ..utils.compiler import run_binary as run_binary
 from ..utils.compiler import run_binary_with_args as run_binary_with_args
+from ..utils.coverage import run_solution_coverage
 from ..utils.platform import get_exe_extension as get_exe_extension
 from ..workflow import (
     AutoCodeManifest,
@@ -187,6 +188,12 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
                 if explicit_all and manifest_model is not None and manifest_model.constraints:
                     if "boundary_coverage" not in verify_types:
                         verify_types.append("boundary_coverage")
+                if explicit_all or (
+                    manifest_model is not None
+                    and manifest_model.audit_gates.min_branch_coverage is not None
+                ):
+                    if "coverage" not in verify_types:
+                        verify_types.append("coverage")
         else:
             verify_types = list(verify_types)
 
@@ -368,6 +375,19 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
             if not result["passed"] and not result.get("skipped", False):
                 all_passed = False
 
+        if "coverage" in verify_types:
+            result = await self._check_coverage(
+                problem_dir=problem_dir,
+                tests_dir=tests_dir,
+                sol_name=effective_sol_name,
+                answer_ext=resolved_answer_ext,
+                timeout=timeout,
+                manifest=manifest_model,
+            )
+            results["coverage"] = result
+            if not result["passed"] and not result.get("skipped", False):
+                all_passed = False
+
         # 汇总
         total_checks = len(results)
         passed_checks = sum(
@@ -377,7 +397,8 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
         effective_checks = total_checks - skipped_checks
         quality_signals = self._build_quality_signals(verify_types, results, manifest=manifest_model)
         executed_signals = sorted(
-            _SIGNAL_MAP[v] for v in verify_types if v in _SIGNAL_MAP
+            {_SIGNAL_MAP[v] for v in verify_types if v in _SIGNAL_MAP}
+            | ({"coverage"} if "coverage" in verify_types else set())
         )
 
         if all_passed and effective_checks:
@@ -437,6 +458,25 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
                 limit_ratio_enabled=enable_limit_ratio,
             )
 
+    async def _check_coverage(
+        self,
+        problem_dir: str,
+        tests_dir: str,
+        sol_name: str,
+        answer_ext: str,
+        timeout: int,
+        *,
+        manifest: AutoCodeManifest | None = None,
+    ) -> dict:
+        return await run_solution_coverage(
+            problem_dir=problem_dir,
+            tests_dir=tests_dir,
+            sol_name=sol_name,
+            answer_ext=answer_ext,
+            timeout=timeout,
+            manifest=manifest,
+        )
+
     def _build_quality_signals(
         self,
         verify_types: list[str],
@@ -456,6 +496,16 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
                 "executed": executed,
                 "passed": bool(result.get("passed")) if executed else False,
                 "evidence": result if executed else {},
+            }
+
+        if "coverage" in verify_set:
+            cov_res = results.get("coverage")
+            cov_dict = cov_res if isinstance(cov_res, dict) else {}
+            cov_exec = isinstance(cov_res, dict) and not bool(cov_dict.get("skipped", False))
+            signals["coverage"] = {
+                "executed": cov_exec,
+                "passed": bool(cov_dict.get("passed")) if cov_exec else False,
+                "evidence": cov_dict if cov_exec else {},
             }
 
         if manifest is not None:

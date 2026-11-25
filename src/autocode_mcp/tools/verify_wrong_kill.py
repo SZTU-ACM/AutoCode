@@ -39,6 +39,17 @@ from .verify_fingerprint import (
 class _VerifyWrongKillMixin(_VerifyHelpersMixin):
     """Standard solution timing baseline and wrong-solution kill / host-bias verification."""
 
+    @staticmethod
+    def _wrong_expected_verdict(
+        wrong_name: str,
+        manifest: AutoCodeManifest | None,
+    ) -> str | None:
+        if manifest is not None:
+            for s in manifest.solutions:
+                if s.name == wrong_name and s.role == "wrong":
+                    return s.expected_verdict
+        return None
+
     async def _measure_std_timings(
         self,
         problem_dir: str,
@@ -224,6 +235,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
         )
         details = []
         all_killed = True
+        all_verdicts_matched = True
+        verdict_mismatches: list[dict[str, Any]] = []
 
         has_manifest_tl = bool(manifest and getattr(manifest, "time_limit_ms", None))
         tl_ms = float(manifest.time_limit_ms) if (manifest and has_manifest_tl) else min(5000.0, float(timeout) * 1000.0)
@@ -285,11 +298,18 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                     manifest_wrong_paths[s.name] = s.path
 
         for wrong_name in wrong_solution_names:
+            exp_verdict = (
+                self._wrong_expected_verdict(wrong_name, manifest)
+                if isinstance(wrong_name, str)
+                else None
+            )
             if not isinstance(wrong_name, str) or not is_safe_stem(wrong_name):
                 details.append(
                     {
                         "name": str(wrong_name),
                         "killed": False,
+                        "expected_verdict": exp_verdict,
+                        "expected_verdict_matched": exp_verdict is None,
                         "reason": f"invalid wrong solution name (must be a safe file stem): {wrong_name!r}",
                     }
                 )
@@ -311,6 +331,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                         {
                             "name": wrong_name,
                             "killed": False,
+                            "expected_verdict": exp_verdict,
+                            "expected_verdict_matched": exp_verdict is None,
                             "reason": f"refusing symlinked wrong binary: {bin_rel}",
                         }
                     )
@@ -322,6 +344,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                         {
                             "name": wrong_name,
                             "killed": False,
+                            "expected_verdict": exp_verdict,
+                            "expected_verdict_matched": exp_verdict is None,
                             "reason": f"wrong binary path escapes problem_dir: {bin_rel}",
                         }
                     )
@@ -390,6 +414,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                         {
                             "name": wrong_name,
                             "killed": False,
+                            "expected_verdict": exp_verdict,
+                            "expected_verdict_matched": exp_verdict is None,
                             "auto_compiled": False,
                             "reason": "auto-compile failed",
                             "compile_error": (comp_res.stderr or "")[:500],
@@ -400,7 +426,15 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                 auto_compiled = True
 
             if not binary_path.exists():
-                details.append({"name": wrong_name, "killed": False, "reason": "binary not found"})
+                details.append(
+                    {
+                        "name": wrong_name,
+                        "killed": False,
+                        "expected_verdict": exp_verdict,
+                        "expected_verdict_matched": exp_verdict is None,
+                        "reason": "binary not found",
+                    }
+                )
                 all_killed = False
                 continue
 
@@ -589,6 +623,15 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
             else:
                 killed = all(v == "AC" for v in per_test)
 
+            if exp_verdict is None:
+                expected_verdict_matched = True
+            elif judge_failed or not per_test:
+                expected_verdict_matched = False
+            elif exp_verdict == "AC":
+                expected_verdict_matched = all(v == "AC" for v in per_test)
+            else:
+                expected_verdict_matched = killing_verdict == exp_verdict
+
             wrong_times = [float(item["time_ms"]) for item in per_test_timings]
             wrong_mems = [
                 float(item["memory_mb"])
@@ -641,6 +684,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                 "name": wrong_name,
                 "killed": killed,
                 "expected": exp,
+                "expected_verdict": exp_verdict,
+                "expected_verdict_matched": expected_verdict_matched,
                 "auto_compiled": auto_compiled,
                 "max_time_ms": max_time_ms,
                 "total_time_ms": total_time_ms,
@@ -652,7 +697,8 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                 "per_test_timings": per_test_timings,
                 "hint": (
                     "expected=fail：须至少一测非 AC（interactor/checker）或与 .ans 不一致（exact）；"
-                    "expected=pass：须全部 AC 或与 .ans 一致"
+                    "expected=pass：须全部 AC 或与 .ans 一致；"
+                    "若配置 expected_verdict，实际 verdict 必须精确匹配"
                 ),
             }
             if suspect_slow_tests:
@@ -681,9 +727,47 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                     entry["killing_test"] = killing_test
                 if killing_tle_reason:
                     entry["killing_tle_reason"] = killing_tle_reason
+
+            if not expected_verdict_matched and not judge_failed:
+                actual_v = killing_verdict if killing_verdict is not None else ("AC" if per_test else "NONE")
+                loc = f" on {killing_test}" if killing_test else ""
+                mismatch_msg = (
+                    f"Expected verdict '{exp_verdict}' for wrong solution '{wrong_name}', "
+                    f"but observed '{actual_v}'{loc}"
+                )
+                entry["reason"] = mismatch_msg
+                verdict_mismatches.append(
+                    {
+                        "name": wrong_name,
+                        "expected_verdict": exp_verdict,
+                        "actual_verdict": actual_v,
+                        "test": killing_test,
+                        "message": mismatch_msg,
+                    }
+                )
+                all_verdicts_matched = False
+
             details.append(entry)
             if not killed:
                 all_killed = False
+
+        all_passed = all_killed and all_verdicts_matched
+        if all_passed:
+            summary_msg = "All wrong solutions were killed"
+        elif not all_killed and not all_verdicts_matched:
+            mismatch_names = ", ".join(m["name"] for m in verdict_mismatches)
+            summary_msg = (
+                "Some wrong solutions survived all tests and expected_verdict mismatched "
+                f"({mismatch_names})"
+            )
+        elif not all_verdicts_matched:
+            mismatch_desc = "; ".join(
+                f"{m['name']} (expected {m['expected_verdict']}, got {m['actual_verdict']})"
+                for m in verdict_mismatches
+            )
+            summary_msg = f"Wrong solution expected_verdict mismatch: {mismatch_desc}"
+        else:
+            summary_msg = "Some wrong solutions survived all tests"
 
         mode_extra = (
             {"mode": f"communication:{comm_mode}"}
@@ -695,12 +779,17 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
             )
         )
         return {
-            "passed": all_killed,
+            "passed": all_passed,
             "validated": True,
             "details": details,
             **(
                 {"undeclared_wrong_solutions": list(undeclared_wrong_solutions)}
                 if undeclared_wrong_solutions
+                else {}
+            ),
+            **(
+                {"verdict_mismatches": verdict_mismatches}
+                if verdict_mismatches
                 else {}
             ),
             "tle_policy": {
@@ -710,6 +799,6 @@ class _VerifyWrongKillMixin(_VerifyHelpersMixin):
                 "hard_timeout_ms": round(hard_timeout_sec * 1000.0, 1),
                 "wrong_slowdown_kill_ratio": effective_slowdown_ratio,
             },
-            "message": "All wrong solutions were killed" if all_killed else "Some wrong solutions survived all tests",
+            "message": summary_msg,
             **mode_extra,
         }

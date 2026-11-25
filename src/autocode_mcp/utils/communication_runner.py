@@ -45,6 +45,13 @@ from .judge_runner import (
 )
 from .platform import get_exe_extension
 from .process import disable_posix_core_dumps, terminate_pid_tree
+from .sandbox import (
+    SandboxUnavailableError,
+    build_runner_ro_paths,
+    get_active_sandbox_executor,
+    resolve_wrapped_invocation,
+    sandbox_context,
+)
 
 if TYPE_CHECKING:
     from ..workflow.models import AutoCodeManifest
@@ -156,14 +163,25 @@ async def _run_communicator_stage(
         popen_kwargs["start_new_session"] = True
         popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
+    executor = get_active_sandbox_executor()
+    exec_cmd, exec_cwd, exec_env = resolve_wrapped_invocation(
+        executor,
+        [communicator_exe, *argv_files],
+        cwd=cwd,
+        ro_paths=build_runner_ro_paths(communicator_exe, cwd),
+        rw_paths=(),
+        allow_network=False,
+        time_limit_ms=timeout_sec * 1000.0,
+        base_env=env,
+    )
+
     proc = await asyncio.create_subprocess_exec(
-        communicator_exe,
-        *argv_files,
+        *exec_cmd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=env,
+        cwd=exec_cwd,
+        env=exec_env,
         **popen_kwargs,
     )
     out_task = asyncio.create_task(_read_bounded(proc.stdout, _STREAM_LIMIT))
@@ -808,17 +826,26 @@ class CommunicationRunner:
             mgr_env["AUTOCODE_COMM_MODE"] = "multi_process"
             mgr_env["AUTOCODE_COMM_PROCS"] = str(num_procs)
 
+            executor = get_active_sandbox_executor()
+            mgr_cmd, mgr_cwd, mgr_exec_env = resolve_wrapped_invocation(
+                executor,
+                [abs_mgr, in_path, out_path, ans_path],
+                cwd=tmp_dir,
+                ro_paths=build_runner_ro_paths(abs_mgr, exclude_dirs=(tmp_dir,)),
+                rw_paths=(tmp_dir,),
+                allow_network=False,
+                time_limit_ms=wall_cap_sec * 1000.0,
+                base_env=mgr_env,
+            )
+
             wall_start = time.perf_counter()
             mgr_proc = await asyncio.create_subprocess_exec(
-                abs_mgr,
-                in_path,
-                out_path,
-                ans_path,
+                *mgr_cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=tmp_dir,
-                env=mgr_env,
+                cwd=mgr_cwd,
+                env=mgr_exec_env,
                 **popen_kwargs,
             )
 
@@ -830,13 +857,24 @@ class CommunicationRunner:
                     part_env = dict(os.environ)
                     part_env["AUTOCODE_PARTICIPANT_ID"] = str(idx)
                     part_env["AUTOCODE_PARTICIPANT_COUNT"] = str(num_procs)
+                    part_cmd, part_exec_cwd, part_exec_env = resolve_wrapped_invocation(
+                        executor,
+                        [part_exe],
+                        cwd=part_cwd,
+                        ro_paths=build_runner_ro_paths(part_exe, exclude_dirs=(part_cwd,)),
+                        rw_paths=(part_cwd,),
+                        allow_network=False,
+                        memory_limit_mb=effective_mem_mb,
+                        time_limit_ms=effective_tl_ms,
+                        base_env=part_env,
+                    )
                     p_proc = await asyncio.create_subprocess_exec(
-                        part_exe,
+                        *part_cmd,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        cwd=part_cwd,
-                        env=part_env,
+                        cwd=part_exec_cwd,
+                        env=part_exec_env,
                         **popen_kwargs,
                     )
                     part_procs.append(p_proc)
@@ -1351,68 +1389,74 @@ class CommunicationRunner:
         max_queries = protocol.max_queries if protocol else None
         max_rounds = protocol.max_rounds if protocol else None
 
-        if mode == "grader_linked":
-            return await cls.run_grader_linked(
-                linked_exe=solution_exe,
-                input_data=input_data,
-                time_limit_ms=tl_ms,
-                memory_limit_mb=mem_mb,
-                max_bits=max_bits,
-                max_bytes=max_bytes,
-                max_queries=max_queries,
-                max_rounds=max_rounds,
-                cwd=run_cwd,
-            )
+        try:
+            active_executor = get_active_sandbox_executor(manifest)
+        except SandboxUnavailableError as exc:
+            return JudgeResult(verdict="FAIL", detail=str(exc))
 
-        comm_bin = (
-            communicator_exe_override
-            if (communicator_exe_override and os.path.isfile(communicator_exe_override))
-            else resolve_communicator_binary(problem_dir, manifest)
-        )
-        if not comm_bin:
-            return JudgeResult(
-                verdict="FAIL",
-                detail="Communicator binary not found. Run interactor_build first.",
-            )
+        with sandbox_context(active_executor):
+            if mode == "grader_linked":
+                return await cls.run_grader_linked(
+                    linked_exe=solution_exe,
+                    input_data=input_data,
+                    time_limit_ms=tl_ms,
+                    memory_limit_mb=mem_mb,
+                    max_bits=max_bits,
+                    max_bytes=max_bytes,
+                    max_queries=max_queries,
+                    max_rounds=max_rounds,
+                    cwd=run_cwd,
+                )
 
-        part_exes = resolve_participant_binaries(problem_dir, manifest, solution_exe)
-
-        if mode == "multi_process":
-            expected_parts = max(
-                2,
-                len(protocol.participant_solutions) if protocol else 2,
+            comm_bin = (
+                communicator_exe_override
+                if (communicator_exe_override and os.path.isfile(communicator_exe_override))
+                else resolve_communicator_binary(problem_dir, manifest)
             )
-            return await cls.run_multi_process(
-                manager_exe=comm_bin,
-                participant_exes=part_exes,
+            if not comm_bin:
+                return JudgeResult(
+                    verdict="FAIL",
+                    detail="Communicator binary not found. Run interactor_build first.",
+                )
+
+            part_exes = resolve_participant_binaries(problem_dir, manifest, solution_exe)
+
+            if mode == "multi_process":
+                expected_parts = max(
+                    2,
+                    len(protocol.participant_solutions) if protocol else 2,
+                )
+                return await cls.run_multi_process(
+                    manager_exe=comm_bin,
+                    participant_exes=part_exes,
+                    input_data=input_data,
+                    answer_data=answer_data,
+                    time_limit_ms=tl_ms,
+                    memory_limit_mb=mem_mb,
+                    deadlock_timeout_ms=deadlock_timeout_ms,
+                    max_bits=max_bits,
+                    max_bytes=max_bytes,
+                    max_queries=max_queries,
+                    max_rounds=max_rounds,
+                    expected_participants=expected_parts,
+                    cwd=run_cwd,
+                )
+
+            # Default: run_twice
+            passes = protocol.passes if protocol else 2
+            pass_headers = list(protocol.pass_headers) if protocol else ["first", "second"]
+            return await cls.run_twice(
+                communicator_exe=comm_bin,
+                solution_exes=part_exes,
                 input_data=input_data,
                 answer_data=answer_data,
+                passes=passes,
+                pass_headers=pass_headers,
                 time_limit_ms=tl_ms,
                 memory_limit_mb=mem_mb,
-                deadlock_timeout_ms=deadlock_timeout_ms,
                 max_bits=max_bits,
                 max_bytes=max_bytes,
                 max_queries=max_queries,
                 max_rounds=max_rounds,
-                expected_participants=expected_parts,
                 cwd=run_cwd,
             )
-
-        # Default: run_twice
-        passes = protocol.passes if protocol else 2
-        pass_headers = list(protocol.pass_headers) if protocol else ["first", "second"]
-        return await cls.run_twice(
-            communicator_exe=comm_bin,
-            solution_exes=part_exes,
-            input_data=input_data,
-            answer_data=answer_data,
-            passes=passes,
-            pass_headers=pass_headers,
-            time_limit_ms=tl_ms,
-            memory_limit_mb=mem_mb,
-            max_bits=max_bits,
-            max_bytes=max_bytes,
-            max_queries=max_queries,
-            max_rounds=max_rounds,
-            cwd=run_cwd,
-        )

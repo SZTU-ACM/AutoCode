@@ -7,128 +7,31 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..utils.communication_runner import safe_resolve_under_root
+from ..utils.smt_constraints import (
+    _MAX_EXPR_ABS as _MAX_EXPR_ABS,
+)
+from ..utils.smt_constraints import (
+    _MAX_INT_LITERAL_DIGITS as _MAX_INT_LITERAL_DIGITS,
+)
+from ..utils.smt_constraints import (
+    audit_manifest_constraints,
+    check_constraints_header_drift,
+    parse_cpp_header_constants,
+    parse_cpp_int_expr,
+    safe_int_token,
+    split_top_level_op,
+    strip_outer_parens,
+)
 from ..workflow.models import AutoCodeManifest
 from .audit_discovery import _AuditDiscoveryMixin
 from .complexity import extract_constraint_numbers
 
-_MAX_INT_LITERAL_DIGITS = 30
-_MAX_EXPR_ABS = 10**30
-
-
-def _strip_outer_parens(expr: str) -> str:
-    """Strip outer parentheses only when the opening '(' matches the final ')'."""
-    s = expr.strip()
-    while len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-        depth = 0
-        wraps_all = True
-        for idx, ch in enumerate(s):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0 and idx < len(s) - 1:
-                    wraps_all = False
-                    break
-        if wraps_all and depth == 0:
-            s = s[1:-1].strip()
-        else:
-            break
-    return s
-
-
-def _safe_int_token(token: str) -> int | None:
-    stripped = token.strip()
-    digits = stripped[1:] if stripped.startswith(("+", "-")) else stripped
-    if not digits or len(digits) > _MAX_INT_LITERAL_DIGITS or not digits.isdigit():
-        return None
-    try:
-        return int(stripped)
-    except ValueError:
-        return None
-
-
-def _split_top_level_op(expr: str, ops: str) -> tuple[str, str, str] | None:
-    """Find the rightmost top-level binary operator in ``ops`` (outside parens, skipping unary/sci)."""
-    depth = 0
-    for idx in range(len(expr) - 1, -1, -1):
-        ch = expr[idx]
-        if ch == ")":
-            depth += 1
-        elif ch == "(":
-            depth -= 1
-        elif depth == 0 and ch in ops:
-            left = expr[:idx].rstrip()
-            right = expr[idx + 1 :].lstrip()
-            if not left or not right:
-                continue
-            # Ignore exponent sign in scientific notation (e.g. 1e+9, 1E-3)
-            if ch in "+-" and left[-1] in "eE" and len(left) >= 2 and (left[-2].isdigit() or left[-2] == "."):
-                continue
-            # Ignore unary sign right after another operator
-            if ch in "+-" and left[-1] in "+-*/<(&|,":
-                continue
-            return left, ch, right
-    return None
-
-
-def _parse_cpp_int_expr(expr: str, constants: dict[str, int], *, _depth: int = 0) -> int | None:
-    """Safely parse common C++ integer constant expressions without eval()."""
-    if _depth > 8:
-        return None
-    s = _strip_outer_parens(expr)
-    if not s or len(s) > 128:
-        return None
-    if s in constants:
-        return constants[s]
-    # Handle C++ digit separators (e.g. 1'000'000'000LL)
-    cleaned = s.replace("'", "")
-    # Top-level binary + / - (lowest precedence among supported ops)
-    add_split = _split_top_level_op(cleaned, "+-")
-    if add_split is not None:
-        left_s, op, right_s = add_split
-        left = _parse_cpp_int_expr(left_s, constants, _depth=_depth + 1)
-        right = _parse_cpp_int_expr(right_s, constants, _depth=_depth + 1)
-        if left is not None and right is not None:
-            res = left + right if op == "+" else left - right
-            return res if abs(res) <= _MAX_EXPR_ABS else None
-    # Top-level binary *
-    mul_split = _split_top_level_op(cleaned, "*")
-    if mul_split is not None:
-        left_s, _, right_s = mul_split
-        left = _parse_cpp_int_expr(left_s, constants, _depth=_depth + 1)
-        right = _parse_cpp_int_expr(right_s, constants, _depth=_depth + 1)
-        if left is not None and right is not None and abs(left) <= 10**18 and abs(right) <= 10**18:
-            res = left * right
-            return res if abs(res) <= _MAX_EXPR_ABS else None
-    # Unary +/- prefix (e.g. -MAXA, -(1 << 20))
-    if cleaned.startswith(("+", "-")) and len(cleaned) > 1:
-        inner = _parse_cpp_int_expr(cleaned[1:], constants, _depth=_depth + 1)
-        if inner is not None:
-            return -inner if cleaned[0] == "-" else inner
-    # Bit shift: base << shift
-    m_shift = re.fullmatch(r"(-?\d+)[uUlL]*\s*<<\s*(\d+)[uUlL]*", cleaned)
-    if m_shift:
-        base = _safe_int_token(m_shift.group(1))
-        shift = _safe_int_token(m_shift.group(2))
-        if base is not None and shift is not None and 0 <= shift <= 62 and abs(base) <= (1 << 62):
-            return base << shift
-        return None
-    # Scientific notation: 1e9, 2.5e5
-    m_sci = re.fullmatch(r"(-?\d{1,12}(?:\.\d{1,12})?)[eE]\+?(\d{1,2})", cleaned)
-    if m_sci:
-        exp = int(m_sci.group(2))
-        if exp <= 18:
-            try:
-                val = float(m_sci.group(1)) * (10**exp)
-            except (ValueError, OverflowError):
-                return None
-            if math.isfinite(val) and abs(val - round(val)) < 1e-6:
-                return int(round(val))
-        return None
-    m_int = re.fullmatch(r"(-?\d+)[uUlL]*", cleaned)
-    if m_int:
-        return _safe_int_token(m_int.group(1))
-    return None
+# Preserve internal helper names re-exported by tools/audit.py
+_strip_outer_parens = strip_outer_parens
+_safe_int_token = safe_int_token
+_split_top_level_op = split_top_level_op
+_parse_cpp_int_expr = parse_cpp_int_expr
 
 
 def _extract_statement_numeric_bounds(content: str) -> set[int]:
@@ -285,6 +188,15 @@ def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
     no_comments = re.sub(r"//[^\n]*", "", no_comments)
 
     constants: dict[str, int] = {}
+    if re.search(r'#\s*include\s+"(?:files/)?constraints\.h"', no_comments):
+        safe_hdr = safe_resolve_under_root(str(val_path.parent), "constraints.h")
+        if safe_hdr is not None and Path(safe_hdr).is_file():
+            try:
+                hdr_text = Path(safe_hdr).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                hdr_text = ""
+            if hdr_text:
+                constants.update(parse_cpp_header_constants(hdr_text))
     for m in re.finditer(
         r"(?:const|constexpr)\s+(?:unsigned\s+|signed\s+)?(?:long\s+long|long|int|int64_t|int32_t|ll)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);",
         no_comments,
@@ -501,14 +413,35 @@ class _AuditConstraintsMixin(_AuditDiscoveryMixin):
             if mismatched_reason is not None:
                 validator_bound_mismatches.append({**item, "reason": mismatched_reason})
 
+        smt_report = audit_manifest_constraints(manifest, validator_bounds=val_bounds)
+        header_path = self._safe_file(problem_path, "files/constraints.h")
+        header_drift = (
+            check_constraints_header_drift(header_path, manifest)
+            if header_path is not None
+            else None
+        )
+        smt_conflicts = list(smt_report.conflicts)
+        has_header_drift = bool(header_drift is not None and header_drift.has_drift)
+
         has_samples = "样例" in content or "sample" in content.lower()
         has_tests_manifest = bool(tests_manifest.get("tests"))
         tutorial_ready = tutorial_path is not None and len(
             tutorial_path.read_text(encoding="utf-8", errors="replace").strip()
         ) > 80
         evidence_ready = has_samples and tutorial_ready
-        passed = evidence_ready and not validator_bound_mismatches
-        needs_human_review = bool(missing_terms or validator_bound_mismatches or not passed)
+        passed = (
+            evidence_ready
+            and not validator_bound_mismatches
+            and smt_report.passed
+            and not has_header_drift
+        )
+        needs_human_review = bool(
+            missing_terms
+            or validator_bound_mismatches
+            or not smt_report.passed
+            or has_header_drift
+            or not passed
+        )
 
         mismatch_parts: list[str] = []
         for mismatch in validator_bound_mismatches:
@@ -533,6 +466,11 @@ class _AuditConstraintsMixin(_AuditDiscoveryMixin):
                 top_stmt = ", ".join(str(val) for val in sorted(stmt_bounds, reverse=True)[:5])
                 mismatch_summary += f" [statement bounds: {top_stmt}]"
             issue_parts.append(mismatch_summary)
+        if smt_conflicts:
+            smt_summary = "; ".join(c.message for c in smt_conflicts)
+            issue_parts.append(f"SMT constraint conflict(s): {smt_summary}")
+        if header_drift is not None and header_drift.has_drift:
+            issue_parts.append(f"constraints.h drift: {header_drift.summary}")
 
         review_parts = list(issue_parts)
         if missing_terms:
@@ -552,4 +490,18 @@ class _AuditConstraintsMixin(_AuditDiscoveryMixin):
             "statement_numeric_bounds": sorted(stmt_bounds)[:50],
             "validator_bounds_checked": len(val_bounds),
             "validator_bound_mismatches": validator_bound_mismatches,
+            "smt_constraints": smt_report.to_dict(),
+            "constraints_header_drift": (
+                header_drift.to_dict()
+                if header_drift is not None
+                else {
+                    "exists": False,
+                    "has_drift": False,
+                    "mismatches": [],
+                    "missing_constants": [],
+                    "parsed_constants": {},
+                    "expected_constants": {},
+                    "summary": "",
+                }
+            ),
         }

@@ -23,9 +23,17 @@ from typing import Any
 
 import psutil
 
-from .checker_judge import run_testlib_checker, verdict_from_testlib_rc
+from .checker_judge import run_testlib_checker, verdict_from_run, verdict_from_testlib_rc
+from .compiler import RunResult
 from .execution_monitor import DynamicExecutionMonitor
 from .process import disable_posix_core_dumps, terminate_pid_tree
+from .sandbox import (
+    SandboxExecutionPlan,
+    build_runner_ro_paths,
+    get_active_sandbox_executor,
+    merge_sandbox_env,
+    resolve_wrapped_invocation,
+)
 
 __all__ = [
     "CheckerRunner",
@@ -152,6 +160,70 @@ def _format_transcript(events: list[tuple[str, bytes]], max_bytes: int) -> str:
     return "\n".join(lines)
 
 
+async def _run_wrapped_checker(
+    plan: SandboxExecutionPlan,
+    *,
+    timeout: int,
+) -> tuple[str, RunResult]:
+    """Execute a sandbox-wrapped testlib checker and map its verdict."""
+    popen_kwargs: dict[str, Any] = {}
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
+        popen_kwargs["preexec_fn"] = disable_posix_core_dumps
+    proc_env = merge_sandbox_env(None, plan.env_overrides)
+    start = time.perf_counter()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *plan.argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=plan.cwd,
+            env=proc_env,
+            **popen_kwargs,
+        )
+    except OSError as exc:
+        return "FAIL", RunResult(success=False, error=f"Failed to launch sandboxed checker: {exc}")
+
+    out_task = asyncio.create_task(_read_bounded(proc.stdout, _MAX_STDERR_BYTES))
+    err_task = asyncio.create_task(_read_bounded(proc.stderr, _MAX_STDERR_BYTES))
+    timed_out = False
+    try:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=max(1, int(timeout)))
+        except (asyncio.TimeoutError, TimeoutError):
+            timed_out = True
+            await terminate_pid_tree(proc.pid)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+        out_res, err_res = await asyncio.gather(out_task, err_task, return_exceptions=True)
+    except BaseException:
+        if proc.returncode is None:
+            await terminate_pid_tree(proc.pid)
+        for task in (out_task, err_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(out_task, err_task, return_exceptions=True)
+        raise
+
+    elapsed_ms = int(round((time.perf_counter() - start) * 1000.0))
+    out_str = out_res.decode("utf-8", errors="replace") if isinstance(out_res, bytes) else ""
+    err_str = err_res.decode("utf-8", errors="replace") if isinstance(err_res, bytes) else ""
+    rc = proc.returncode if proc.returncode is not None else -1
+    run_res = RunResult(
+        success=(not timed_out and rc == 0),
+        stdout=out_str,
+        stderr=err_str,
+        return_code=rc,
+        time_ms=elapsed_ms,
+        timed_out=timed_out,
+        error="Checker timed out" if timed_out else None,
+    )
+    return verdict_from_run(run_res), run_res
+
+
 class StandardRunner:
     """Run a standard stdio solution and optionally compare exact output."""
 
@@ -172,6 +244,19 @@ class StandardRunner:
         if not os.path.isfile(abs_sol):
             return JudgeResult(verdict="FAIL", detail=f"Solution binary not found: {solution_exe}")
 
+        executor = get_active_sandbox_executor()
+        rw_paths = (abs_cwd,) if abs_cwd is not None else ()
+        exec_cmd, exec_cwd, _ = resolve_wrapped_invocation(
+            executor,
+            [abs_sol],
+            cwd=abs_cwd,
+            ro_paths=build_runner_ro_paths(abs_sol, exclude_dirs=rw_paths),
+            rw_paths=rw_paths,
+            allow_network=False,
+            memory_limit_mb=memory_limit_mb,
+            time_limit_ms=time_limit_ms,
+        )
+
         with tempfile.TemporaryDirectory(dir=abs_cwd) as raw_tmp_dir:
             tmp_dir = os.path.abspath(raw_tmp_dir)
             in_path = os.path.join(tmp_dir, "input.in")
@@ -179,11 +264,11 @@ class StandardRunner:
                 f.write(input_data)
 
             res = await DynamicExecutionMonitor.run_monitored_process(
-                [abs_sol],
+                exec_cmd,
                 in_path,
                 time_limit_ms=time_limit_ms,
                 memory_limit_mb=memory_limit_mb,
-                cwd=abs_cwd,
+                cwd=exec_cwd,
                 baseline_overhead_ms=baseline_overhead_ms,
                 metric="cpu_time",
             )
@@ -300,13 +385,27 @@ class CheckerRunner:
             with open(ans_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(answer_data)
 
-            verdict, chk_run = await run_testlib_checker(
-                abs_chk,
-                in_path,
-                out_path,
-                ans_path,
-                timeout=checker_timeout_sec,
-            )
+            executor = get_active_sandbox_executor()
+            if executor.name != "none":
+                chk_ro = build_runner_ro_paths(abs_chk, tmp_dir)
+                chk_plan = executor.wrap_command(
+                    [abs_chk, in_path, out_path, ans_path],
+                    cwd=tmp_dir,
+                    ro_paths=chk_ro,
+                    rw_paths=(),
+                    allow_network=False,
+                    memory_limit_mb=memory_limit_mb,
+                    time_limit_ms=float(checker_timeout_sec) * 1000.0,
+                )
+                verdict, chk_run = await _run_wrapped_checker(chk_plan, timeout=checker_timeout_sec)
+            else:
+                verdict, chk_run = await run_testlib_checker(
+                    abs_chk,
+                    in_path,
+                    out_path,
+                    ans_path,
+                    timeout=checker_timeout_sec,
+                )
 
         score, metrics = parse_judge_metrics(chk_run.stderr or "", chk_run.stdout or "")
         return JudgeResult(
@@ -406,17 +505,36 @@ class InteractiveRunner:
                 popen_kwargs["start_new_session"] = True
                 popen_kwargs["preexec_fn"] = disable_posix_core_dumps
 
+            executor = get_active_sandbox_executor()
+            int_argv, int_cwd, int_env = resolve_wrapped_invocation(
+                executor,
+                [abs_int, in_path, out_path, ans_path],
+                cwd=abs_cwd or tmp_dir if executor.name != "none" else abs_cwd,
+                ro_paths=build_runner_ro_paths(abs_int, abs_cwd, exclude_dirs=(tmp_dir,)),
+                rw_paths=(tmp_dir,),
+                allow_network=False,
+                time_limit_ms=wall_cap_sec * 1000.0,
+            )
+            sol_argv, sol_cwd, sol_env = resolve_wrapped_invocation(
+                executor,
+                [abs_sol],
+                cwd=abs_cwd,
+                ro_paths=build_runner_ro_paths(abs_sol, abs_cwd, exclude_dirs=(tmp_dir,)),
+                rw_paths=(),
+                allow_network=False,
+                memory_limit_mb=effective_mem_mb,
+                time_limit_ms=effective_tl_ms,
+            )
+
             wall_start = time.perf_counter()
             try:
                 interactor_proc = await asyncio.create_subprocess_exec(
-                    abs_int,
-                    in_path,
-                    out_path,
-                    ans_path,
+                    *int_argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=abs_cwd,
+                    cwd=int_cwd,
+                    env=int_env,
                     **popen_kwargs,
                 )
             except OSError as exc:
@@ -426,11 +544,12 @@ class InteractiveRunner:
                 )
             try:
                 solution_proc = await asyncio.create_subprocess_exec(
-                    abs_sol,
+                    *sol_argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=abs_cwd,
+                    cwd=sol_cwd,
+                    env=sol_env,
                     **popen_kwargs,
                 )
             except OSError as exc:
