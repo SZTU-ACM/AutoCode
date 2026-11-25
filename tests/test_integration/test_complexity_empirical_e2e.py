@@ -57,10 +57,10 @@ int main() {
     for (int i = 0; i < n; ++i) {
         std::cin >> a[i];
     }
-    long long cnt = 0;
+    long long cnt = 1;
     for (int i = 0; i < n; ++i) {
         for (int j = i + 1; j < n; ++j) {
-            cnt += (a[i] ^ a[j]) + (a[j] ^ i) + ((cnt + j) & 255);
+            cnt = (cnt * 1315423911LL + (a[i] ^ a[j]) + j) & 0x7fffffffLL;
         }
     }
     std::cout << cnt << "\\n";

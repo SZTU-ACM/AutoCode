@@ -763,10 +763,11 @@ class EmpiricalRatioAnalyzer:
                     offset = max(0.0, plateau - 1.0)
                     min_net = 10.0
                 else:
+                    min_delta = 8.0 if plateau <= 5.0 else 15.0
                     is_flat_head = (
                         abs(v1 - v0) <= 2.0
                         and (plateau <= 5.0 or (max(v0, v1) / max(plateau, 0.1)) <= 1.25)
-                        and (v_last - plateau) >= 15.0
+                        and (v_last - plateau) >= min_delta
                     )
                     offset = max(0.0, plateau - 0.1)
                     min_net = 1.5
