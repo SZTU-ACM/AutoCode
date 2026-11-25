@@ -30,6 +30,7 @@ from .communication_runner import (
 from .compiler import compile_cpp, resolve_effective_compiler, run_binary
 from .judge_runner import InteractiveRunner
 from .platform import get_exe_extension
+from .problem_layout import discover_test_pairs
 
 _MUTATION_RULES: list[tuple[str, re.Pattern[str], str]] = [
     ("relational_le_to_lt", re.compile(r"(?<![<>!=])<=(?![=>])"), "<"),
@@ -291,12 +292,40 @@ async def run_mutation_testing(
             }
         in_files.append(resolved_in)
 
+    discovered_answers: dict[Path, Path | None] = {}
+    if not in_files:
+        for p in sorted(safe_tests.iterdir(), key=_natural_sort_key):
+            if p.is_symlink() and _is_contained_non_symlink(problem_dir, p) is None:
+                return {
+                    "executed": False,
+                    "passed": True,
+                    "skipped": True,
+                    "reason": f"refusing symlinked or escaped test input: {p.name}",
+                }
+        discovered_pairs = discover_test_pairs(
+            Path(problem_dir),
+            tests_dir=safe_tests,
+            answer_ext=answer_ext,
+            allow_missing_answer=True,
+        )
+        for pair in discovered_pairs:
+            resolved_in = _is_contained_non_symlink(problem_dir, pair.input_path)
+            if resolved_in is None or not resolved_in.is_file():
+                return {
+                    "executed": False,
+                    "passed": True,
+                    "skipped": True,
+                    "reason": f"refusing symlinked or escaped test input: {pair.input_path.name}",
+                }
+            in_files.append(resolved_in)
+            discovered_answers[resolved_in] = pair.answer_path
+
     if not in_files:
         return {
             "executed": False,
             "passed": True,
             "skipped": True,
-            "reason": "no .in test files found",
+            "reason": "no test input files found",
         }
 
     code = _read_bounded_text(safe_sol, max_bytes=2 * 1024 * 1024)
@@ -352,9 +381,20 @@ async def run_mutation_testing(
                 "reason": "interactive mutation testing requires a compiled, contained interactor binary",
             }
 
+    eff_communicator: str | None = None
     if is_communication and comm_mode != "grader_linked":
-        comm_bin = resolve_communicator_binary(problem_dir, manifest, exe_ext)
-        if not comm_bin:
+        if interactor_bin is not None:
+            if not Path(interactor_bin).is_symlink() and os.path.isfile(interactor_bin):
+                eff_communicator = interactor_bin
+        else:
+            cand_comm = resolve_communicator_binary(problem_dir, manifest, exe_ext)
+            if (
+                cand_comm is not None
+                and not Path(cand_comm).is_symlink()
+                and os.path.isfile(cand_comm)
+            ):
+                eff_communicator = cand_comm
+        if not eff_communicator:
             return {
                 "executed": False,
                 "passed": True,
@@ -400,12 +440,22 @@ async def run_mutation_testing(
         if inp is None:
             continue
         ans_path: Path | None = None
-        cand_ans = in_file.with_suffix(answer_ext)
-        if not cand_ans.exists() and answer_ext != ".out":
-            alt = in_file.with_suffix(".out")
-            if alt.exists():
-                cand_ans = alt
-        if cand_ans.exists():
+        cand_ans: Path | None = None
+        if in_file in discovered_answers:
+            cand_ans = discovered_answers[in_file]
+        else:
+            probe_ans = in_file.with_suffix(answer_ext)
+            if not probe_ans.exists() and answer_ext != ".out":
+                alt = in_file.with_suffix(".out")
+                if alt.exists():
+                    probe_ans = alt
+            if not probe_ans.exists() and answer_ext != ".a":
+                alt_a = in_file.with_suffix(".a")
+                if alt_a.exists():
+                    probe_ans = alt_a
+            if probe_ans.exists():
+                cand_ans = probe_ans
+        if cand_ans is not None and cand_ans.exists():
             safe_ans = _is_contained_non_symlink(problem_dir, cand_ans)
             if safe_ans is None or not safe_ans.is_file():
                 return {
@@ -493,6 +543,7 @@ async def run_mutation_testing(
                         time_limit_ms=per_test_timeout * 1000.0,
                         memory_limit_mb=mem_mb,
                         use_system_temp=True,
+                        communicator_exe_override=eff_communicator,
                     )
                     if jres.verdict == "FAIL":
                         judge_error = True

@@ -46,6 +46,11 @@ def main() -> int:
         help="Run optional single-point mutation testing on the main solution during full audit",
     )
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Promote standalone completeness omissions (missing validator or wrong solutions) to blocking issues",
+    )
+    parser.add_argument(
         "--format",
         choices=["json", "markdown", "summary"],
         default="json",
@@ -63,6 +68,7 @@ def main() -> int:
             standalone=args.standalone,
             layout=args.layout,
             enable_mutation_testing=True if args.mutation_check else None,
+            strict=args.strict,
         )
         return result.to_dict()
 

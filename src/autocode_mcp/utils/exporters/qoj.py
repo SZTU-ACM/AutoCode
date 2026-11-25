@@ -110,6 +110,7 @@ def export_qoj(
 
     is_interactive = manifest_is_interactive(manifest)
     is_communication = manifest_is_communication(manifest)
+    answers_optional = is_interactive or is_communication
     spj_checker = manifest_uses_testlib_checker(manifest)
     comm_mode = (
         (manifest.protocol.mode if manifest.protocol else "run_twice")
@@ -118,7 +119,7 @@ def export_qoj(
     )
 
     safe_pairs = _collect_safe_test_pairs(
-        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
+        problem_dir, in_files, answer_ext, allow_missing_answer=answers_optional
     )
     norm_ext = normalize_answer_ext(answer_ext)
     assert norm_ext is not None
@@ -210,7 +211,7 @@ def export_qoj(
             stage_mode_used.add(
                 _stage_data_file(src_in, os.path.join(data_dir, f"{new_idx}.in"), effective_stage_arg)
             )
-            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
+            if answers_optional and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
                 if orig_ans_name is not None:
                     omitted_empty_answers.append(orig_ans_name)
             elif src_ans is not None:

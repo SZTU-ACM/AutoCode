@@ -133,6 +133,7 @@ async def _probe_brute_small_scale(
                 time_limit_ms=probe_tl_ms,
                 memory_limit_mb=mem_mb,
                 cwd=tmp_dir,
+                metric="cpu_time",
             )
             if (
                 idx == 0
@@ -148,6 +149,7 @@ async def _probe_brute_small_scale(
                     time_limit_ms=1000.0,
                     memory_limit_mb=mem_mb,
                     cwd=tmp_dir,
+                    metric="cpu_time",
                 )
             status = str(res.get("status", "runtime_error"))
             rc = res.get("returncode")
@@ -385,6 +387,43 @@ class SolutionAuditStdTool(Tool):
                 }
             )
 
+        if not problem_dir:
+            dynamic_probe: dict[str, Any] = {
+                "ran": False,
+                "status": "skipped",
+                "reason": "no problem_dir provided",
+            }
+        else:
+            emp_status = str(empirical_verification.get("status") or "")
+            if emp_status in ("pending_generator", "pending_interactor"):
+                dynamic_probe = {
+                    "ran": False,
+                    "status": "pending_binaries",
+                    "detail_status": emp_status,
+                    "reason": str(empirical_verification.get("message") or ""),
+                }
+            elif emp_status == "skipped":
+                dynamic_probe = {
+                    "ran": False,
+                    "status": "skipped",
+                    "reason": str(empirical_verification.get("message") or ""),
+                }
+            elif emp_status in ("generator_error", "manifest_error"):
+                dynamic_probe = {
+                    "ran": False,
+                    "status": emp_status,
+                    "passed": False,
+                    "reason": str(empirical_verification.get("message") or ""),
+                }
+            else:
+                emp_passed = bool(empirical_verification.get("passed"))
+                dynamic_probe = {
+                    "ran": True,
+                    "status": "passed" if emp_passed else "failed",
+                    "passed": emp_passed,
+                    "verdict": empirical_verification.get("verdict"),
+                }
+
         return ToolResult.ok(
             passed=passed,
             estimated_complexity=estimated,
@@ -403,6 +442,7 @@ class SolutionAuditStdTool(Tool):
                 "has_nested_loops": nested_loops,
             },
             empirical_verification=empirical_verification,
+            dynamic_probe=dynamic_probe,
         )
 
 
@@ -502,6 +542,14 @@ class SolutionAuditBruteTool(Tool):
                         ),
                     }
                 )
+            elif brute_probe.get("status") == "generator_error":
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "type": "generator_error",
+                        "message": str(brute_probe.get("message") or "Brute probe generator failed"),
+                    }
+                )
             elif isinstance(brute_probe.get("recommended_n_max_clamp"), int):
                 recommended_n_max = max(1, min(recommended_n_max, int(brute_probe["recommended_n_max_clamp"])))
 
@@ -529,6 +577,32 @@ class SolutionAuditBruteTool(Tool):
                     }
                 )
 
+        bp_status = str(brute_probe.get("status") or "skipped")
+        if not problem_dir:
+            dynamic_probe: dict[str, Any] = {
+                "ran": False,
+                "status": "skipped",
+                "reason": "no problem_dir provided",
+            }
+        elif bp_status == "pending_binaries":
+            dynamic_probe = {
+                "ran": False,
+                "status": "pending_binaries",
+                "reason": str(brute_probe.get("reason") or ""),
+            }
+        elif bp_status in ("skipped", "generator_error"):
+            dynamic_probe = {
+                "ran": False,
+                "status": bp_status,
+                "reason": str(brute_probe.get("reason") or brute_probe.get("message") or ""),
+            }
+        else:
+            dynamic_probe = {
+                "ran": True,
+                "status": bp_status,
+                "passed": bool(brute_probe.get("passed")),
+            }
+
         return ToolResult.ok(
             passed=passed,
             brute_complexity=brute_complexity,
@@ -544,4 +618,5 @@ class SolutionAuditBruteTool(Tool):
             },
             brute_probe=brute_probe,
             empirical_verification=empirical_verification,
+            dynamic_probe=dynamic_probe,
         )

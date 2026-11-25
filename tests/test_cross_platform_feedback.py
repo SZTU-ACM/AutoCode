@@ -1114,7 +1114,13 @@ def test_workflow_build_all_invalidates_changed_validator_and_tracks_target_plat
 
     apply_result(str(pdir), "solution_build", {"problem_dir": str(pdir), "solution_type": "sol"}, True, {})
     apply_result(str(pdir), "solution_build", {"problem_dir": str(pdir), "solution_type": "brute"}, True, {})
-    apply_result(str(pdir), "validator_build", {"problem_dir": str(pdir)}, True, {"accuracy": 1.0})
+    apply_result(
+        str(pdir),
+        "validator_build",
+        {"problem_dir": str(pdir)},
+        True,
+        {"accuracy": 1.0, "has_positive_cases": True, "has_negative_cases": True},
+    )
     apply_result(str(pdir), "generator_build", {"problem_dir": str(pdir)}, True, {})
 
     st = load_workflow_state(str(pdir))

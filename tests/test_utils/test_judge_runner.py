@@ -488,11 +488,11 @@ async def test_interactive_runner_slow_interactor_not_false_deadlock(tmp_path):
 int main(int argc, char* argv[]) {
     registerInteraction(argc, argv);
     int n = inf.readInt();
-    // Burn CPU for 350ms before sending initial prompt (exceeds 250ms deadlock threshold)
+    // Burn CPU for 750ms before sending initial prompt (exceeds 600ms deadlock threshold)
     auto start = std::chrono::steady_clock::now();
     volatile unsigned long long acc = 0;
     while (std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - start).count() < 350) {
+               std::chrono::steady_clock::now() - start).count() < 750) {
         acc += 1;
     }
     std::cout << n << std::endl;
@@ -520,8 +520,8 @@ int main() {
         slow_interactor,
         sol,
         "21\n",
-        time_limit_ms=2000.0,
-        deadlock_timeout_ms=250.0,
+        time_limit_ms=3000.0,
+        deadlock_timeout_ms=600.0,
         cwd=str(tmp_path),
     )
     assert res.verdict == "AC", f"Expected AC, got {res.verdict}: {res.detail}"

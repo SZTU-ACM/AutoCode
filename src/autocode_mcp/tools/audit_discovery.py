@@ -11,6 +11,12 @@ from ..utils.communication_runner import (
     is_safe_stem,
     safe_resolve_under_root,
 )
+from ..utils.problem_layout import (
+    PolygonProblemMeta,
+    discover_test_pairs,
+    discover_wrong_solution_files,
+    parse_polygon_problem_xml,
+)
 from ..workflow.models import (
     AuditGates,
     AutoCodeManifest,
@@ -39,6 +45,13 @@ class _AuditDiscoveryMixin:
             return None
         p = Path(resolved)
         return p if p.is_dir() else None
+
+    @staticmethod
+    def _parse_polygon_xml_safe(problem_path: Path) -> PolygonProblemMeta | None:
+        try:
+            return parse_polygon_problem_xml(problem_path)
+        except (ValueError, OSError):
+            return None
 
     @classmethod
     def _detect_layout(
@@ -76,6 +89,23 @@ class _AuditDiscoveryMixin:
         if not standalone:
             return cls._safe_dir(problem_path, "tests")
         eff_layout = cls._detect_layout(problem_path, layout)
+        poly_meta = cls._parse_polygon_xml_safe(problem_path)
+        if eff_layout == "polygon" and poly_meta is not None and poly_meta.input_path_pattern:
+            pat_parent_rel = Path(poly_meta.input_path_pattern).parent.as_posix()
+            pat_dir = (
+                cls._safe_dir(problem_path, pat_parent_rel)
+                if pat_parent_rel not in ("", ".")
+                else problem_path.resolve()
+            )
+            if pat_dir is not None and discover_test_pairs(
+                problem_path,
+                tests_dir=pat_dir,
+                input_pattern=poly_meta.input_path_pattern,
+                answer_pattern=poly_meta.answer_path_pattern,
+                test_count=poly_meta.test_count,
+                allow_missing_answer=True,
+            ):
+                return pat_dir
         if eff_layout == "standard_cn":
             candidates = ("data/test", "data", "tests", "testdata")
         elif eff_layout == "hydro":
@@ -91,6 +121,8 @@ class _AuditDiscoveryMixin:
                 first_existing = cand
             try:
                 if any(p.is_file() and p.suffix == ".in" for p in cand.iterdir()):
+                    return cand
+                if discover_test_pairs(problem_path, tests_dir=cand, allow_missing_answer=True):
                     return cand
             except OSError:
                 continue
@@ -118,6 +150,19 @@ class _AuditDiscoveryMixin:
             found = self._safe_file(problem_path, rel)
             if found is not None:
                 return found
+        if standalone:
+            for s in manifest.solutions:
+                if s.role == "reference" and s.path:
+                    found = self._safe_file(problem_path, s.path)
+                    if found is not None:
+                        return found
+            poly_meta = self._parse_polygon_xml_safe(problem_path)
+            if poly_meta is not None:
+                for ps in sorted(poly_meta.solutions, key=lambda x: 0 if x.role == "main" else 1):
+                    if ps.role in ("main", "reference"):
+                        found = self._safe_file(problem_path, ps.path)
+                        if found is not None:
+                            return found
         return None
 
     def _classify_tpj_source(self, problem_path: Path) -> tuple[Literal["interactive", "spj"], Path] | None:
@@ -158,6 +203,13 @@ class _AuditDiscoveryMixin:
             found = self._safe_file(problem_path, rel)
             if found is not None:
                 return found
+        if standalone:
+            poly_meta = self._parse_polygon_xml_safe(problem_path)
+            if poly_meta is not None:
+                for val_rel in poly_meta.validator_paths:
+                    found = self._safe_file(problem_path, val_rel)
+                    if found is not None:
+                        return found
         return None
 
     def _find_checker_source(self, problem_path: Path, *, standalone: bool = False) -> Path | None:
@@ -177,6 +229,11 @@ class _AuditDiscoveryMixin:
             if found is not None:
                 return found
         if standalone:
+            poly_meta = self._parse_polygon_xml_safe(problem_path)
+            if poly_meta is not None and poly_meta.checker_path:
+                found = self._safe_file(problem_path, poly_meta.checker_path)
+                if found is not None:
+                    return found
             tpj = self._classify_tpj_source(problem_path)
             if tpj is not None and tpj[0] == "spj":
                 return tpj[1]
@@ -198,9 +255,36 @@ class _AuditDiscoveryMixin:
             if found is not None:
                 return found
         if standalone:
+            poly_meta = self._parse_polygon_xml_safe(problem_path)
+            if (
+                poly_meta is not None
+                and poly_meta.interactor_path
+                and not poly_meta.communication_mode
+            ):
+                found = self._safe_file(problem_path, poly_meta.interactor_path)
+                if found is not None:
+                    return found
             tpj = self._classify_tpj_source(problem_path)
             if tpj is not None and tpj[0] == "interactive":
                 return tpj[1]
+        return None
+
+    def _find_generator_source(self, problem_path: Path, *, standalone: bool = False) -> Path | None:
+        candidates = (
+            (
+                "files/gen.cpp",
+                "generator/gen.cpp",
+                "gen/gen.cpp",
+                "testdata/gen.cpp",
+                "gen.cpp",
+            )
+            if standalone
+            else ("files/gen.cpp",)
+        )
+        for rel in candidates:
+            found = self._safe_file(problem_path, rel)
+            if found is not None:
+                return found
         return None
 
     def _infer_standalone_limits(
@@ -210,8 +294,6 @@ class _AuditDiscoveryMixin:
         layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
     ) -> tuple[int, int]:
         """Infer (time_limit_ms, memory_limit_mb) from problem.xml / config.yaml / problem.conf if present."""
-        import xml.etree.ElementTree as ET
-
         import yaml
 
         from ..utils.exporters import _parse_hydro_mem_mb, _parse_hydro_time_ms
@@ -223,34 +305,19 @@ class _AuditDiscoveryMixin:
             xml_f = self._safe_file(problem_path, rel)
             if xml_f is None:
                 return None
-            try:
-                if xml_f.stat().st_size <= 5 * 1024 * 1024:
-                    raw = xml_f.read_text(encoding="utf-8", errors="replace")
-                    if "<!DOCTYPE" not in raw.upper() and "<!ENTITY" not in raw.upper():
-                        root = ET.fromstring(raw)
-                        tl_n = root.find(".//judging/testset/time-limit")
-                        ml_n = root.find(".//judging/testset/memory-limit")
-                        res_tl, res_ml = tl_ms, ml_mb
-                        found_any = False
-                        if tl_n is not None and tl_n.text and tl_n.text.strip().isdigit():
-                            v = int(tl_n.text.strip())
-                            if 100 <= v <= 60_000:
-                                res_tl = v
-                                found_any = True
-                        if ml_n is not None and ml_n.text and ml_n.text.strip().isdigit():
-                            raw_bytes = int(ml_n.text.strip())
-                            if raw_bytes % 1_000_000 == 0 and raw_bytes % (1024 * 1024) != 0:
-                                v = raw_bytes // 1_000_000
-                            else:
-                                v = raw_bytes // (1024 * 1024)
-                            if 16 <= v <= 16_384:
-                                res_ml = v
-                                found_any = True
-                        if found_any:
-                            return res_tl, res_ml
-            except (ET.ParseError, OSError, ValueError):
-                pass
-            return None
+            poly_root = xml_f.parent
+            poly = self._parse_polygon_xml_safe(poly_root)
+            if poly is None:
+                return None
+            res_tl, res_ml = tl_ms, ml_mb
+            found_any = False
+            if poly.time_limit_ms is not None and 100 <= poly.time_limit_ms <= 60_000:
+                res_tl = poly.time_limit_ms
+                found_any = True
+            if poly.memory_limit_mb is not None and 16 <= poly.memory_limit_mb <= 16_384:
+                res_ml = poly.memory_limit_mb
+                found_any = True
+            return (res_tl, res_ml) if found_any else None
 
         def _try_hydro(rel: str = "testdata/config.yaml") -> tuple[int, int] | None:
             h_cfg = self._safe_file(problem_path, rel)
@@ -355,6 +422,8 @@ class _AuditDiscoveryMixin:
                     return rel
             return None
 
+        poly_meta = self._parse_polygon_xml_safe(problem_path)
+
         if _first_existing(
             ("files/interactor.cpp", "interactor/interactor.cpp", "interactor.cpp", "testdata/interactor.cpp")
         ):
@@ -365,11 +434,29 @@ class _AuditDiscoveryMixin:
             grader_rel := _first_existing(
                 ("files/grader.cpp", "grader.cpp", "testdata/grader.cpp")
             )
+            or (
+                poly_meta.grader_path
+                if (
+                    poly_meta is not None
+                    and poly_meta.communication_mode == "grader_linked"
+                    and poly_meta.grader_path
+                    and self._safe_file(problem_path, poly_meta.grader_path) is not None
+                )
+                else None
+            )
         ):
             problem_type = "communication"
             oracle_mode = "interactor_only"
             header_file = _first_existing(
                 ("files/problem.h", "problem.h", "testdata/problem.h")
+            ) or (
+                poly_meta.header_path
+                if (
+                    poly_meta is not None
+                    and poly_meta.header_path
+                    and self._safe_file(problem_path, poly_meta.header_path) is not None
+                )
+                else None
             )
             protocol = ProtocolConfig(
                 mode="grader_linked",
@@ -380,15 +467,43 @@ class _AuditDiscoveryMixin:
             comm_rel := _first_existing(
                 ("files/communicator.cpp", "communicator.cpp", "testdata/communicator.cpp")
             )
+            or (
+                poly_meta.interactor_path
+                if (
+                    poly_meta is not None
+                    and poly_meta.communication_mode in ("run_twice", "multi_process")
+                    and poly_meta.interactor_path
+                    and self._safe_file(problem_path, poly_meta.interactor_path) is not None
+                )
+                else None
+            )
         ):
             problem_type = "communication"
             oracle_mode = "interactor_only"
+            comm_mode_val: Literal["run_twice", "multi_process"] = (
+                "multi_process"
+                if (poly_meta is not None and poly_meta.communication_mode == "multi_process")
+                else "run_twice"
+            )
             protocol = ProtocolConfig(
-                mode="run_twice",
+                mode=comm_mode_val,
                 communicator_file=comm_rel,
             )
+        elif (
+            poly_meta is not None
+            and poly_meta.interactor_path
+            and not poly_meta.communication_mode
+            and self._safe_file(problem_path, poly_meta.interactor_path) is not None
+        ):
+            problem_type = "interactive"
+            interactive = True
+            oracle_mode = "interactor_only"
         elif _first_existing(
             ("files/checker.cpp", "checker/checker.cpp", "checker/chk.cpp", "chk.cpp", "testdata/checker.cpp")
+        ) or (
+            poly_meta is not None
+            and poly_meta.checker_path
+            and self._safe_file(problem_path, poly_meta.checker_path) is not None
         ):
             problem_type = "spj"
             special_judge = True
@@ -426,7 +541,13 @@ class _AuditDiscoveryMixin:
                 "README.md",
             )
         )
-        statement_path = _first_existing(stmt_candidates) or "statements/README.md"
+        statement_path = _first_existing(stmt_candidates)
+        if statement_path is None and poly_meta is not None:
+            for sp in poly_meta.statement_paths:
+                if sp.lower().endswith((".md", ".tex", ".txt")) and self._safe_file(problem_path, sp) is not None:
+                    statement_path = sp
+                    break
+        statement_path = statement_path or "statements/README.md"
         tutorial_path = (
             _first_existing(
                 (
@@ -441,16 +562,59 @@ class _AuditDiscoveryMixin:
         )
 
         solutions: list[SolutionEntry] = []
-        main_candidates = (
-            ("solution/std.cpp", "solutions/sol.cpp", "solutions/std.cpp", "std.cpp", "sol.cpp")
-            if layout == "standard_cn"
-            else ("solutions/sol.cpp", "solution/std.cpp", "solutions/std.cpp", "sol.cpp", "std.cpp")
-        )
-        main_rel = _first_existing(main_candidates)
-        if main_rel is not None:
-            solutions.append(
-                SolutionEntry(name="sol", path=main_rel, role="main", expected="pass")
+        seen_paths: set[str] = set()
+        seen_names: set[str] = set()
+
+        def _unique_name(raw_stem: str) -> str:
+            base = raw_stem if is_safe_stem(raw_stem) else "solution"
+            if base not in seen_names:
+                return base
+            idx = 2
+            while f"{base}_{idx}" in seen_names:
+                idx += 1
+            return f"{base}_{idx}"
+
+        has_poly_main = False
+        if poly_meta is not None:
+            for ps in poly_meta.solutions:
+                if self._safe_file(problem_path, ps.path) is None:
+                    continue
+                if ps.path in seen_paths:
+                    continue
+                seen_paths.add(ps.path)
+                if ps.role == "main" and not has_poly_main and "sol" not in seen_names:
+                    sol_name = "sol"
+                    has_poly_main = True
+                else:
+                    sol_name = _unique_name(Path(ps.path).stem)
+                seen_names.add(sol_name)
+                solutions.append(
+                    SolutionEntry(
+                        name=sol_name,
+                        path=ps.path,
+                        role=ps.role,
+                        language=ps.language,
+                        expected=ps.expected,
+                        expected_verdict=ps.expected_verdict,
+                    )
+                )
+
+        if not has_poly_main:
+            main_candidates = (
+                ("solution/std.cpp", "solutions/sol.cpp", "solutions/std.cpp", "std.cpp", "sol.cpp")
+                if layout == "standard_cn"
+                else ("solutions/sol.cpp", "solution/std.cpp", "solutions/std.cpp", "sol.cpp", "std.cpp")
             )
+            main_rel = _first_existing(main_candidates)
+            if main_rel is not None and main_rel not in seen_paths:
+                seen_paths.add(main_rel)
+                main_name = _unique_name("sol")
+                seen_names.add(main_name)
+                solutions.insert(
+                    0,
+                    SolutionEntry(name=main_name, path=main_rel, role="main", expected="pass"),
+                )
+
         brute_rel = _first_existing(
             (
                 "solutions/brute.cpp",
@@ -461,36 +625,34 @@ class _AuditDiscoveryMixin:
                 "brute_force.cpp",
             )
         )
-        if brute_rel is not None:
+        if brute_rel is not None and brute_rel not in seen_paths:
+            seen_paths.add(brute_rel)
+            brute_name = _unique_name("brute")
+            seen_names.add(brute_name)
             solutions.append(
-                SolutionEntry(name="brute", path=brute_rel, role="brute", expected="pass")
+                SolutionEntry(name=brute_name, path=brute_rel, role="brute", expected="pass")
             )
-        seen_wrong_names: set[str] = {"sol", "brute"}
-        for sol_dir_rel, patterns in (
-            ("solutions", ("wrong_*.cpp", "wa_*.cpp")),
-            ("solution", ("wrong_*.cpp", "wa_*.cpp")),
-            ("solutions/wrong", ("*.cpp",)),
-            ("solution/wrong", ("*.cpp",)),
-        ):
-            sols_dir = self._safe_dir(problem_path, sol_dir_rel)
-            if sols_dir is None:
+
+        seen_names.update({"sol", "brute"})
+        real_root = problem_path.resolve()
+        for wrong_file in discover_wrong_solution_files(problem_path):
+            try:
+                rel_wrong = wrong_file.resolve().relative_to(real_root).as_posix()
+            except ValueError:
                 continue
-            for pat in patterns:
-                for wrong_file in sorted(sols_dir.glob(pat)):
-                    if (
-                        is_safe_stem(wrong_file.stem)
-                        and wrong_file.stem not in seen_wrong_names
-                        and self._safe_file(problem_path, f"{sol_dir_rel}/{wrong_file.name}") is not None
-                    ):
-                        seen_wrong_names.add(wrong_file.stem)
-                        solutions.append(
-                            SolutionEntry(
-                                name=wrong_file.stem,
-                                path=f"{sol_dir_rel}/{wrong_file.name}",
-                                role="wrong",
-                                expected="fail",
-                            )
-                        )
+            if rel_wrong in seen_paths:
+                continue
+            seen_paths.add(rel_wrong)
+            wrong_name = _unique_name(wrong_file.stem)
+            seen_names.add(wrong_name)
+            solutions.append(
+                SolutionEntry(
+                    name=wrong_name,
+                    path=rel_wrong,
+                    role="wrong",
+                    expected="fail",
+                )
+            )
 
         tl_ms, ml_mb = self._infer_standalone_limits(problem_path, layout=layout)
         return AutoCodeManifest(

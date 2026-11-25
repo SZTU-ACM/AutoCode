@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import math
 import os
 import re
 import statistics
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..utils.communication_runner import (
@@ -272,6 +274,145 @@ def _strip_cpp_comments_and_strings(code: str) -> str:
 
 _TOKEN_RE = re.compile(r"[A-Za-z_]\w*|[{}();]")
 
+_DECL_TOKEN_RE = re.compile(r"::|->|[A-Za-z_]\w*|[{}();<>\[\]=,:]")
+
+_CPP_CONTROL_KEYWORDS = frozenset(
+    {
+        "if",
+        "for",
+        "while",
+        "switch",
+        "catch",
+        "else",
+        "do",
+        "return",
+        "sizeof",
+        "alignof",
+        "decltype",
+        "static_assert",
+        "typedef",
+        "using",
+        "throw",
+        "new",
+        "delete",
+    }
+)
+
+_CPP_CONTAINER_KEYWORDS = frozenset({"struct", "class", "namespace", "union", "enum"})
+
+_STL_NON_USER_METHODS = frozenset(
+    {
+        "push",
+        "pop",
+        "push_back",
+        "pop_back",
+        "push_front",
+        "pop_front",
+        "emplace",
+        "emplace_back",
+        "top",
+        "front",
+        "back",
+        "begin",
+        "end",
+        "rbegin",
+        "rend",
+        "size",
+        "empty",
+        "clear",
+        "resize",
+        "reserve",
+        "assign",
+        "insert",
+        "erase",
+        "find",
+        "count",
+        "lower_bound",
+        "upper_bound",
+        "binary_search",
+        "tie",
+        "sync_with_stdio",
+        "sort",
+        "stable_sort",
+        "partial_sort",
+        "reverse",
+        "unique",
+        "min",
+        "max",
+        "swap",
+        "fill",
+    }
+)
+
+_BSEARCH_CALLEES = frozenset({"lower_bound", "upper_bound", "binary_search"})
+
+_LOG_STEP_RE = re.compile(
+    r"(?:\+=|-=)\s*(?:lowbit\s*\([^)]+\)|([A-Za-z_]\w*)\s*&\s*-\s*\1\b)"
+    r"|(?:<<=|>>=|\*=|/=)\s*(?:1|2|3|[2-9]\d*)"
+    r"|&\s*=\s*\(?\s*[A-Za-z_]\w*\s*-\s*1\s*\)?"
+    r"|\b([A-Za-z_]\w*)\s*=\s*(?:\(\s*\2\s*-\s*1\s*\)\s*&\s*\2|\2\s*&\s*\(\s*\2\s*-\s*1\s*\)|\2\s*(?:/|>>|<<|\*)\s*[12])"
+)
+
+_LOG_WHILE_COND_RE = re.compile(
+    r"^(?:[A-Za-z_]\w*(?:\s*(?:>|!=|>=)\s*0)?|\(?\s*[A-Za-z_]\w*\s*<=?\s*[A-Za-z_]\w*\s*\)?)$"
+)
+
+_LOWBIT_BODY_RE = re.compile(
+    r"(?:\+=|-=)\s*(?:lowbit\s*\([^)]+\)|([A-Za-z_]\w*)\s*&\s*-\s*\1\b)"
+    r"|(?:>>=|/=|<<=|\*=)\s*(?:1|2)"
+    r"|&\s*=\s*\(?\s*[A-Za-z_]\w*\s*-\s*1\s*\)?"
+    r"|\b([A-Za-z_]\w*)\s*=\s*(?:\(\s*\2\s*-\s*1\s*\)\s*&\s*\2|\2\s*&\s*\(\s*\2\s*-\s*1\s*\))"
+)
+
+_BINARY_SEARCH_BODY_RE = re.compile(
+    r"\b(?:mid|m)\b\s*=[^;\n]*(?:\+\s*[A-Za-z_]\w*\)?\s*(?:/\s*2|>>\s*1)|-\s*[A-Za-z_]\w*\)?\s*(?:/\s*2|>>\s*1))"
+)
+
+
+@dataclass(frozen=True)
+class _CallSite:
+    callee: str
+    loop_depth: int
+    for_depth: int
+    any_loop_depth: int
+
+
+@dataclass
+class _FunctionAnalysis:
+    name: str
+    body: str
+    own_max_depth: int = 0
+    own_for_depth: int = 0
+    own_saw_loop: bool = False
+    own_has_nested_for: bool = False
+    own_has_log_loop: bool = False
+    has_log_loop_in_linear_loop: bool = False
+    has_bsearch_in_loop: bool = False
+    has_bsearch_top: bool = False
+    calls: list[_CallSite] = field(default_factory=list)
+    has_container_pop: bool = False
+    is_divide_and_conquer: bool = False
+    is_tree_graph_dfs: bool = False
+    is_dsu_find: bool = False
+    has_exp_recursion: bool = False
+
+
+@dataclass(frozen=True)
+class _InterproceduralSummary:
+    backend: str
+    max_depth: int
+    saw_loop: bool
+    has_nested_for: bool
+    has_log_with_linear: bool
+    has_only_log_loop: bool
+    has_bsearch_in_loop: bool
+    has_bsearch_top: bool
+    has_container_pop: bool
+    has_exponential_recursion: bool
+    function_count: int
+    call_graph_depth: int
+
+
 _MULTITEST_HEADER_RE = re.compile(
     r"^(?:"
     r"(?:(?:--|\+\+)?\s*(?:T|t|tc|tt|tests?|cases?|q_cases?)\s*(?:--|\+\+)?)"
@@ -298,6 +439,23 @@ def _extract_paren_expr(code: str, open_idx: int) -> tuple[str, int]:
     return code[open_idx + 1 :].strip(), n
 
 
+def _extract_brace_expr(code: str, open_idx: int) -> tuple[str, int]:
+    """Return (inner_text, index_after_closing_brace) for balanced braces starting at open_idx."""
+    depth = 0
+    i = open_idx
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return code[open_idx + 1 : i], i + 1
+        i += 1
+    return code[open_idx + 1 :], n
+
+
 def _is_multitest_driver_header(header: str) -> bool:
     s = " ".join(header.strip().split())
     return bool(s and _MULTITEST_HEADER_RE.match(s))
@@ -320,37 +478,224 @@ def _is_small_constant_for_header(header: str) -> bool:
     return False
 
 
-def _analyze_loop_nesting(
-    cleaned: str,
+def _is_logarithmic_loop(kind: str, header: str, body_preview: str) -> bool:
+    """Detect logarithmic loops (Fenwick lowbit, halving/doubling, binary search)."""
+    normalized_hdr = " ".join(header.split())
+    if kind == "for":
+        parts = [p.strip() for p in normalized_hdr.split(";")]
+        if len(parts) == 3 and _LOG_STEP_RE.search(parts[2]):
+            return True
+        if len(parts) == 3 and not parts[2] and _LOWBIT_BODY_RE.search(body_preview):
+            return True
+        return False
+    if kind == "while" and _LOG_WHILE_COND_RE.match(normalized_hdr):
+        if _BINARY_SEARCH_BODY_RE.search(body_preview):
+            return True
+        cond_var_m = re.match(r"^\(?\s*([A-Za-z_]\w*)\b", normalized_hdr)
+        if cond_var_m and _LOWBIT_BODY_RE.search(body_preview):
+            return True
+    return False
+
+
+def _extract_loop_body_preview(code: str, start_idx: int) -> str:
+    """Extract the immediate statement/block text following a loop header for heuristic inspection."""
+    n = len(code)
+    idx = start_idx
+    while idx < n and code[idx].isspace():
+        idx += 1
+    if idx >= n:
+        return ""
+    if code[idx] == "{":
+        inner, _ = _extract_brace_expr(code, idx)
+        return inner[:400]
+    semi = code.find(";", idx)
+    if semi != -1:
+        return code[idx : min(semi + 1, idx + 400)]
+    return code[idx : idx + 200]
+
+
+def _classify_function_recursion_role(name: str, body: str) -> tuple[bool, bool, bool, bool]:
+    """Return (is_dnc_segtree, is_tree_graph_dfs, is_dsu_find, has_exp_recursion) for a function body."""
+    non_exp_name_re = re.compile(
+        r"(?:merge|sort|qsort|quick|cdq|build|query|update|modify|push|seg|tarjan|scc|lca)",
+        re.IGNORECASE,
+    )
+    self_calls = re.findall(rf"\b{re.escape(name)}\s*\(", body)
+    if not self_calls:
+        return False, False, False, False
+
+    is_dsu_find = bool(
+        re.search(
+            rf"\b(?:fa|f|p|par|parent)\s*\[[^\]]+\]\s*==[^;?]*\?[^:;]*:\s*(?:fa|f|p|par|parent)\s*\[[^\]]+\]\s*=\s*{re.escape(name)}\s*\(",
+            body,
+        )
+        or (
+            name.lower() in {"find", "getf", "get_root", "find_set"}
+            and not re.search(r"\b(?:for|while)\s*\(", body)
+        )
+    )
+    is_dnc_segtree = bool(
+        non_exp_name_re.search(name)
+        or re.search(r"\b(?:mid|dp|memo|cache|lson|rson)\b", body)
+        or re.search(r"(?:/\s*2|>>\s*1|<<\s*1)\b", body)
+        or re.search(r"\b(?:ch|son|lc|rc|ls|rs|low|dfn)\s*\[", body)
+        or re.search(r"(?:->|\.)\s*(?:left|right)\b", body)
+    )
+    has_tree_or_tarjan_guard = bool(
+        re.search(r"!=\s*(?:p|fa|par|parent|prev)\b", body)
+        or re.search(r"\bin_?stack\b", body)
+    )
+    is_tree_graph_dfs = bool(
+        (
+            has_tree_or_tarjan_guard
+            or re.search(r"\b(?:vis|visited|adj|edges?|head|nxt|tree)\b|\bg\s*\[", body)
+        )
+        and re.search(r"\b(?:for|while)\s*\(", body)
+    )
+
+    has_exp_recursion = False
+    if not is_dnc_segtree and not is_dsu_find and name not in {"main", "if", "for", "while", "switch", "catch", "else"}:
+        has_backtrack_undo = bool(
+            re.search(
+                r"\b(?:used|vis|visited|chosen|picked|mark)\s*\[[^\]]+\]\s*=\s*(?:0|false)\b",
+                body,
+            )
+            or (re.search(r"\.pop_back\s*\(\s*\)", body) and not has_tree_or_tarjan_guard)
+        )
+        if has_backtrack_undo and re.search(r"\b(?:for|while)\s*\(", body):
+            has_exp_recursion = True
+        elif (
+            len(self_calls) >= 2
+            and not has_tree_or_tarjan_guard
+            and not re.search(r"\b(?:vis|visited|adj|edges?|head|left|right)\b", body)
+        ):
+            has_exp_recursion = True
+
+    return is_dnc_segtree, is_tree_graph_dfs, is_dsu_find, has_exp_recursion
+
+
+def _extract_named_lambdas_python(body: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract `auto name = [...](...) { ... }` lambdas from a body and blank out their bodies."""
+    tok_iter = list(_DECL_TOKEN_RE.finditer(body))
+    total = len(tok_iter)
+    spans: list[tuple[int, int]] = []
+    extracted: list[tuple[str, str]] = []
+    i = 0
+    while i + 3 < total:
+        tok = tok_iter[i].group(0)
+        if (
+            tok.isidentifier()
+            and tok not in _CPP_CONTROL_KEYWORDS
+            and tok_iter[i + 1].group(0) == "="
+            and tok_iter[i + 2].group(0) == "["
+        ):
+            j = i + 2
+            bracket_depth = 0
+            while j < total:
+                t = tok_iter[j].group(0)
+                if t == "[":
+                    bracket_depth += 1
+                elif t == "]":
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        j += 1
+                        break
+                j += 1
+            if j < total and tok_iter[j].group(0) == "(":
+                paren_depth = 0
+                while j < total:
+                    t = tok_iter[j].group(0)
+                    if t == "(":
+                        paren_depth += 1
+                    elif t == ")":
+                        paren_depth -= 1
+                        if paren_depth == 0:
+                            j += 1
+                            break
+                    j += 1
+            while j < total and tok_iter[j].group(0) not in ("{", ";"):
+                j += 1
+            if j < total and tok_iter[j].group(0) == "{":
+                open_char = tok_iter[j].start()
+                lambda_body, end_char = _extract_brace_expr(body, open_char)
+                extracted.append((tok, lambda_body))
+                spans.append((open_char, end_char))
+                while j < total and tok_iter[j].start() < end_char:
+                    j += 1
+                i = j
+                continue
+        i += 1
+
+    if not spans:
+        return body, []
+    chars = list(body)
+    for start_c, end_c in spans:
+        for pos in range(start_c, min(end_c, len(chars))):
+            if chars[pos] != "\n":
+                chars[pos] = " "
+    return "".join(chars), extracted
+
+
+def _analyze_body_into_function(
+    name: str,
+    body: str,
     *,
-    ignore_multitest: bool = False,
-    ignore_small_const: bool = False,
-) -> tuple[int, bool, bool]:
-    """Compute (max_loop_depth, saw_any_loop, has_nested_for_loops) over comment-stripped C++ code."""
-    # Scan with char offsets so we can inspect loop headers for multi-test / constant-bound detection.
-    tok_iter = list(_TOKEN_RE.finditer(cleaned))
+    ignore_multitest: bool,
+    ignore_small_const: bool,
+) -> _FunctionAnalysis:
+    """Analyze loops, logarithmic loops, and call sites inside a single function body."""
+    tok_iter = list(_TOKEN_RE.finditer(body))
     total = len(tok_iter)
 
-    max_nesting = 0
-    saw_loop = False
-    has_nested_for = False
-    # Stack entries: (kind, counts_toward_depth, is_for)
-    # kind in: "brace_loop" | "do_brace" | "brace_other" | "single_loop" | "single_do"
-    frames: list[tuple[str, bool, bool]] = []
+    info = _FunctionAnalysis(
+        name=name,
+        body=body,
+        has_container_pop=bool(re.search(r"\.(?:pop|pop_front|pop_back)\s*\(", body)),
+    )
+    (
+        info.is_divide_and_conquer,
+        info.is_tree_graph_dfs,
+        info.is_dsu_find,
+        info.has_exp_recursion,
+    ) = _classify_function_recursion_role(name, body)
+
+    # Stack entries: (kind, counts_toward_depth, is_for, is_log)
+    frames: list[tuple[str, bool, bool, bool]] = []
     expecting_do_while = False
 
-    def _active_loop_depth() -> int:
-        return sum(1 for k, counts, _ in frames if counts and k in ("brace_loop", "do_brace", "single_loop", "single_do"))
+    def _active_nonlog_depth() -> int:
+        return sum(
+            1
+            for k, counts, _, is_log in frames
+            if counts and not is_log and k in ("brace_loop", "do_brace", "single_loop", "single_do")
+        )
+
+    def _active_any_depth() -> int:
+        return sum(
+            1
+            for k, counts, _, _ in frames
+            if counts and k in ("brace_loop", "do_brace", "single_loop", "single_do")
+        )
 
     def _active_for_depth() -> int:
-        return sum(1 for k, counts, is_f in frames if counts and is_f and k in ("brace_loop", "single_loop"))
+        return sum(
+            1
+            for k, counts, is_f, is_log in frames
+            if counts and not is_log and is_f and k in ("brace_loop", "single_loop")
+        )
+
+    def _has_active_log_loop() -> bool:
+        return any(
+            counts and is_log and k in ("brace_loop", "do_brace", "single_loop", "single_do")
+            for k, counts, _, is_log in frames
+        )
 
     def _unwind_single_loops(next_tok: str | None) -> None:
         nonlocal expecting_do_while
         if next_tok == "else":
             return
         while frames:
-            top_k, _, _ = frames[-1]
+            top_k, _, _, _ = frames[-1]
             if top_k == "single_loop":
                 frames.pop()
             elif top_k == "single_do":
@@ -389,41 +734,53 @@ def _analyze_loop_nesting(
                 continue
 
             if i + 1 < total and tok_iter[i + 1].group(0) == "(":
-                saw_loop = True
+                info.own_saw_loop = True
                 is_for = tok == "for"
-                header_str, _ = _extract_paren_expr(cleaned, tok_iter[i + 1].start())
+                header_str, after_hdr_char = _extract_paren_expr(body, tok_iter[i + 1].start())
+                body_preview = _extract_loop_body_preview(body, after_hdr_char)
                 counts = True
-                if ignore_multitest and _active_loop_depth() == 0 and _is_multitest_driver_header(header_str):
+                if ignore_multitest and _active_any_depth() == 0 and _is_multitest_driver_header(header_str):
                     counts = False
                 elif ignore_small_const and is_for and _is_small_constant_for_header(header_str):
                     counts = False
+                is_log = bool(counts and ignore_small_const and _is_logarithmic_loop(tok, header_str, body_preview))
                 if counts:
-                    current_depth = _active_loop_depth() + 1
-                    max_nesting = max(max_nesting, current_depth)
-                    if is_for and _active_for_depth() >= 1:
-                        has_nested_for = True
+                    if is_log:
+                        info.own_has_log_loop = True
+                        if _active_nonlog_depth() >= 1:
+                            info.has_log_loop_in_linear_loop = True
+                    else:
+                        current_depth = _active_nonlog_depth() + 1
+                        info.own_max_depth = max(info.own_max_depth, current_depth)
+                        if is_for:
+                            current_for = _active_for_depth() + 1
+                            info.own_for_depth = max(info.own_for_depth, current_for)
+                            if _active_for_depth() >= 1:
+                                info.own_has_nested_for = True
+                        if _has_active_log_loop():
+                            info.has_log_loop_in_linear_loop = True
                 i = _skip_parens_idx(i + 1)
                 if i < total and tok_iter[i].group(0) == ";":
                     i += 1
                     _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
                 elif i < total and tok_iter[i].group(0) == "{":
-                    frames.append(("brace_loop", counts, is_for))
+                    frames.append(("brace_loop", counts, is_for, is_log))
                     i += 1
                 else:
-                    frames.append(("single_loop", counts, is_for))
+                    frames.append(("single_loop", counts, is_for, is_log))
                 continue
 
         elif tok == "do":
             if i + 1 < total and tok_iter[i + 1].group(0) != "(":
-                saw_loop = True
-                current_depth = _active_loop_depth() + 1
-                max_nesting = max(max_nesting, current_depth)
+                info.own_saw_loop = True
+                current_depth = _active_nonlog_depth() + 1
+                info.own_max_depth = max(info.own_max_depth, current_depth)
                 i += 1
                 if i < total and tok_iter[i].group(0) == "{":
-                    frames.append(("do_brace", True, False))
+                    frames.append(("do_brace", True, False, False))
                     i += 1
                 else:
-                    frames.append(("single_do", True, False))
+                    frames.append(("single_do", True, False, False))
                 continue
 
         elif tok in ("if", "switch"):
@@ -432,14 +789,14 @@ def _analyze_loop_nesting(
                 continue
 
         elif tok == "{":
-            frames.append(("brace_other", False, False))
+            frames.append(("brace_other", False, False, False))
             i += 1
             continue
 
         elif tok == "}":
             popped_kind = None
             while frames:
-                top_k, _, _ = frames.pop()
+                top_k, _, _, _ = frames.pop()
                 if top_k in ("brace_loop", "do_brace", "brace_other"):
                     popped_kind = top_k
                     break
@@ -455,13 +812,657 @@ def _analyze_loop_nesting(
             _unwind_single_loops(tok_iter[i].group(0) if i < total else None)
             continue
 
+        elif (
+            tok.isidentifier()
+            and tok not in _CPP_CONTROL_KEYWORDS
+            and i + 1 < total
+            and tok_iter[i + 1].group(0) == "("
+        ):
+            cur_nonlog = _active_nonlog_depth()
+            cur_any = _active_any_depth()
+            cur_for = _active_for_depth()
+            if tok in _BSEARCH_CALLEES:
+                if cur_any > 0:
+                    info.has_bsearch_in_loop = True
+                else:
+                    info.has_bsearch_top = True
+            elif tok not in _STL_NON_USER_METHODS:
+                info.calls.append(
+                    _CallSite(
+                        callee=tok,
+                        loop_depth=cur_nonlog,
+                        for_depth=cur_for,
+                        any_loop_depth=cur_any,
+                    )
+                )
+
         i += 1
 
-    return max_nesting, saw_loop, has_nested_for
+    return info
+
+
+def _extract_functions_python(
+    cleaned: str,
+    *,
+    ignore_multitest: bool,
+    ignore_small_const: bool,
+) -> dict[str, _FunctionAnalysis]:
+    """Extract function and named-lambda definitions from comment-stripped C++ using brace scopes."""
+    tok_iter = list(_DECL_TOKEN_RE.finditer(cleaned))
+    total = len(tok_iter)
+    functions: dict[str, _FunctionAnalysis] = {}
+    scope_stack: list[int] = []  # brace depth of container scopes
+    brace_depth = 0
+    pending_container = False
+
+    def _register_fn(fn_name: str, raw_body: str) -> None:
+        stripped_body, lambdas = _extract_named_lambdas_python(raw_body)
+        fn_analysis = _analyze_body_into_function(
+            fn_name,
+            stripped_body,
+            ignore_multitest=ignore_multitest,
+            ignore_small_const=ignore_small_const,
+        )
+        key = fn_name
+        if key in functions:
+            suffix = 2
+            while f"{key}#{suffix}" in functions:
+                suffix += 1
+            key = f"{key}#{suffix}"
+            fn_analysis.name = key
+        functions[key] = fn_analysis
+        for lam_name, lam_body in lambdas:
+            _register_fn(lam_name, lam_body)
+
+    i = 0
+    while i < total:
+        tok = tok_iter[i].group(0)
+        if tok in _CPP_CONTAINER_KEYWORDS:
+            pending_container = True
+            i += 1
+            continue
+        if tok == "{":
+            brace_depth += 1
+            if pending_container:
+                scope_stack.append(brace_depth)
+                pending_container = False
+            i += 1
+            continue
+        if tok == "}":
+            if scope_stack and scope_stack[-1] == brace_depth:
+                scope_stack.pop()
+            brace_depth = max(0, brace_depth - 1)
+            i += 1
+            continue
+        if tok == ";":
+            pending_container = False
+            i += 1
+            continue
+
+        in_decl_scope = brace_depth == (scope_stack[-1] if scope_stack else 0)
+        if (
+            in_decl_scope
+            and not pending_container
+            and tok.isidentifier()
+            and tok not in _CPP_CONTROL_KEYWORDS
+            and i + 1 < total
+            and tok_iter[i + 1].group(0) == "("
+        ):
+            # Look back to avoid matching variable initialization inside stray expressions
+            prev_tok = tok_iter[i - 1].group(0) if i > 0 else ""
+            if prev_tok not in {"=", "return", ",", "("}:
+                j = i + 1
+                pdepth = 0
+                while j < total:
+                    t = tok_iter[j].group(0)
+                    if t == "(":
+                        pdepth += 1
+                    elif t == ")":
+                        pdepth -= 1
+                        if pdepth == 0:
+                            j += 1
+                            break
+                    j += 1
+                # Skip cv/noexcept/trailing-return qualifiers or constructor initializer list
+                saw_colon = False
+                while j < total:
+                    t = tok_iter[j].group(0)
+                    if t == "{":
+                        break
+                    if t in {";", "=", ","}:
+                        j = -1
+                        break
+                    if t == ":" and scope_stack:
+                        saw_colon = True
+                    elif t == "(" and not saw_colon:
+                        # Likely something like macro/call, skip parens safely
+                        sub_d = 0
+                        while j < total:
+                            st = tok_iter[j].group(0)
+                            if st == "(":
+                                sub_d += 1
+                            elif st == ")":
+                                sub_d -= 1
+                                if sub_d == 0:
+                                    break
+                            j += 1
+                    j += 1
+                if j != -1 and j < total and tok_iter[j].group(0) == "{":
+                    open_char = tok_iter[j].start()
+                    body_text, end_char = _extract_brace_expr(cleaned, open_char)
+                    _register_fn(tok, body_text)
+                    while i < total and tok_iter[i].start() < end_char:
+                        i += 1
+                    continue
+
+        i += 1
+
+    if not functions and cleaned.strip():
+        _register_fn("<toplevel>", cleaned)
+    return functions
+
+
+def _load_tree_sitter_cpp() -> tuple[Any, Any, Any] | None:
+    """Dynamically load optional `tree_sitter` and `tree_sitter_cpp` without static import errors."""
+    try:
+        ts_mod = importlib.import_module("tree_sitter")
+        tscpp_mod = importlib.import_module("tree_sitter_cpp")
+        language_cls = getattr(ts_mod, "Language", None)
+        parser_cls = getattr(ts_mod, "Parser", None)
+        lang_fn = getattr(tscpp_mod, "language", None)
+        if language_cls is None or parser_cls is None or lang_fn is None:
+            return None
+        return language_cls, parser_cls, lang_fn
+    except Exception:
+        return None
+
+
+def _cst_extract_leaf_name(node: Any, code_bytes: bytes) -> str | None:
+    """Extract simple identifier name from a tree-sitter declarator or callee node."""
+    if node is None:
+        return None
+    ntype = getattr(node, "type", "")
+    if ntype in {"identifier", "field_identifier", "type_identifier"}:
+        return code_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace").strip()
+    if ntype == "qualified_identifier":
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return _cst_extract_leaf_name(name_node, code_bytes)
+    if ntype == "field_expression":
+        field_node = node.child_by_field_name("field")
+        if field_node is not None:
+            return _cst_extract_leaf_name(field_node, code_bytes)
+    if ntype == "template_function":
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return _cst_extract_leaf_name(name_node, code_bytes)
+    if ntype in {"function_declarator", "pointer_declarator", "reference_declarator"}:
+        decl_node = node.child_by_field_name("declarator")
+        if decl_node is not None:
+            return _cst_extract_leaf_name(decl_node, code_bytes)
+    for child in getattr(node, "children", ()):
+        leaf = _cst_extract_leaf_name(child, code_bytes)
+        if leaf:
+            return leaf
+    return None
+
+
+def _cst_node_text(node: Any, code_bytes: bytes) -> str:
+    if node is None:
+        return ""
+    return code_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _analyze_functions_tree_sitter(
+    code: str,
+    *,
+    ignore_multitest: bool,
+    ignore_small_const: bool,
+) -> dict[str, _FunctionAnalysis] | None:
+    """Analyze C++ functions & call graph using optional `tree-sitter-cpp` CST."""
+    loaded = _load_tree_sitter_cpp()
+    if loaded is None:
+        return None
+    language_cls, parser_cls, lang_fn = loaded
+    try:
+        cpp_lang = language_cls(lang_fn())
+        parser = parser_cls(cpp_lang)
+        code_bytes = code.encode("utf-8", errors="replace")
+        tree = parser.parse(code_bytes)
+        root = tree.root_node
+        if getattr(root, "has_error", False):
+            return None
+    except Exception:
+        return None
+
+    functions: dict[str, _FunctionAnalysis] = {}
+
+    def _walk_body_cst(
+        node: Any,
+        info: _FunctionAnalysis,
+        *,
+        nonlog_depth: int,
+        any_depth: int,
+        for_depth: int,
+        has_log_ancestor: bool,
+    ) -> None:
+        ntype = getattr(node, "type", "")
+        if ntype in {"for_statement", "for_range_loop", "while_statement", "do_statement"}:
+            info.own_saw_loop = True
+            is_for = ntype in {"for_statement", "for_range_loop"}
+            body_node = node.child_by_field_name("body")
+            body_text = _cst_node_text(body_node, code_bytes)
+            counts = True
+            is_log = False
+
+            if ntype == "for_statement":
+                hdr_end = body_node.start_byte if body_node is not None else node.end_byte
+                raw_hdr = code_bytes[node.start_byte : hdr_end].decode("utf-8", errors="replace")
+                open_p = raw_hdr.find("(")
+                close_p = raw_hdr.rfind(")")
+                hdr_str = raw_hdr[open_p + 1 : close_p] if open_p != -1 and close_p > open_p else ""
+                if ignore_multitest and any_depth == 0 and _is_multitest_driver_header(hdr_str):
+                    counts = False
+                elif ignore_small_const and _is_small_constant_for_header(hdr_str):
+                    counts = False
+                is_log = bool(counts and ignore_small_const and _is_logarithmic_loop("for", hdr_str, body_text))
+            elif ntype == "while_statement":
+                cond_node = node.child_by_field_name("condition")
+                cond_str = _cst_node_text(cond_node, code_bytes).strip()
+                if cond_str.startswith("(") and cond_str.endswith(")"):
+                    cond_str = cond_str[1:-1].strip()
+                if ignore_multitest and any_depth == 0 and _is_multitest_driver_header(cond_str):
+                    counts = False
+                is_log = bool(counts and ignore_small_const and _is_logarithmic_loop("while", cond_str, body_text))
+
+            next_nonlog = nonlog_depth
+            next_any = any_depth
+            next_for = for_depth
+            next_log_anc = has_log_ancestor
+            if counts:
+                next_any = any_depth + 1
+                if is_log:
+                    info.own_has_log_loop = True
+                    next_log_anc = True
+                    if nonlog_depth >= 1:
+                        info.has_log_loop_in_linear_loop = True
+                else:
+                    next_nonlog = nonlog_depth + 1
+                    info.own_max_depth = max(info.own_max_depth, next_nonlog)
+                    if is_for:
+                        next_for = for_depth + 1
+                        info.own_for_depth = max(info.own_for_depth, next_for)
+                        if for_depth >= 1:
+                            info.own_has_nested_for = True
+                    if has_log_ancestor:
+                        info.has_log_loop_in_linear_loop = True
+
+            for child in getattr(node, "children", ()):
+                _walk_body_cst(
+                    child,
+                    info,
+                    nonlog_depth=next_nonlog,
+                    any_depth=next_any,
+                    for_depth=next_for,
+                    has_log_ancestor=next_log_anc,
+                )
+            return
+
+        if ntype == "init_declarator":
+            val_node = node.child_by_field_name("value")
+            decl_node = node.child_by_field_name("declarator")
+            if val_node is not None and getattr(val_node, "type", "") == "lambda_expression":
+                lam_name = _cst_extract_leaf_name(decl_node, code_bytes)
+                lam_body_node = val_node.child_by_field_name("body")
+                if lam_name and lam_body_node is not None:
+                    _register_cst_fn(lam_name, lam_body_node)
+                    return
+
+        if ntype == "call_expression":
+            fn_node = node.child_by_field_name("function")
+            callee = _cst_extract_leaf_name(fn_node, code_bytes)
+            if callee:
+                if callee in _BSEARCH_CALLEES:
+                    if any_depth > 0:
+                        info.has_bsearch_in_loop = True
+                    else:
+                        info.has_bsearch_top = True
+                elif callee not in _STL_NON_USER_METHODS:
+                    info.calls.append(
+                        _CallSite(
+                            callee=callee,
+                            loop_depth=nonlog_depth,
+                            for_depth=for_depth,
+                            any_loop_depth=any_depth,
+                        )
+                    )
+
+        for child in getattr(node, "children", ()):
+            _walk_body_cst(
+                child,
+                info,
+                nonlog_depth=nonlog_depth,
+                any_depth=any_depth,
+                for_depth=for_depth,
+                has_log_ancestor=has_log_ancestor,
+            )
+
+    def _register_cst_fn(fn_name: str, body_node: Any) -> None:
+        body_text = _strip_cpp_comments_and_strings(_cst_node_text(body_node, code_bytes))
+        info = _FunctionAnalysis(
+            name=fn_name,
+            body=body_text,
+            has_container_pop=bool(re.search(r"\.(?:pop|pop_front|pop_back)\s*\(", body_text)),
+        )
+        (
+            info.is_divide_and_conquer,
+            info.is_tree_graph_dfs,
+            info.is_dsu_find,
+            info.has_exp_recursion,
+        ) = _classify_function_recursion_role(fn_name, body_text)
+        _walk_body_cst(
+            body_node,
+            info,
+            nonlog_depth=0,
+            any_depth=0,
+            for_depth=0,
+            has_log_ancestor=False,
+        )
+        key = fn_name
+        if key in functions:
+            suffix = 2
+            while f"{key}#{suffix}" in functions:
+                suffix += 1
+            key = f"{key}#{suffix}"
+            info.name = key
+        functions[key] = info
+
+    def _collect_top_functions(node: Any) -> None:
+        ntype = getattr(node, "type", "")
+        if ntype == "function_definition":
+            decl_node = node.child_by_field_name("declarator")
+            body_node = node.child_by_field_name("body")
+            fn_name = _cst_extract_leaf_name(decl_node, code_bytes)
+            if fn_name and body_node is not None:
+                _register_cst_fn(fn_name, body_node)
+                return
+        if ntype == "init_declarator":
+            val_node = node.child_by_field_name("value")
+            decl_node = node.child_by_field_name("declarator")
+            if val_node is not None and getattr(val_node, "type", "") == "lambda_expression":
+                lam_name = _cst_extract_leaf_name(decl_node, code_bytes)
+                lam_body_node = val_node.child_by_field_name("body")
+                if lam_name and lam_body_node is not None:
+                    _register_cst_fn(lam_name, lam_body_node)
+                    return
+        for child in getattr(node, "children", ()):
+            _collect_top_functions(child)
+
+    _collect_top_functions(root)
+    if not functions:
+        return None
+    return functions
+
+
+def _solve_call_graph(
+    functions: dict[str, _FunctionAnalysis],
+    *,
+    backend: str,
+) -> _InterproceduralSummary:
+    """Propagate loop depths, logarithmic factors, and binary-search call context over the call graph."""
+    if not functions:
+        return _InterproceduralSummary(
+            backend=backend,
+            max_depth=0,
+            saw_loop=False,
+            has_nested_for=False,
+            has_log_with_linear=False,
+            has_only_log_loop=False,
+            has_bsearch_in_loop=False,
+            has_bsearch_top=False,
+            has_container_pop=False,
+            has_exponential_recursion=False,
+            function_count=0,
+            call_graph_depth=0,
+        )
+
+    # Map base function names (supporting overloaded `#2` suffixes cleanly)
+    base_to_keys: dict[str, list[str]] = {}
+    for key in functions:
+        base = key.split("#", 1)[0]
+        base_to_keys.setdefault(base, []).append(key)
+
+    def _resolve_callees(callee_name: str) -> list[str]:
+        if callee_name in functions:
+            return [callee_name]
+        return base_to_keys.get(callee_name, [])
+
+    adj: dict[str, set[str]] = {fn: set() for fn in functions}
+    for fn, info in functions.items():
+        for call in info.calls:
+            for target in _resolve_callees(call.callee):
+                adj[fn].add(target)
+
+    # Tarjan SCC decomposition (returns SCCs in reverse topological order: callees first)
+    index_counter = 0
+    indices: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    sccs: list[list[str]] = []
+
+    def _strongconnect(node: str) -> None:
+        nonlocal index_counter
+        indices[node] = index_counter
+        lowlink[node] = index_counter
+        index_counter += 1
+        stack.append(node)
+        on_stack.add(node)
+        for nxt in adj[node]:
+            if nxt not in indices:
+                _strongconnect(nxt)
+                lowlink[node] = min(lowlink[node], lowlink[nxt])
+            elif nxt in on_stack:
+                lowlink[node] = min(lowlink[node], indices[nxt])
+        if lowlink[node] == indices[node]:
+            comp: list[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.remove(w)
+                comp.append(w)
+                if w == node:
+                    break
+            sccs.append(comp)
+
+    for fn in functions:
+        if fn not in indices:
+            _strongconnect(fn)
+
+    scc_of: dict[str, int] = {}
+    for scc_idx, comp in enumerate(sccs):
+        for fn in comp:
+            scc_of[fn] = scc_idx
+
+    eff_depth: dict[str, int] = {}
+    eff_for_depth: dict[str, int] = {}
+    eff_nested_for: dict[str, bool] = {}
+    eff_log_loop: dict[str, bool] = {}
+    eff_log_with_linear: dict[str, bool] = {}
+    eff_bsearch_any: dict[str, bool] = {}
+    eff_bsearch_in_loop: dict[str, bool] = {}
+    eff_chain_height: dict[str, int] = {}
+
+    for scc_idx, comp in enumerate(sccs):
+        comp_set = set(comp)
+        is_cyclic = len(comp) > 1 or any(comp[0] in adj[comp[0]] for _ in (0,))
+
+        base_depth = max(functions[f].own_max_depth for f in comp)
+        base_for_depth = max(functions[f].own_for_depth for f in comp)
+        base_nested_for = any(functions[f].own_has_nested_for for f in comp)
+        base_log = any(functions[f].own_has_log_loop for f in comp)
+        base_log_linear = any(functions[f].has_log_loop_in_linear_loop for f in comp)
+        base_bsearch_any = any(functions[f].has_bsearch_top or functions[f].has_bsearch_in_loop for f in comp)
+        base_bsearch_in_loop = any(functions[f].has_bsearch_in_loop for f in comp)
+        max_callee_chain = 0
+
+        for fn in comp:
+            info = functions[fn]
+            for call in info.calls:
+                for target in _resolve_callees(call.callee):
+                    if scc_of[target] == scc_idx:
+                        if call.any_loop_depth > 0 and eff_bsearch_any.get(target, False):
+                            base_bsearch_in_loop = True
+                        continue
+                    t_depth = eff_depth[target]
+                    t_for = eff_for_depth[target]
+                    max_callee_chain = max(max_callee_chain, 1 + eff_chain_height[target])
+                    if t_depth > 0:
+                        base_depth = max(base_depth, call.loop_depth + t_depth)
+                    if t_for > 0:
+                        base_for_depth = max(base_for_depth, call.for_depth + t_for)
+                        if call.for_depth >= 1:
+                            base_nested_for = True
+                    if eff_nested_for[target]:
+                        base_nested_for = True
+                    if eff_log_loop[target]:
+                        base_log = True
+                        if call.loop_depth >= 1:
+                            base_log_linear = True
+                    if call.any_loop_depth > call.loop_depth and t_depth >= 1:
+                        # Linear helper called inside a logarithmic loop (e.g. binary search on answer)
+                        base_log_linear = True
+                    if eff_log_with_linear[target]:
+                        base_log_linear = True
+                    if eff_bsearch_any[target]:
+                        base_bsearch_any = True
+                        if call.any_loop_depth >= 1:
+                            base_bsearch_in_loop = True
+                    if eff_bsearch_in_loop[target]:
+                        base_bsearch_in_loop = True
+
+        if is_cyclic:
+            any_dnc = any(functions[f].is_divide_and_conquer for f in comp)
+            any_dfs = any(functions[f].is_tree_graph_dfs for f in comp)
+            any_dsu = any(functions[f].is_dsu_find for f in comp)
+            if any_dnc or any_dsu:
+                pass
+            elif any_dfs:
+                # Tree/graph DFS visits each node once (own edge-loop counts as depth 1, not 1+1),
+                # but calling an external O(n) helper inside DFS runs O(n) per node -> depth >= 2.
+                ext_callee_depth = 0
+                for fn in comp:
+                    for call in functions[fn].calls:
+                        for target in _resolve_callees(call.callee):
+                            if scc_of[target] != scc_idx:
+                                ext_callee_depth = max(ext_callee_depth, eff_depth[target])
+                if ext_callee_depth >= 1:
+                    base_depth = max(base_depth, 1 + ext_callee_depth)
+                    if base_for_depth >= 1 or any(eff_for_depth[t] >= 1 for fn in comp for c in functions[fn].calls for t in _resolve_callees(c.callee) if scc_of[t] != scc_idx):
+                        base_nested_for = True
+                else:
+                    base_depth = max(base_depth, 1)
+            else:
+                # Generic recursive helper chain (non-D&C, non-DFS, non-DSU)
+                if base_depth >= 1:
+                    base_depth = base_depth + 1
+                    if base_for_depth >= 1:
+                        base_for_depth = base_for_depth + 1
+                        base_nested_for = True
+                else:
+                    # Pure linear chain recursion without loops
+                    base_depth = 1
+                if base_log:
+                    base_log_linear = True
+                if base_bsearch_any:
+                    base_bsearch_in_loop = True
+
+            # Check internal self-recursion inside a loop for bsearch propagation
+            for fn in comp:
+                for call in functions[fn].calls:
+                    if call.callee in comp_set or any(t in comp_set for t in _resolve_callees(call.callee)):
+                        if call.any_loop_depth >= 1 and base_bsearch_any:
+                            base_bsearch_in_loop = True
+
+        for fn in comp:
+            eff_depth[fn] = base_depth
+            eff_for_depth[fn] = base_for_depth
+            eff_nested_for[fn] = base_nested_for
+            eff_log_loop[fn] = base_log
+            eff_log_with_linear[fn] = base_log_linear
+            eff_bsearch_any[fn] = base_bsearch_any
+            eff_bsearch_in_loop[fn] = base_bsearch_in_loop
+            eff_chain_height[fn] = max_callee_chain + (1 if is_cyclic else 0)
+
+    max_depth = max(eff_depth.values(), default=0)
+    saw_loop = any(info.own_saw_loop for info in functions.values()) or max_depth > 0
+    has_nested_for = any(eff_nested_for.values())
+    has_log_with_linear = any(eff_log_with_linear.values())
+    has_any_log = any(eff_log_loop.values())
+    has_only_log_loop = has_any_log and max_depth == 0 and not has_log_with_linear
+    has_bsearch_in_loop = any(eff_bsearch_in_loop.values())
+    has_bsearch_top = any(info.has_bsearch_top for info in functions.values())
+    has_container_pop = any(info.has_container_pop for info in functions.values())
+    has_exp_rec = any(info.has_exp_recursion for info in functions.values())
+    call_graph_depth = max(eff_chain_height.values(), default=0)
+
+    return _InterproceduralSummary(
+        backend=backend,
+        max_depth=max_depth,
+        saw_loop=saw_loop,
+        has_nested_for=has_nested_for,
+        has_log_with_linear=has_log_with_linear,
+        has_only_log_loop=has_only_log_loop,
+        has_bsearch_in_loop=has_bsearch_in_loop,
+        has_bsearch_top=has_bsearch_top,
+        has_container_pop=has_container_pop,
+        has_exponential_recursion=has_exp_rec,
+        function_count=len(functions),
+        call_graph_depth=call_graph_depth,
+    )
+
+
+def analyze_cpp_interprocedural(
+    code: str,
+    *,
+    ignore_multitest: bool = True,
+    ignore_small_const: bool = True,
+) -> _InterproceduralSummary:
+    """Analyze C++ loop depth and call graph using optional tree-sitter-cpp CST or pure-Python fallback."""
+    cst_functions = _analyze_functions_tree_sitter(
+        code,
+        ignore_multitest=ignore_multitest,
+        ignore_small_const=ignore_small_const,
+    )
+    if cst_functions is not None:
+        return _solve_call_graph(cst_functions, backend="tree_sitter_cpp")
+
+    cleaned = _strip_cpp_comments_and_strings(code)
+    py_functions = _extract_functions_python(
+        cleaned,
+        ignore_multitest=ignore_multitest,
+        ignore_small_const=ignore_small_const,
+    )
+    return _solve_call_graph(py_functions, backend="python_fallback")
+
+
+def _analyze_loop_nesting(
+    cleaned: str,
+    *,
+    ignore_multitest: bool = False,
+    ignore_small_const: bool = False,
+) -> tuple[int, bool, bool]:
+    """Compute (max_loop_depth, saw_any_loop, has_nested_for_loops) across function call graphs."""
+    functions = _extract_functions_python(
+        cleaned,
+        ignore_multitest=ignore_multitest,
+        ignore_small_const=ignore_small_const,
+    )
+    summary = _solve_call_graph(functions, backend="python_fallback")
+    return summary.max_depth, summary.saw_loop, summary.has_nested_for
 
 
 def _depth_to_complexity(max_nesting: int, saw_loop: bool) -> str:
-    if not saw_loop:
+    if not saw_loop or max_nesting == 0:
         return ComplexityLevel.CONSTANT
     if max_nesting <= 1:
         return ComplexityLevel.LINEAR
@@ -473,79 +1474,22 @@ def _depth_to_complexity(max_nesting: int, saw_loop: bool) -> str:
 
 
 def analyze_loop_complexity(code: str) -> str:
-    cleaned = _strip_cpp_comments_and_strings(code)
-    max_nesting, saw_loop, _ = _analyze_loop_nesting(cleaned)
-    return _depth_to_complexity(max_nesting, saw_loop)
+    summary = analyze_cpp_interprocedural(code, ignore_multitest=False, ignore_small_const=False)
+    if summary.has_only_log_loop:
+        return ComplexityLevel.LOG_N
+    return _depth_to_complexity(summary.max_depth, summary.saw_loop)
 
 
 def has_effective_nested_loops(code: str) -> bool:
     """Return True when algorithmic loop depth (ignoring multi-test drivers & small constant loops) is >= 2."""
-    cleaned = _strip_cpp_comments_and_strings(code)
-    depth, _, _ = _analyze_loop_nesting(cleaned, ignore_multitest=True, ignore_small_const=True)
-    return depth >= 2
+    summary = analyze_cpp_interprocedural(code, ignore_multitest=True, ignore_small_const=True)
+    return summary.max_depth >= 2
 
 
 def _has_exponential_recursion(cleaned: str) -> bool:
     """Detect exponential branching / backtracking recursion while ignoring tree DFS, Tarjan, and divide-and-conquer."""
-    # Find function definitions: <ret> <name>(<params>) { ... }
-    fn_re = re.compile(
-        r"\b(?:void|int|long\s+long|ll|bool|double|auto|unsigned)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{"
-    )
-    skip_names = {"main", "if", "for", "while", "switch", "catch", "else"}
-    non_exp_name_re = re.compile(
-        r"(?:merge|sort|qsort|quick|cdq|build|query|update|modify|push|seg|tarjan|scc|lca)",
-        re.IGNORECASE,
-    )
-    for m in fn_re.finditer(cleaned):
-        fname = m.group(1)
-        if fname in skip_names or non_exp_name_re.search(fname):
-            continue
-        # Extract balanced body starting at '{'
-        brace_start = m.end() - 1
-        depth = 0
-        end = brace_start
-        for idx in range(brace_start, len(cleaned)):
-            ch = cleaned[idx]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = idx
-                    break
-        if end <= brace_start:
-            continue
-        body = cleaned[brace_start + 1 : end]
-        self_calls = re.findall(rf"\b{re.escape(fname)}\s*\(", body)
-        if not self_calls:
-            continue
-        # Exclude memoized DP, divide-and-conquer, segment tree, binary tree, and Tarjan SCC
-        if (
-            re.search(r"\b(?:mid|dp|memo|cache|lson|rson)\b", body)
-            or re.search(r"(?:/\s*2|>>\s*1|<<\s*1)\b", body)
-            or re.search(r"\b(?:ch|son|lc|rc|ls|rs|low|dfn)\s*\[", body)
-            or re.search(r"(?:->|\.)\s*(?:left|right)\b", body)
-        ):
-            continue
-        has_tree_or_tarjan_guard = bool(
-            re.search(r"!=\s*(?:p|fa|par|parent|prev)\b", body)
-            or re.search(r"\bin_?stack\b", body)
-        )
-        # Backtracking: recursive call inside loop + unmark/pop_back (excluding rooted-tree DFS / Tarjan)
-        has_backtrack_undo = bool(
-            re.search(r"\b(?:used|vis|visited|chosen|picked|mark)\s*\[[^\]]+\]\s*=\s*(?:0|false)\b", body)
-            or (re.search(r"\.pop_back\s*\(\s*\)", body) and not has_tree_or_tarjan_guard)
-        )
-        if has_backtrack_undo and re.search(r"\b(?:for|while)\s*\(", body):
-            return True
-        # Direct multi-branch recursion without graph/tree visited or parent guard (e.g. dfs(i+1, 0); dfs(i+1, 1);)
-        if (
-            len(self_calls) >= 2
-            and not has_tree_or_tarjan_guard
-            and not re.search(r"\b(?:vis|visited|adj|edges?|head|left|right)\b", body)
-        ):
-            return True
-    return False
+    functions = _extract_functions_python(cleaned, ignore_multitest=True, ignore_small_const=True)
+    return any(info.has_exp_recursion for info in functions.values())
 
 
 def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
@@ -565,29 +1509,198 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         patterns.append("divide_and_conquer")
         complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
 
-    if re.search(r"\b(fenwick|segtree|segment_tree)\b", cleaned, re.IGNORECASE) or re.search(
-        r"\bBIT\b", cleaned
-    ):
+    # Fenwick tree: English names OR Chinese CP idioms (`lowbit`, `x & -x`)
+    has_fenwick = bool(
+        re.search(r"\bfenwick\b", cleaned, re.IGNORECASE)
+        or re.search(r"\bBIT\b", cleaned)
+        or re.search(r"\blowbit\s*\(", cleaned)
+        or re.search(r"\b([A-Za-z_]\w*)\s*&\s*-\s*\1\b", cleaned)
+    )
+    if has_fenwick:
+        patterns.append("fenwick_tree")
+
+    # Segment tree: English names OR Chinese CP idioms (`ls`/`rs`/`lson`/`rson`/`pushup`/`pushdown`/midpoint + `p << 1`)
+    has_midpoint = bool(
+        re.search(
+            r"\b(?:mid|m)\b\s*=\s*\(?\s*[A-Za-z_]\w*\s*\+\s*[A-Za-z_]\w*\s*\)?\s*(?:/\s*2|>>\s*1)",
+            cleaned,
+        )
+    )
+    has_child_pairs = bool(
+        (re.search(r"\bls\b", cleaned) and re.search(r"\brs\b", cleaned))
+        or (re.search(r"\blson\b", cleaned) and re.search(r"\brson\b", cleaned))
+        or (re.search(r"\blc\b", cleaned) and re.search(r"\brc\b", cleaned))
+        or (
+            re.search(r"\b([A-Za-z_]\w*)\s*<<\s*1\b", cleaned)
+            and re.search(r"\b([A-Za-z_]\w*)\s*<<\s*1\s*\|\s*1\b", cleaned)
+        )
+    )
+    has_segtree = bool(
+        re.search(r"\b(?:segtree|segment_tree)\b", cleaned, re.IGNORECASE)
+        or re.search(r"\b(?:push_?up|push_?down)\s*\(", cleaned, re.IGNORECASE)
+        or (has_midpoint and has_child_pairs)
+    )
+    if has_segtree:
+        patterns.append("segment_tree")
+
+    if has_fenwick or has_segtree:
         patterns.append("tree_data_structure")
         complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
 
-    if re.search(r"\b(?:std::)?priority_queue\s*<|\bmake_heap\b|\bpush_heap\b", cleaned):
+    # Binary lifting / sparse table (`fa[i][j]` / `f[i][j]` / `st[j][i]` with `1 << j` or chained parent jump)
+    has_2d_lift_table = bool(
+        re.search(
+            r"\b(?:f|fa|up|anc|st|p|nxt|jump|par)\s*\[[^\]]+\]\s*\[[^\]]+\]",
+            cleaned,
+        )
+    )
+    has_lift_recurrence = bool(
+        re.search(
+            r"\b([A-Za-z_]\w*)\s*\[\s*\1\s*\[[^\]]+\]\s*\[[^\]]+-\s*1\s*\]\s*\]\s*\[[^\]]+-\s*1\s*\]",
+            cleaned,
+        )
+        or (
+            has_2d_lift_table
+            and re.search(r"\b1\s*<<\s*(?:\(\s*)?[a-zA-Z_]\w*\s*(?:-\s*1)?", cleaned)
+            and re.search(r"\bfor\s*\([^;]*;\s*[A-Za-z_]\w*\s*(?:<|<=)\s*(?:1\d|2\d|30|31|LOG|lg)\b", cleaned)
+        )
+        or (
+            has_2d_lift_table
+            and re.search(r">>\s*[A-Za-z_]\w*\s*&\s*1\b|&\s*\(\s*1\s*<<\s*[A-Za-z_]\w*\s*\)", cleaned)
+        )
+    )
+    if has_lift_recurrence:
+        patterns.append("binary_lifting")
+        complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
+
+    # DSU (Disjoint Set Union)
+    has_dsu = bool(
+        re.search(r"\b(?:dsu|union_?find)\b", cleaned, re.IGNORECASE)
+        or re.search(
+            r"\b([A-Za-z_]\w*)\s*\[\s*([A-Za-z_]\w*)\s*\]\s*==\s*\2\s*\?\s*\2\s*:\s*\1\s*\[\s*\2\s*\]\s*=",
+            cleaned,
+        )
+        or (
+            re.search(r"\b(?:find|getf|get_root|find_set)\s*\(", cleaned)
+            and re.search(r"\b(?:fa|f|p|par|parent)\s*\[", cleaned)
+            and re.search(r"\bsz\s*\[[^\]]+\]\s*\+=", cleaned)
+        )
+    )
+    if has_dsu:
+        patterns.append("dsu")
+        complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
+
+    has_pq = bool(re.search(r"\b(?:std::)?priority_queue\s*<|\bmake_heap\b|\bpush_heap\b", cleaned))
+    if has_pq:
         patterns.append("heap")
+        complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
+
+    has_graph_context = bool(
+        re.search(r"\b(?:adj|graph|edges?|head|nxt|vis|visited|dist|dis|deg|indeg|tree)\b|\bg\s*\[", cleaned)
+    )
+    has_dist_array = bool(re.search(r"\b(?:dist|dis|d)\s*\[", cleaned))
+    if re.search(r"\bdijkstra\b", cleaned, re.IGNORECASE) or (
+        has_pq and has_dist_array and has_graph_context
+    ):
+        patterns.append("dijkstra")
         complexity = _higher_complexity(complexity, ComplexityLevel.N_LOG_N)
 
     if re.search(r"\bnext_permutation\b|\bprev_permutation\b", cleaned):
         patterns.append("permutation_enumeration")
         complexity = _higher_complexity(complexity, ComplexityLevel.FACTORIAL)
 
-    has_explicit_graph = bool(re.search(r"\bbfs\b|\bdfs\b", cleaned))
-    has_queue_stack = bool(re.search(r"(?<![a-zA-Z0-9_])(?:std::)?(?:queue|stack)\s*<", cleaned))
-    has_graph_context = bool(
-        re.search(r"\b(?:adj|graph|edges?|head|nxt|vis|visited|dist|dis|deg|indeg|tree)\b", cleaned)
+    has_explicit_bfs = bool(re.search(r"\bbfs\b", cleaned, re.IGNORECASE))
+    has_explicit_dfs = bool(re.search(r"\bdfs\b", cleaned, re.IGNORECASE))
+    has_queue_stl = bool(re.search(r"(?<![a-zA-Z0-9_])(?:std::)?queue\s*<", cleaned))
+    has_stack_stl = bool(re.search(r"(?<![a-zA-Z0-9_])(?:std::)?stack\s*<", cleaned))
+    has_deque_stl = bool(re.search(r"(?<![a-zA-Z0-9_])(?:std::)?deque\s*<", cleaned))
+    has_queue_stack = has_queue_stl or has_stack_stl
+
+    # Monotonic stack & monotonic queue (STL or array-simulated top/hh/tt)
+    has_mono_stack = bool(
+        (
+            has_stack_stl
+            and re.search(r"\bwhile\s*\([^)]*\.empty\s*\(\s*\)[^)]*\.top\s*\(", cleaned)
+            and re.search(r"\.pop\s*\(\s*\)", cleaned)
+        )
+        or (
+            re.search(r"\b(?:top|tp)\b", cleaned)
+            and re.search(r"\bwhile\s*\([^)]*\b(?:top|tp)\b[^)]*\)", cleaned)
+            and re.search(r"(?:--(?:top|tp)|(?:top|tp)--)", cleaned)
+            and re.search(r"\[\s*(?:\+\+(?:top|tp)|(?:top|tp)\+\+)\s*\]", cleaned)
+        )
     )
-    if has_explicit_graph or (has_queue_stack and has_graph_context and "heap" not in patterns):
+    if has_mono_stack:
+        patterns.append("monotonic_stack")
+        complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
+
+    has_mono_queue = bool(
+        (
+            has_deque_stl
+            and re.search(r"\bwhile\s*\([^)]*\.empty\s*\(\s*\)", cleaned)
+            and re.search(r"\.(?:pop_front|pop_back)\s*\(\s*\)", cleaned)
+        )
+        or (
+            re.search(r"\b(?:hh\s*<=\s*tt|head\s*<=\s*tail)\b", cleaned)
+            and re.search(r"\bwhile\s*\([^)]*(?:hh\s*<=\s*tt|head\s*<=\s*tail)[^)]*\)", cleaned)
+            and re.search(r"(?:tt--|--tt|tail--|--tail)", cleaned)
+        )
+    )
+    if has_mono_queue:
+        patterns.append("monotonic_queue")
+        complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
+
+    # Two pointers (dual-index scan excluding binary search midpoints and container pops)
+    has_two_pointers = bool(
+        not has_midpoint
+        and (
+            re.search(
+                r"\bfor\s*\(\s*(?:(?:int|long\s+long|ll|size_t)\s+)?([lrLRij])\s*=[^,;]+,\s*([lrLRij])\s*=",
+                cleaned,
+            )
+            or (
+                re.search(r"\bwhile\s*\(\s*([lrLRij]|left|right)\s*<=?\s*([lrLRij]|left|right)\b", cleaned)
+                and (
+                    (re.search(r"(?:\bl\+\+|\+\+l|\bleft\+\+|\+\+left)", cleaned) and re.search(r"(?:\br--|--r|\bright--|--right|\br\+\+|\+\+r)", cleaned))
+                    or (re.search(r"(?:\bi\+\+|\+\+i)", cleaned) and re.search(r"(?:\bj--|--j|\bj\+\+|\+\+j)", cleaned))
+                )
+            )
+            or (
+                re.search(r"\bfor\s*\([^;]*;[^;]*;\s*(?:[ri]\+\+|\+\+[ri])", cleaned)
+                and re.search(r"\bwhile\s*\([^)]*\b[lj]\s*<=?\s*[ri]\b", cleaned)
+                and re.search(r"\b(?:l\+\+|\+\+l|j\+\+|\+\+j)\b", cleaned)
+            )
+        )
+    )
+    if has_two_pointers:
+        patterns.append("two_pointers")
+        complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
+
+    if has_explicit_bfs or (
+        has_queue_stl and has_graph_context and not has_pq
+    ) or (
+        re.search(r"\b(?:hh\s*<=\s*tt|head\s*<=\s*tail)\b", cleaned)
+        and has_graph_context
+        and not has_mono_queue
+    ):
+        patterns.append("bfs")
+
+    has_tree_dfs_sig = bool(
+        re.search(r"!=\s*(?:p|fa|par|parent|prev)\b", cleaned)
+        and re.search(r"\b(?:adj|g|graph|edges?|head|nxt)\b", cleaned)
+    )
+    if has_explicit_dfs or has_tree_dfs_sig:
+        patterns.append("dfs")
+
+    if (
+        has_explicit_bfs
+        or has_explicit_dfs
+        or has_tree_dfs_sig
+        or (has_queue_stack and has_graph_context and "heap" not in patterns)
+    ):
         patterns.append("graph_traversal")
         complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
-    elif has_queue_stack:
+    elif has_queue_stack or has_mono_queue:
         patterns.append("stack_queue")
         complexity = _higher_complexity(complexity, ComplexityLevel.LINEAR)
 
@@ -620,6 +1733,8 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         or re.search(r"\bbitmask\b", cleaned)
     ):
         patterns.append("bitmask")
+        if re.search(r"\b(?:dp|f|memo)\s*\[", cleaned) or has_bitmask_dp_array:
+            patterns.append("bitmask_dp")
         complexity = _higher_complexity(complexity, ComplexityLevel.EXPONENTIAL)
 
     if _has_exponential_recursion(cleaned):
@@ -651,37 +1766,62 @@ def _has_2d_dp_table(cleaned: str) -> bool:
 
 
 def estimate_static_complexity(code: str) -> tuple[str, list[str]]:
-    """综合循环结构与算法模式识别静态复杂度，识别多测包装、Dijkstra/反悔贪心/单调队列等均摊模式。"""
+    """综合跨函数调用图、循环结构与竞赛算法模式识别静态复杂度。"""
     cleaned = _strip_cpp_comments_and_strings(code)
-    algo_depth, saw_loop, has_nested_for = _analyze_loop_nesting(
-        cleaned, ignore_multitest=True, ignore_small_const=True
-    )
+    summary = analyze_cpp_interprocedural(code, ignore_multitest=True, ignore_small_const=True)
+    algo_depth = summary.max_depth
+    saw_loop = summary.saw_loop
+    has_nested_for = summary.has_nested_for
+
     loop_complexity = _depth_to_complexity(algo_depth, saw_loop)
+    if summary.has_only_log_loop and algo_depth == 0:
+        loop_complexity = ComplexityLevel.LOG_N
+    elif summary.has_log_with_linear and algo_depth <= 1:
+        loop_complexity = ComplexityLevel.N_LOG_N
+
     pattern_complexity, patterns = detect_algorithm_patterns(code)
 
-    # 1D linear DP (`dp[i] = ...`) inside a single loop should NOT be forcibly promoted to O(n^2)
-    effective_pattern_comp = pattern_complexity
-    if (
-        effective_pattern_comp == ComplexityLevel.QUADRATIC
-        and "dynamic_programming" in patterns
-        and algo_depth <= 1
-        and not _has_2d_dp_table(cleaned)
-    ):
-        non_dp_patterns = set(patterns) - {"dynamic_programming"}
-        if non_dp_patterns & {"binary_search", "sorting", "divide_and_conquer", "tree_data_structure", "heap"}:
-            effective_pattern_comp = ComplexityLevel.N_LOG_N
+    # Re-evaluate contextual pattern complexity without blindly bumping single top-level lower_bound or 1D DP
+    effective_pattern_comp: str | None = None
+    for pat in patterns:
+        if pat == "binary_search":
+            cand = ComplexityLevel.N_LOG_N if summary.has_bsearch_in_loop else ComplexityLevel.LOG_N
+        elif pat in {"sorting", "divide_and_conquer", "tree_data_structure", "fenwick_tree", "segment_tree", "binary_lifting", "heap", "dijkstra"}:
+            # Pure Fenwick/SegTree definitions without outer linear loop still advertise O(n log n) when used with loops,
+            # or O(log n) only if literally no loops exist except log loops; keep O(n log n) when algo_depth >= 1 or no log-only loop
+            cand = ComplexityLevel.N_LOG_N
+        elif pat == "permutation_enumeration":
+            cand = ComplexityLevel.FACTORIAL
+        elif pat in {"bitmask", "bitmask_dp", "backtracking"}:
+            cand = ComplexityLevel.EXPONENTIAL
+        elif pat == "dynamic_programming":
+            cand = (
+                ComplexityLevel.QUADRATIC
+                if (algo_depth >= 2 or _has_2d_dp_table(cleaned))
+                else ComplexityLevel.LINEAR
+            )
+        elif pat in {"graph_traversal", "bfs", "dfs", "stack_queue", "monotonic_stack", "monotonic_queue", "two_pointers", "dsu"}:
+            cand = ComplexityLevel.LINEAR
         else:
-            effective_pattern_comp = ComplexityLevel.LINEAR
+            cand = None
+        if cand is not None:
+            effective_pattern_comp = _higher_complexity(effective_pattern_comp, cand)
+
+    if effective_pattern_comp is None and pattern_complexity is not None and "binary_search" not in patterns:
+        effective_pattern_comp = pattern_complexity
 
     effective_loop = loop_complexity
     if loop_complexity == ComplexityLevel.QUADRATIC and not has_nested_for:
-        has_container_pop = bool(
-            re.search(r"\.(?:pop|pop_front|pop_back)\s*\(", cleaned)
-        )
+        has_container_pop = summary.has_container_pop
         if "heap" in patterns and (has_container_pop or re.search(r"\bpriority_queue\b", cleaned)):
             effective_loop = ComplexityLevel.N_LOG_N
         elif (
-            has_container_pop or "graph_traversal" in patterns or "stack_queue" in patterns
+            has_container_pop
+            or "graph_traversal" in patterns
+            or "stack_queue" in patterns
+            or "monotonic_stack" in patterns
+            or "monotonic_queue" in patterns
+            or "two_pointers" in patterns
         ) and not _has_2d_dp_table(cleaned):
             effective_loop = ComplexityLevel.LINEAR
 
@@ -1173,6 +2313,7 @@ async def run_empirical_verification(
             if sample_status in ("timeout", "mle"):
                 break
         else:
+            monitored_metric = "cpu_time" if metric_mode == "cpu_time_ms" else None
             if idx == 0:
                 # 首次冷启动预热：消除二进制冷加载/杀软扫描对最小规模采样的歪斜。
                 await DynamicExecutionMonitor.run_monitored_process(
@@ -1182,6 +2323,7 @@ async def run_empirical_verification(
                     memory_limit_mb=memory_limit_mb,
                     cwd=problem_dir,
                     baseline_overhead_ms=baseline_overhead,
+                    metric=monitored_metric,
                 )
             res = await DynamicExecutionMonitor.run_monitored_process(
                 [sol_path],
@@ -1190,13 +2332,18 @@ async def run_empirical_verification(
                 memory_limit_mb=memory_limit_mb,
                 cwd=problem_dir,
                 baseline_overhead_ms=baseline_overhead,
+                metric=monitored_metric,
             )
             chosen_cpu = res.get("cpu_time_ms")
+            chosen_wall = res.get("wall_time_ms")
             chosen_mem = res.get("memory_mb")
             chosen_status = res.get("status")
+            chosen_inst = res.get("instruction_count")
+            chosen_backend = res.get("metric_backend")
             if (
                 chosen_status == "ok"
                 and chosen_cpu is not None
+                and chosen_inst is None
                 and float(res.get("wall_time_ms") or 0.0) < 50.0
             ):
                 # 对超短耗时的尺度点额外复测 2 次取中位耗时与峰值内存，平抑抖动。
@@ -1210,20 +2357,25 @@ async def run_empirical_verification(
                         memory_limit_mb=memory_limit_mb,
                         cwd=problem_dir,
                         baseline_overhead_ms=baseline_overhead,
+                        metric=monitored_metric,
                     )
                     if rep.get("status") == "ok" and rep.get("cpu_time_ms") is not None:
                         cpu_runs.append(float(rep["cpu_time_ms"]))
                         mem_runs.append(float(rep.get("memory_mb") or 0.0))
                 chosen_cpu = round(statistics.median(cpu_runs), 2)
                 chosen_mem = round(max(mem_runs), 2)
-            samples.append(
-                {
-                    "n": pt,
-                    "cpu_time_ms": chosen_cpu,
-                    "memory_mb": chosen_mem,
-                    "status": chosen_status,
-                }
-            )
+            sample_item: dict[str, Any] = {
+                "n": pt,
+                "cpu_time_ms": chosen_cpu,
+                "wall_time_ms": chosen_wall,
+                "memory_mb": chosen_mem,
+                "status": chosen_status,
+            }
+            if isinstance(chosen_inst, int) and not isinstance(chosen_inst, bool):
+                sample_item["instruction_count"] = chosen_inst
+            if isinstance(chosen_backend, str):
+                sample_item["metric_backend"] = chosen_backend
+            samples.append(sample_item)
             if chosen_status in ("timeout", "mle"):
                 break
 

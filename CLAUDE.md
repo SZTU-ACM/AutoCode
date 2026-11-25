@@ -53,9 +53,9 @@ uv run autocode-verify examples/communication-sample
 uv run autocode-verify <problem_dir> --status --strict-gates
 uv run autocode-verify <problem_dir> --reconcile
 
-# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计，支持布局适配、变异强度检测与 --format markdown 报告）
+# 运行完整题包审计（或对任意外部题包运行只读 --standalone 审计，支持布局适配、--strict 严格门控、变异强度检测与 --format markdown 报告）
 uv run autocode-audit examples/exact-sample --mode full --report audit_report.json
-uv run autocode-audit /path/to/external-problem --standalone --layout auto --mutation-check --format markdown
+uv run autocode-audit /path/to/external-problem --standalone --layout auto --mutation-check --strict --format markdown
 
 # 构建 wheel 并运行打包/CLI 冒烟测试（隔离虚拟环境 wheel 安装烟测由 CI test-packaging 守护；不发布 PyPI）
 uv build
@@ -228,11 +228,11 @@ uv run autocode-verify <problem_dir>
 
 `autocode-verify` 会输出 `problem_type`、`oracle_mode`、`protocol_mode`、`subtask_count`、`spj_warnings` 与 `protocol_warnings`，便于 CI 解析。
 
-完整审计 / 外部题包独立审计（`--format json|markdown|summary`，默认 `json`；Problem CI 示例模板位于 `examples/ci/autocode-problem-audit.yml`）：
+完整审计 / 外部题包独立审计（`--format json|markdown|summary`，默认 `json`；支持 `--strict` 将独立验题完整性告警升级为阻断项；Problem CI 示例模板位于 `examples/ci/autocode-problem-audit.yml`）：
 
 ```bash
 uv run autocode-audit <problem_dir> --mode full --report audit_report.json
-uv run autocode-audit <external_problem_dir> --standalone --format markdown
+uv run autocode-audit <external_problem_dir> --standalone --strict --format markdown
 ```
 
 ## 关键约束

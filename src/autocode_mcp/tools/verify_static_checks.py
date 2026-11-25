@@ -3,14 +3,365 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 from ..utils.answer_ext import normalize_answer_ext
-from ..workflow import AutoCodeManifest
+from ..utils.communication_runner import safe_resolve_under_root
+from ..workflow import AutoCodeManifest, load_manifest
 from .verify_fingerprint import _LIMIT_GROUPS, _LIMIT_STRATEGY_TYPES, _VerifyHelpersMixin
+
+_MIN_STRUCTURAL_DIVERGENCE = 0.15
+_MAX_PARSE_INT_DIGITS = 300
+_MAX_SCALE_INT_DIGITS = 18
+_NUMERIC_TOKEN_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_INT_TOKEN_RE = re.compile(r"^[+-]?\d+$")
+
+_PROFILE_DIMENSIONS: tuple[str, ...] = (
+    "byte_size",
+    "line_count",
+    "token_count",
+    "unique_token_ratio",
+    "distinct_token_count",
+    "numeric_ratio",
+    "max_abs_int",
+    "avg_tokens_per_line",
+    "max_line_tokens",
+    "adjacent_equal_ratio",
+    "monotonic_step_ratio",
+)
+_BOUNDED_RATIO_DIMENSIONS = frozenset(
+    {"unique_token_ratio", "numeric_ratio", "adjacent_equal_ratio"}
+)
+_SIGNED_RATIO_DIMENSIONS = frozenset({"monotonic_step_ratio"})
+_SCALE_BUCKET_ORDER: dict[str, int] = {"tiny": 0, "small": 1, "medium": 2, "large": 3}
+_SCALE_BUCKET_NAMES: tuple[str, ...] = ("tiny", "small", "medium", "large")
+
+
+def _parse_int_token(token: str, *, max_digits: int = _MAX_SCALE_INT_DIGITS) -> int | None:
+    """Parse an integer token strictly within a safe digit-length budget."""
+    if not _INT_TOKEN_RE.match(token):
+        return None
+    digits = token[1:] if token[0] in "+-" else token
+    if len(digits) > max_digits:
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _parse_numeric_token(token: str) -> tuple[float | None, float | None]:
+    """Return ``(numeric_value, abs_int_value)`` for a token without overflow or DoS."""
+    if _INT_TOKEN_RE.match(token):
+        digits = token[1:] if token[0] in "+-" else token
+        if len(digits) > _MAX_PARSE_INT_DIGITS:
+            # Approximate huge bignums cleanly without hitting Python's int-to-str digit cap.
+            sign = -1.0 if token[0] == "-" else 1.0
+            try:
+                approx = float(f"{digits[:15]}e{len(digits) - 15}")
+                if math.isfinite(approx):
+                    return sign * approx, approx
+            except ValueError:
+                pass
+            return None, 1e300
+        try:
+            int_val = int(token)
+            fval = float(int_val)
+            return (fval if math.isfinite(fval) else None), float(abs(int_val))
+        except (ValueError, OverflowError):
+            return None, None
+    if _NUMERIC_TOKEN_RE.match(token):
+        try:
+            fval = float(token)
+            if math.isfinite(fval):
+                return fval, None
+        except (ValueError, OverflowError):
+            return None, None
+    return None, None
+
+
+def _parse_nonneg_finite_float(val: object) -> float | None:
+    """Return ``float(val)`` when ``val`` is a finite non-negative non-bool number."""
+    if not isinstance(val, bool) and isinstance(val, int | float):
+        fval = float(val)
+        if math.isfinite(fval) and fval >= 0.0:
+            return fval
+    return None
+
+
+def _parse_int_bound_pair(entry: object) -> tuple[int | None, int | None]:
+    """Extract ``(min, max)`` integer bounds from a dict constraint entry."""
+    if not isinstance(entry, dict):
+        return None, None
+    lo = int(entry["min"]) if isinstance(entry.get("min"), int) and not isinstance(entry.get("min"), bool) else None
+    hi = int(entry["max"]) if isinstance(entry.get("max"), int) and not isinstance(entry.get("max"), bool) else None
+    return lo, hi
+
+
+def _extract_manifest_primary_bounds(
+    manifest: AutoCodeManifest | None,
+) -> tuple[int | None, int | None]:
+    """Extract primary ``(expected_min, expected_max)`` bounds from ``manifest.constraints``."""
+    if manifest is None or not manifest.constraints:
+        return None, None
+    expected_min: int | None = None
+    expected_max: int | None = None
+    c = manifest.constraints
+    for primary in ("n", "N"):
+        lo, hi = _parse_int_bound_pair(c.get(primary))
+        if lo is not None:
+            expected_min = lo
+        if hi is not None:
+            expected_max = hi
+    if expected_min is None:
+        for key in ("n_min", "N_min", "min_n"):
+            val = c.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                expected_min = int(val)
+                break
+    if expected_max is None:
+        for key in ("n_max", "N_max", "max_n", "sum_n_max"):
+            val = c.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                expected_max = int(val)
+                break
+    if expected_min is None and expected_max is None:
+        # Fallback for single non-t constraint (e.g. {"k": {"min": 1, "max": 8}})
+        non_t_entries = [
+            (k, v)
+            for k, v in c.items()
+            if isinstance(k, str) and k.strip().lower() not in {"t", "t_max", "t_min"}
+        ]
+        if len(non_t_entries) == 1:
+            expected_min, expected_max = _parse_int_bound_pair(non_t_entries[0][1])
+    return expected_min, expected_max
+
+
+def _scale_bucket_for_int(value: int) -> str:
+    if value <= 1:
+        return "tiny"
+    if value <= 10:
+        return "small"
+    if value <= 1000:
+        return "medium"
+    return "large"
+
+
+def _extract_effective_scale(data: str, manifest: AutoCodeManifest | None = None) -> int | None:
+    """Extract effective problem scale token, respecting multi-test layout and manifest hints."""
+    tokens = data.split()
+    if not tokens:
+        return None
+
+    if manifest is not None and manifest.scale_token_index is not None:
+        idx = manifest.scale_token_index
+        if 0 <= idx < len(tokens):
+            explicit = _parse_int_token(tokens[idx])
+            if explicit is not None:
+                return explicit
+
+    lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    line1_tokens = lines[0].split()
+    first_int = _parse_int_token(line1_tokens[0])
+
+    # Handle protocol inputs whose leading token is a small declared ``mode`` flag (e.g. ``mode X``)
+    # when no explicit ``n``/``N`` constraint or ``scale_token_index`` is configured.
+    if (
+        manifest is not None
+        and not manifest.multi_test
+        and first_int is not None
+        and len(line1_tokens) >= 2
+        and isinstance(manifest.constraints.get("mode"), dict)
+        and not any(
+            k in manifest.constraints
+            for k in ("n", "N", "n_min", "n_max", "N_min", "N_max", "min_n", "max_n", "sum_n_max")
+        )
+    ):
+        mode_cfg = manifest.constraints["mode"]
+        mode_min = mode_cfg.get("min")
+        mode_max = mode_cfg.get("max")
+        if (
+            isinstance(mode_max, int)
+            and not isinstance(mode_max, bool)
+            and mode_max <= 10
+            and (
+                not isinstance(mode_min, int)
+                or isinstance(mode_min, bool)
+                or mode_min <= first_int <= mode_max
+            )
+            and first_int <= mode_max
+        ):
+            second_same_line = _parse_int_token(line1_tokens[1])
+            if second_same_line is not None:
+                return second_same_line
+
+    if len(line1_tokens) == 1 and first_int is not None and first_int > 0 and len(lines) >= 2:
+        line2_tokens = lines[1].split()
+        second_int = _parse_int_token(line2_tokens[0]) if line2_tokens else None
+        if second_int is not None:
+            if manifest is not None and manifest.multi_test:
+                return second_int
+            _, n_max = _extract_manifest_primary_bounds(manifest)
+            within_n_max = (n_max is None) or (second_int <= n_max)
+            not_single_line_array = not (
+                len(lines) == 2 and first_int > 1 and len(line2_tokens) == first_int
+            )
+            if within_n_max and second_int > 0 and first_int <= 100_000 and len(line2_tokens) <= 4 and not_single_line_array:
+                if len(lines) >= 3 and (
+                    first_int == 1
+                    or (first_int <= 20 and second_int > first_int)
+                    or len(lines) >= 1 + 2 * first_int
+                ):
+                    return second_int
+                if (
+                    manifest is None
+                    and first_int == 1
+                    and len(line2_tokens) <= 2
+                    and second_int >= 100
+                ):
+                    return second_int
+
+    return first_int
+
+
+def _extract_case_structural_profile(
+    raw_bytes: bytes, std_time_ms: float | None = None
+) -> dict[str, float]:
+    """Compute the 11-dimensional structural profile (plus optional std timing) for an input."""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    raw_lines = text.splitlines()
+    line_count = len(raw_lines)
+    tokens = text.split()
+    token_count = len(tokens)
+    distinct_token_count = len(set(tokens))
+    unique_token_ratio = (distinct_token_count / token_count) if token_count else 0.0
+    avg_tokens_per_line = (token_count / line_count) if line_count else 0.0
+    max_line_tokens = max((len(ln.split()) for ln in raw_lines), default=0)
+
+    numeric_count = 0
+    max_abs_int = 0.0
+    adj_equal_count = 0
+    inc_steps = 0
+    dec_steps = 0
+    num_pairs = 0
+    prev_tok: str | None = None
+    prev_num: float | None = None
+
+    for tok in tokens:
+        if prev_tok is not None and tok == prev_tok:
+            adj_equal_count += 1
+        num_val, abs_int = _parse_numeric_token(tok)
+        if num_val is not None:
+            numeric_count += 1
+        if abs_int is not None and abs_int > max_abs_int:
+            max_abs_int = abs_int
+        if prev_num is not None and num_val is not None:
+            num_pairs += 1
+            if num_val > prev_num:
+                inc_steps += 1
+            elif num_val < prev_num:
+                dec_steps += 1
+        prev_tok = tok
+        prev_num = num_val
+
+    numeric_ratio = (numeric_count / token_count) if token_count else 0.0
+    adjacent_equal_ratio = (adj_equal_count / (token_count - 1)) if token_count >= 2 else 0.0
+    monotonic_step_ratio = ((inc_steps - dec_steps) / num_pairs) if num_pairs > 0 else 0.0
+
+    profile: dict[str, float] = {
+        "byte_size": float(len(raw_bytes)),
+        "line_count": float(line_count),
+        "token_count": float(token_count),
+        "unique_token_ratio": float(unique_token_ratio),
+        "distinct_token_count": float(distinct_token_count),
+        "numeric_ratio": float(numeric_ratio),
+        "max_abs_int": float(max_abs_int),
+        "avg_tokens_per_line": float(avg_tokens_per_line),
+        "max_line_tokens": float(max_line_tokens),
+        "adjacent_equal_ratio": float(adjacent_equal_ratio),
+        "monotonic_step_ratio": float(monotonic_step_ratio),
+    }
+    if std_time_ms is not None:
+        profile["std_time_ms"] = float(std_time_ms)
+    return profile
+
+
+def _aggregate_profiles(profiles: list[dict[str, float]]) -> dict[str, float]:
+    """Compute per-dimension mean profile across a list of case profiles."""
+    if not profiles:
+        return {}
+    agg: dict[str, float] = {}
+    for dim in _PROFILE_DIMENSIONS:
+        agg[dim] = round(sum(p[dim] for p in profiles) / len(profiles), 6)
+    timing_vals = [p["std_time_ms"] for p in profiles if "std_time_ms" in p]
+    if timing_vals:
+        agg["std_time_ms"] = round(sum(timing_vals) / len(timing_vals), 6)
+    return agg
+
+
+def _compute_structural_divergence(
+    p3: dict[str, float], p4: dict[str, float]
+) -> tuple[float, dict[str, float]]:
+    """Compute normalized multi-dimensional structural divergence in ``[0.0, 1.0]``."""
+    if not p3 or not p4:
+        return 0.0, {}
+    dims = list(_PROFILE_DIMENSIONS)
+    if "std_time_ms" in p3 and "std_time_ms" in p4:
+        dims.append("std_time_ms")
+
+    dim_diffs: dict[str, float] = {}
+    for dim in dims:
+        v3 = float(p3.get(dim, 0.0))
+        v4 = float(p4.get(dim, 0.0))
+        if dim in _BOUNDED_RATIO_DIMENSIONS:
+            diff = min(1.0, abs(v3 - v4))
+        elif dim in _SIGNED_RATIO_DIMENSIONS:
+            diff = min(1.0, abs(v3 - v4) / 2.0)
+        elif dim == "std_time_ms":
+            denom = max(abs(v3), abs(v4), 5.0)
+            diff = min(1.0, abs(v3 - v4) / denom)
+        else:
+            denom = max(abs(v3), abs(v4))
+            diff = min(1.0, abs(v3 - v4) / denom) if denom > 0.0 else 0.0
+        dim_diffs[dim] = round(diff, 4)
+
+    sorted_diffs = sorted(dim_diffs.values(), reverse=True)
+    if not sorted_diffs:
+        return 0.0, dim_diffs
+    max_diff = sorted_diffs[0]
+    top_k = sorted_diffs[:3]
+    top_mean = sum(top_k) / len(top_k)
+    divergence = round(0.7 * max_diff + 0.3 * top_mean, 4)
+    return divergence, dim_diffs
+
+
+def _extract_manifest_std_timings(manifest: dict[str, Any]) -> dict[str, float]:
+    """Collect optional per-case std timings (in ms) from ``tests_manifest``."""
+    timings: dict[str, float] = {}
+    raw_map = manifest.get("std_timings")
+    if isinstance(raw_map, dict):
+        for fname, ms in raw_map.items():
+            parsed = _parse_nonneg_finite_float(ms) if isinstance(fname, str) else None
+            if parsed is not None:
+                timings[str(fname)] = parsed
+    raw_list = manifest.get("per_test_timings")
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            fname = item.get("file") or item.get("in_file")
+            ms = item.get("time_ms") if "time_ms" in item else item.get("std_time_ms")
+            parsed = _parse_nonneg_finite_float(ms) if isinstance(fname, str) else None
+            if parsed is not None:
+                timings[str(fname)] = parsed
+    return timings
 
 
 class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
@@ -214,8 +565,26 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
             "limit_strategy_types": sorted(_LIMIT_STRATEGY_TYPES),
         }
 
+    @staticmethod
+    def _extract_effective_scale(data: str, manifest: AutoCodeManifest | None = None) -> int | None:
+        return _extract_effective_scale(data, manifest)
+
+    @staticmethod
+    def _load_optional_problem_manifest(tests_dir: str) -> AutoCodeManifest | None:
+        """Load ``AutoCodeManifest`` from ``Path(tests_dir).parent`` (or ``tests_dir``), returning ``None`` if absent."""
+        tests_path = Path(tests_dir)
+        for root in (tests_path.parent, tests_path):
+            resolved = safe_resolve_under_root(str(root), ".autocode/manifest.json")
+            if resolved is None or not Path(resolved).is_file():
+                continue
+            try:
+                return load_manifest(str(root))
+            except (OSError, ValueError):
+                return None
+        return None
+
     def _check_limit_semantics(self, tests_dir: str, manifest: dict | None = None) -> dict:
-        """检查 type=3/4 是否存在以及语义门禁。
+        """检查 type=3/4 是否存在以及多维结构差异语义门禁。
 
         manifest 可来自一次性加载并透传，缺省时回退为读取 tests manifest。
         """
@@ -224,23 +593,100 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         if not manifest:
             return {"passed": False, "error": "tests manifest missing or unreadable"}
         tests = manifest.get("tests", [])
+        if not isinstance(tests, list):
+            return {"passed": False, "error": "invalid manifest format: tests must be a list"}
         type3 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "3"]
         type4 = [t for t in tests if isinstance(t, dict) and t.get("type_param") == "4"]
         if not type4:
             return {"passed": False, "error": "type=4 cases missing; update generator first"}
         if not type3:
             return {"passed": False, "error": "type=3 cases missing; update generator first"}
-        sig3 = {str(t.get("signature", "")) for t in type3}
-        sig4 = {str(t.get("signature", "")) for t in type4}
-        overlap_ratio = len(sig3 & sig4) / max(1, min(len(sig3), len(sig4)))
-        passed = overlap_ratio < 0.8
-        return {
+
+        sig3 = {str(t["signature"]) for t in type3 if t.get("signature")}
+        sig4 = {str(t["signature"]) for t in type4 if t.get("signature")}
+        overlap_ratio = (
+            len(sig3 & sig4) / max(1, min(len(sig3), len(sig4))) if (sig3 and sig4) else 0.0
+        )
+
+        manifest_timings = _extract_manifest_std_timings(manifest)
+        unsafe_files: list[str] = []
+        missing_files: list[str] = []
+
+        def _profile_group(entries: list[dict[str, Any]]) -> list[dict[str, float]]:
+            profiles: list[dict[str, float]] = []
+            for entry in entries:
+                in_file = entry.get("in_file")
+                if not isinstance(in_file, str) or not in_file.strip():
+                    missing_files.append(str(in_file or "<missing>"))
+                    continue
+                resolved = safe_resolve_under_root(tests_dir, in_file)
+                if resolved is None:
+                    unsafe_files.append(in_file)
+                    continue
+                path = Path(resolved)
+                if not path.is_file():
+                    missing_files.append(in_file)
+                    continue
+                try:
+                    raw_bytes = path.read_bytes()
+                except OSError:
+                    missing_files.append(in_file)
+                    continue
+                std_ms = _parse_nonneg_finite_float(entry.get("std_time_ms", entry.get("time_ms")))
+                if std_ms is None:
+                    if in_file in manifest_timings:
+                        std_ms = manifest_timings[in_file]
+                    elif path.name in manifest_timings:
+                        std_ms = manifest_timings[path.name]
+                profiles.append(_extract_case_structural_profile(raw_bytes, std_time_ms=std_ms))
+            return profiles
+
+        profiles3 = _profile_group(type3)
+        profiles4 = _profile_group(type4)
+        type3_profile = _aggregate_profiles(profiles3)
+        type4_profile = _aggregate_profiles(profiles4)
+        structural_divergence, dimension_diffs = _compute_structural_divergence(
+            type3_profile, type4_profile
+        )
+
+        unreadable = bool(unsafe_files) or not profiles3 or not profiles4
+        passed = (
+            (not unreadable)
+            and (overlap_ratio < 0.8)
+            and (structural_divergence >= _MIN_STRUCTURAL_DIVERGENCE)
+        )
+
+        if passed:
+            hint = ""
+        elif unsafe_files:
+            hint = f"存在越界或不安全的测试路径: {', '.join(unsafe_files[:5])}"
+        elif not profiles3 or not profiles4:
+            hint = "type=3 或 type=4 输入文件缺失或不可读，无法验证结构差异"
+        elif overlap_ratio >= 0.8:
+            hint = "需要确保 type=4 不是重复输入或仅放大参数，而是有独立卡法"
+        else:
+            hint = (
+                f"需要确保 type=4 不是仅放大参数或同分布随机克隆（当前结构差异度="
+                f"{structural_divergence:.4f} < {_MIN_STRUCTURAL_DIVERGENCE:.2f}），而是有独立卡法"
+            )
+
+        out: dict[str, Any] = {
             "passed": passed,
             "type3_count": len(type3),
             "type4_count": len(type4),
             "overlap_ratio": overlap_ratio,
-            "hint": "需要确保 type=4 不是仅放大参数，而是有独立卡法" if not passed else "",
+            "structural_divergence": structural_divergence,
+            "divergence_threshold": _MIN_STRUCTURAL_DIVERGENCE,
+            "dimension_diffs": dimension_diffs,
+            "type3_profile": type3_profile,
+            "type4_profile": type4_profile,
+            "hint": hint,
         }
+        if unsafe_files:
+            out["unsafe_files"] = unsafe_files
+        if missing_files:
+            out["missing_files"] = missing_files
+        return out
 
     def _check_duplicate_inputs(self, tests_dir: str, *, max_near_ratio: float = 0.2) -> dict:
         tests_path = Path(tests_dir)
@@ -284,7 +730,11 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
             "threshold": max_near_ratio,
         }
 
-    def _check_scale_distribution(self, tests_dir: str) -> dict:
+    def _check_scale_distribution(
+        self, tests_dir: str, manifest: AutoCodeManifest | None = None
+    ) -> dict:
+        if manifest is None:
+            manifest = self._load_optional_problem_manifest(tests_dir)
         tests_path = Path(tests_dir)
         in_files = sorted(
             (p for p in tests_path.iterdir() if p.is_file() and p.suffix == ".in"),
@@ -293,26 +743,40 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         buckets = {"empty": 0, "tiny": 0, "small": 0, "medium": 0, "large": 0}
         byte_buckets = {"0-100B": 0, "101B-1KB": 0, "1KB-32KB": 0, "32KB+": 0}
         parsed_first_ints: list[int] = []
+        parsed_effective_scales: list[int] = []
         for path in in_files:
-            data = path.read_text(encoding="utf-8", errors="replace")
+            resolved = safe_resolve_under_root(tests_dir, path.name)
+            if resolved is None:
+                continue
+            try:
+                raw_bytes = Path(resolved).read_bytes()
+            except OSError:
+                continue
+            size = len(raw_bytes)
+            data = raw_bytes.decode("utf-8", errors="replace")
             tokens = data.split()
             if not tokens:
                 buckets["empty"] += 1
             else:
-                try:
-                    first = int(tokens[0])
-                    parsed_first_ints.append(first)
-                    if first <= 1:
-                        buckets["tiny"] += 1
-                    elif first <= 10:
-                        buckets["small"] += 1
-                    elif first <= 1000:
-                        buckets["medium"] += 1
-                    else:
-                        buckets["large"] += 1
-                except ValueError:
-                    buckets["medium"] += 1
-            size = path.stat().st_size
+                first_int = _parse_int_token(tokens[0])
+                if first_int is not None:
+                    parsed_first_ints.append(first_int)
+                effective_scale = _extract_effective_scale(data, manifest)
+                if effective_scale is not None:
+                    parsed_effective_scales.append(effective_scale)
+                    bucket = _scale_bucket_for_int(effective_scale)
+                else:
+                    bucket = "medium"
+                # Byte/token scale hints ensure large multi-test inputs (e.g. T=1, n=200000) never land in tiny.
+                if size > 32 * 1024 or len(tokens) > 1000:
+                    min_bucket = "large"
+                elif size > 1024 or len(tokens) > 100:
+                    min_bucket = "medium"
+                else:
+                    min_bucket = "tiny"
+                if _SCALE_BUCKET_ORDER[min_bucket] > _SCALE_BUCKET_ORDER[bucket]:
+                    bucket = min_bucket
+                buckets[bucket] += 1
             if size <= 100:
                 byte_buckets["0-100B"] += 1
             elif size <= 1024:
@@ -321,15 +785,47 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
                 byte_buckets["1KB-32KB"] += 1
             else:
                 byte_buckets["32KB+"] += 1
-        non_empty_scale_buckets = sum(1 for key, value in buckets.items() if key != "empty" and value > 0)
+
+        expected_min, expected_max = _extract_manifest_primary_bounds(manifest)
+        narrow_constraint_exempt = False
+        if expected_max is not None:
+            if expected_max <= 10:
+                narrow_constraint_exempt = True
+            elif expected_min is not None and _scale_bucket_for_int(expected_min) == _scale_bucket_for_int(expected_max):
+                narrow_constraint_exempt = True
+
+        non_empty_scale_buckets = sum(
+            1 for key, value in buckets.items() if key != "empty" and value > 0
+        )
+        passed = bool(in_files) and buckets["empty"] == 0
+        if passed and len(in_files) >= 3 and not narrow_constraint_exempt:
+            passed = non_empty_scale_buckets >= 2
+
+        hint = ""
+        if not passed:
+            if not in_files:
+                hint = "未找到测试输入文件"
+            elif buckets["empty"] > 0:
+                hint = "存在空测试输入文件"
+            else:
+                hint = (
+                    "测试规模退化为单一尺度桶（>= 3 组数据时需覆盖至少 2 个不同尺度桶）"
+                )
+
+        effective_buckets = {k: v for k, v in buckets.items() if v > 0}
         return {
-            "passed": bool(in_files) and buckets["empty"] == 0,
+            "passed": passed,
             "total": len(in_files),
-            "first_integer_buckets": {k: v for k, v in buckets.items() if v > 0},
+            "first_integer_buckets": effective_buckets,
+            "effective_scale_buckets": effective_buckets,
             "byte_size_buckets": {k: v for k, v in byte_buckets.items() if v > 0},
             "min_first_integer": min(parsed_first_ints) if parsed_first_ints else None,
             "max_first_integer": max(parsed_first_ints) if parsed_first_ints else None,
+            "min_effective_scale": min(parsed_effective_scales) if parsed_effective_scales else None,
+            "max_effective_scale": max(parsed_effective_scales) if parsed_effective_scales else None,
             "non_empty_scale_bucket_count": non_empty_scale_buckets,
+            "narrow_constraint_exempt": narrow_constraint_exempt,
+            "hint": hint,
         }
 
     def _check_purpose_coverage(
@@ -384,29 +880,7 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
                 "skipped": True,
                 "message": "no numeric constraints declared in manifest",
             }
-        expected_min: int | None = None
-        expected_max: int | None = None
-        c = manifest.constraints
-        # Prefer explicit n / N / primary variable bounds
-        for primary in ("n", "N"):
-            entry = c.get(primary)
-            if isinstance(entry, dict):
-                if isinstance(entry.get("min"), int) and not isinstance(entry.get("min"), bool):
-                    expected_min = int(entry["min"])
-                if isinstance(entry.get("max"), int) and not isinstance(entry.get("max"), bool):
-                    expected_max = int(entry["max"])
-        if expected_min is None:
-            for key in ("n_min", "N_min", "min_n"):
-                val = c.get(key)
-                if isinstance(val, int) and not isinstance(val, bool):
-                    expected_min = int(val)
-                    break
-        if expected_max is None:
-            for key in ("n_max", "N_max", "max_n", "sum_n_max"):
-                val = c.get(key)
-                if isinstance(val, int) and not isinstance(val, bool):
-                    expected_max = int(val)
-                    break
+        expected_min, expected_max = _extract_manifest_primary_bounds(manifest)
 
         if expected_min is None and expected_max is None:
             return {
@@ -421,18 +895,16 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         )
         observed_vals: list[int] = []
         for p in in_files:
+            resolved = safe_resolve_under_root(tests_dir, p.name)
+            if resolved is None:
+                continue
             try:
-                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                data = Path(resolved).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            first_nonempty = next((ln.strip() for ln in lines if ln.strip()), "")
-            if not first_nonempty:
-                continue
-            tok = first_nonempty.split()[0]
-            try:
-                observed_vals.append(int(tok))
-            except ValueError:
-                continue
+            scale = _extract_effective_scale(data, manifest)
+            if scale is not None:
+                observed_vals.append(scale)
         if not observed_vals:
             return {
                 "passed": False,

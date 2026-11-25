@@ -185,6 +185,7 @@ class StandardRunner:
                 memory_limit_mb=memory_limit_mb,
                 cwd=abs_cwd,
                 baseline_overhead_ms=baseline_overhead_ms,
+                metric="cpu_time",
             )
 
         status = str(res.get("status", "runtime_error"))

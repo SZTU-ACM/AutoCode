@@ -8,10 +8,11 @@ from typing import Any
 from ..runtime_store import WORKFLOW, get_section, runtime_file
 from ..utils.communication_runner import safe_resolve_under_root
 from ..utils.platform import get_exe_extension
-from .gates import preflight
-from .guard import check_gates
+from .gates import _sync_dynamic_probe_hashes, preflight
+from .guard import check_gates, effective_require_wrong_solution_kill
 from .hashes import (
     _canonical_comm_rel,
+    _file_sha256,
     _invalidate_verify_only,
     current_platform,
 )
@@ -137,6 +138,7 @@ def inspect_workspace_state(problem_dir: str) -> dict[str, Any]:
                 {"gate": v.gate, "reason": v.reason, "next_action": v.next_action}
                 for v in p_issues
             ],
+            "effective_require_wrong_solution_kill": effective_require_wrong_solution_kill(manifest),
             "pack_ready": (
                 (not q_issues)
                 and (not p_issues)
@@ -144,6 +146,65 @@ def inspect_workspace_state(problem_dir: str) -> dict[str, Any]:
                 and (not stale_reasons)
             ),
         }
+
+    gen_info = binary_status.get("generator", {})
+    sol_info = binary_status.get("sol", {})
+    brute_info = binary_status.get("brute", {})
+    gen_ready = bool(state.get("generator_built")) and bool(
+        gen_info.get("binary_exists") and not gen_info.get("stale")
+    )
+    sol_ready = bool(state.get("sol_built")) and bool(
+        sol_info.get("binary_exists") and not sol_info.get("stale")
+    )
+    brute_req = manifest is None or manifest_requires_brute(manifest)
+    brute_ready = bool(state.get("brute_built")) and bool(
+        brute_info.get("binary_exists") and not brute_info.get("stale")
+    )
+    cur_sol_hash = _file_sha256(problem_dir, "solutions/sol.cpp")
+    cur_brute_hash = _file_sha256(problem_dir, "solutions/brute.cpp")
+    std_emp_hash = state.get("std_empirical_hash")
+    brute_probe_hash = state.get("brute_probed_hash")
+    std_emp_hash_ok = bool(
+        isinstance(std_emp_hash, str) and std_emp_hash and cur_sol_hash == std_emp_hash
+    )
+    brute_probe_hash_ok = bool(
+        isinstance(brute_probe_hash, str) and brute_probe_hash and cur_brute_hash == brute_probe_hash
+    )
+
+    if bool(state.get("std_empirical_verified")):
+        if gen_ready and sol_ready and not any_platform_mismatch and std_emp_hash_ok:
+            std_emp_status = "verified"
+        else:
+            std_emp_status = "stale"
+    elif not gen_ready or not sol_ready:
+        std_emp_status = "pending_binaries"
+    else:
+        std_emp_status = "pending_run"
+
+    if not brute_req:
+        brute_probe_status = "not_applicable"
+    elif bool(state.get("brute_probed")):
+        if gen_ready and brute_ready and not any_platform_mismatch and brute_probe_hash_ok:
+            brute_probe_status = "verified"
+        else:
+            brute_probe_status = "stale"
+    elif not gen_ready or not brute_ready:
+        brute_probe_status = "pending_binaries"
+    else:
+        brute_probe_status = "pending_run"
+
+    dynamic_probes = {
+        "std_empirical": {
+            "status": std_emp_status,
+            "verified": std_emp_status == "verified",
+            "hash": std_emp_hash,
+        },
+        "brute_probe": {
+            "status": brute_probe_status,
+            "probed": brute_probe_status == "verified",
+            "hash": brute_probe_hash,
+        },
+    }
 
     return {
         "workflow_state_present": wf_present,
@@ -153,6 +214,7 @@ def inspect_workspace_state(problem_dir: str) -> dict[str, Any]:
         "binary_status": binary_status,
         "stale_reasons": stale_reasons,
         "gate_summary": gate_summary,
+        "dynamic_probes": dynamic_probes,
     }
 
 
@@ -203,6 +265,24 @@ def reconcile_workspace_state(problem_dir: str) -> dict[str, Any]:
                 f"({inspection['build_platform']} -> {inspection['current_platform']})"
             )
         _invalidate_verify_only(problem_dir, state)
+
+    was_std_emp = bool(state.get("std_empirical_verified"))
+    was_brute_probed = bool(state.get("brute_probed"))
+    _sync_dynamic_probe_hashes(problem_dir, state)
+    if state.get("std_empirical_verified") and (
+        inspection["platform_mismatch"] or not state.get("sol_built") or not state.get("generator_built")
+    ):
+        state["std_empirical_verified"] = False
+        state["std_empirical_hash"] = None
+    if state.get("brute_probed") and (
+        inspection["platform_mismatch"] or not state.get("brute_built") or not state.get("generator_built")
+    ):
+        state["brute_probed"] = False
+        state["brute_probed_hash"] = None
+    if was_std_emp and not state.get("std_empirical_verified"):
+        actions.append("cleared std_empirical_verified (stale source/generator/platform)")
+    if was_brute_probed and not state.get("brute_probed"):
+        actions.append("cleared brute_probed (stale source/generator/platform)")
 
     save_workflow_state(problem_dir, state)
     return {

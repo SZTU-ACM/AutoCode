@@ -59,6 +59,29 @@ def _as_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _extract_stmt_consistency_details(
+    risk_report: object,
+) -> tuple[dict[str, Any] | None, bool, list[dict[str, Any]], list[Any]]:
+    """Return ``(stmt_cons, stmt_failed, val_mismatches, missing_terms)`` safely."""
+    stmt_cons = risk_report.get("statement_consistency") if isinstance(risk_report, dict) else None
+    if not isinstance(stmt_cons, dict):
+        return None, False, [], []
+    raw_mismatches = stmt_cons.get("validator_bound_mismatches")
+    val_mismatches = (
+        [m for m in raw_mismatches if isinstance(m, dict)]
+        if isinstance(raw_mismatches, list)
+        else []
+    )
+    raw_missing = stmt_cons.get("constraint_terms_missing_from_statement")
+    missing_terms = (
+        [t for t in raw_missing if t is not None and str(t).strip()]
+        if isinstance(raw_missing, list)
+        else []
+    )
+    stmt_failed = stmt_cons.get("passed") is False
+    return stmt_cons, stmt_failed, val_mismatches, missing_terms
+
+
 def _fmt_num(val: object, suffix: str = "") -> str:
     if isinstance(val, bool) or not isinstance(val, int | float):
         return "—"
@@ -305,18 +328,72 @@ def format_audit_markdown(output: dict[str, Any]) -> str:
                         f"| {_md_code(surv.get('mutated') or '—', max_len=80)} |"
                     )
 
-    stmt_cons = risk_report.get("statement_consistency") if isinstance(risk_report, dict) else None
+    stmt_cons, stmt_failed, val_mismatches, missing_terms = _extract_stmt_consistency_details(
+        risk_report
+    )
     comm_metrics = data.get("communication_metrics")
     comm_obs = comm_metrics.get("observed") if isinstance(comm_metrics, dict) else None
-    has_stmt_issue = isinstance(stmt_cons, dict) and stmt_cons.get("passed") is False
+    has_stmt_issue = stmt_cons is not None and (
+        stmt_failed or bool(val_mismatches) or bool(missing_terms)
+    )
     has_comm_obs = isinstance(comm_obs, dict) and bool(comm_obs)
     if has_stmt_issue or has_comm_obs:
         lines.extend(["", "## Statement Consistency & Communication Metrics", ""])
         if has_stmt_issue and isinstance(stmt_cons, dict):
-            lines.append(
-                f"- Statement consistency: **FAIL** — "
-                f"{_escape_md_cell(stmt_cons.get('message') or 'mismatch detected', max_len=300)}"
+            status_label = "**FAIL**" if stmt_failed else "**REVIEW**"
+            detail_msg = (
+                stmt_cons.get("message")
+                or stmt_cons.get("review_reason")
+                or ("mismatch detected" if stmt_failed else "review required")
             )
+            lines.append(
+                f"- Statement consistency: {status_label} — "
+                f"{_escape_md_cell(detail_msg, max_len=300)}"
+            )
+            review_reason = stmt_cons.get("review_reason")
+            if (
+                stmt_failed
+                and isinstance(review_reason, str)
+                and review_reason.strip()
+                and review_reason.strip() != str(stmt_cons.get("message") or "").strip()
+            ):
+                lines.append(f"- Review reason: {_escape_md_cell(review_reason, max_len=300)}")
+            if val_mismatches:
+                lines.extend(
+                    [
+                        "",
+                        "| Variable | Validator Range | Reason |",
+                        "|---|---|---|",
+                    ]
+                )
+                for mismatch in val_mismatches:
+                    var_name = mismatch.get("var")
+                    var_label = (
+                        var_name.strip()
+                        if isinstance(var_name, str) and var_name.strip()
+                        else "(unnamed)"
+                    )
+                    lo_val = mismatch.get("min")
+                    hi_val = mismatch.get("max")
+                    has_lo = isinstance(lo_val, int) and not isinstance(lo_val, bool)
+                    has_hi = isinstance(hi_val, int) and not isinstance(hi_val, bool)
+                    if has_lo and has_hi:
+                        range_text = f"[{lo_val}, {hi_val}]"
+                    elif has_lo:
+                        range_text = f">={lo_val}"
+                    elif has_hi:
+                        range_text = f"<={hi_val}"
+                    else:
+                        range_text = "—"
+                    lines.append(
+                        f"| {_md_code(var_label, max_len=80)} "
+                        f"| {_md_code(range_text, max_len=80)} "
+                        f"| {_escape_md_cell(mismatch.get('reason') or '—', max_len=300)} |"
+                    )
+            if missing_terms:
+                lines.extend(["", "**Missing Constraint Terms from Statement:**", ""])
+                for term in missing_terms:
+                    lines.append(f"- {_escape_md_cell(term, max_len=200)}")
         if has_comm_obs and isinstance(comm_metrics, dict) and isinstance(comm_obs, dict):
             lines.append(
                 f"- Protocol mode: {_md_code(comm_metrics.get('protocol_mode') or '—')} | "
@@ -376,6 +453,22 @@ def format_audit_summary(output: dict[str, Any]) -> str:
             gate = _collapse_inline(item.get("gate") or "warning", max_len=60)
             reason = _collapse_inline(item.get("reason") or item.get("message") or "—", max_len=200)
             lines.append(f"  WARN  [{gate}]: {reason}")
+
+    stmt_cons, stmt_failed, val_mismatches, missing_terms = _extract_stmt_consistency_details(
+        risk_report
+    )
+    if stmt_cons is not None and (stmt_failed or val_mismatches or missing_terms):
+        seen_vars: list[str] = []
+        for mismatch in val_mismatches:
+            vname = _collapse_inline(mismatch.get("var") or "unnamed", max_len=40) or "unnamed"
+            if vname not in seen_vars:
+                seen_vars.append(vname)
+        vars_part = f" vars=[{','.join(seen_vars)}]" if seen_vars else ""
+        lines.append(
+            f"  STMT_CONSISTENCY: passed={bool(stmt_cons.get('passed'))} "
+            f"mismatches={len(val_mismatches)}{vars_part} "
+            f"missing_terms={len(missing_terms)}"
+        )
 
     quality = data.get("quality_signals")
     if isinstance(quality, dict):

@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ...workflow import manifest_is_interactive
+from ...workflow import manifest_is_communication, manifest_is_interactive
 from ...workflow.models import AutoCodeManifest
 from ..communication_runner import safe_resolve_under_root
 from .common import (
@@ -49,8 +49,10 @@ def export_polygon(
         raise ValueError(f"Unsupported data_mode: {data_mode!r}; expected one of: copy, hardlink, zip")
 
     is_interactive = manifest_is_interactive(manifest)
+    is_communication = manifest_is_communication(manifest)
+    answers_optional = is_interactive or is_communication
     safe_pairs = _collect_safe_test_pairs(
-        problem_dir, in_files, answer_ext, allow_missing_answer=is_interactive
+        problem_dir, in_files, answer_ext, allow_missing_answer=answers_optional
     )
 
     if len(xml_content.encode("utf-8")) > _MAX_VERIFY_XML_BYTES:
@@ -108,7 +110,7 @@ def export_polygon(
             stage_mode_used.add(
                 _stage_data_file(src_in, os.path.join(tests_out_dir, in_name), effective_stage_arg)
             )
-            if is_interactive and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
+            if answers_optional and (src_ans is None or _is_interactive_dummy_answer(src_ans)):
                 if ans_name is not None:
                     omitted_empty_answers.append(ans_name)
             elif src_ans is not None and ans_name is not None:

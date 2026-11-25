@@ -53,7 +53,7 @@ RUN_TWICE_STATEMENT = """# Noisy Bit Channel
 ## 通信协议
 
 - 本题分两次独立进程运行（`first` 与 `second`），禁止共享全局状态或临时文件。
-- 第一阶段读入 `first` 与整数 $v, p$，输出不超过 12 比特（`max_bits=12`）的 `01` 串。
+- 第一阶段读入 `first` 与整数 $v, p$（$0 \\le p \\le 1000$），输出不超过 12 比特（`max_bits=12`）的 `01` 串。
 - 信道会翻转位置 $p \\bmod |s|$ 处的 1 个比特并传给第二阶段。
 - 第二阶段读入 `second` 与噪声串，还原输出整数 $v$。
 
@@ -270,7 +270,7 @@ async def test_communication_run_twice_full_pipeline_e2e(tmp_path):
     manifest.protocol.max_bits = 12
     manifest.protocol.max_bytes = 2
     manifest.protocol.max_rounds = 2
-    manifest.constraints = {"n_max": 15, "t_max": 1}
+    manifest.constraints = {"n_max": 15, "t_max": 1, "flip_pos": {"min": 0, "max": 1000}}
     manifest.solutions = [
         SolutionEntry(name="sol", role="main", path="solutions/sol.cpp", expected="pass"),
         SolutionEntry(

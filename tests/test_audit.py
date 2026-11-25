@@ -109,7 +109,12 @@ async def test_problem_audit_full_go_and_writes_report(tmp_path):
     audit = get_section(problem_dir, "audit")
     assert audit["full_audit"]["decision"] == "go"
     assert audit["full_audit_passed"] is True
-    assert result.data["difficulty_signals"]["rating"] >= 800
+    diff_sig = result.data["difficulty_signals"]
+    assert diff_sig["rating"] is None
+    assert diff_sig["band"] == "uncalibrated"
+    assert diff_sig["calibration_required"] is True
+    assert diff_sig["rating_method"] == "evidence_only_v2"
+    assert 0.0 <= diff_sig["confidence"] <= 1.0
 
 
 @pytest.mark.asyncio

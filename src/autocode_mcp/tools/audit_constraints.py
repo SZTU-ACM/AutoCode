@@ -408,7 +408,12 @@ class _AuditConstraintsMixin(_AuditDiscoveryMixin):
         statement_path = self._safe_file(problem_path, manifest.statement_path)
         tutorial_path = self._safe_file(problem_path, manifest.tutorial_path)
         if statement_path is None:
-            return {"passed": False, "needs_human_review": False, "message": "statement file missing"}
+            return {
+                "passed": False,
+                "needs_human_review": False,
+                "message": "statement file missing",
+                "review_reason": "",
+            }
         content = statement_path.read_text(encoding="utf-8", errors="replace")
         stmt_bounds = _extract_statement_numeric_bounds(content)
 
@@ -501,12 +506,45 @@ class _AuditConstraintsMixin(_AuditDiscoveryMixin):
         tutorial_ready = tutorial_path is not None and len(
             tutorial_path.read_text(encoding="utf-8", errors="replace").strip()
         ) > 80
-        passed = has_samples and tutorial_ready
+        evidence_ready = has_samples and tutorial_ready
+        passed = evidence_ready and not validator_bound_mismatches
         needs_human_review = bool(missing_terms or validator_bound_mismatches or not passed)
+
+        mismatch_parts: list[str] = []
+        for mismatch in validator_bound_mismatches:
+            var_label = str(mismatch.get("var") or "<unnamed>")
+            lo_val = mismatch.get("min")
+            hi_val = mismatch.get("max")
+            lo_txt = (
+                str(lo_val) if isinstance(lo_val, int) and not isinstance(lo_val, bool) else "-inf"
+            )
+            hi_txt = (
+                str(hi_val) if isinstance(hi_val, int) and not isinstance(hi_val, bool) else "+inf"
+            )
+            reason_txt = str(mismatch.get("reason") or "bound mismatch")
+            mismatch_parts.append(f"{var_label} [{lo_txt}, {hi_txt}] ({reason_txt})")
+
+        issue_parts: list[str] = []
+        if not evidence_ready:
+            issue_parts.append("statement samples or tutorial evidence is incomplete")
+        if mismatch_parts:
+            mismatch_summary = f"validator bound mismatch(es): {'; '.join(mismatch_parts)}"
+            if not manifest_nums and stmt_bounds:
+                top_stmt = ", ".join(str(val) for val in sorted(stmt_bounds, reverse=True)[:5])
+                mismatch_summary += f" [statement bounds: {top_stmt}]"
+            issue_parts.append(mismatch_summary)
+
+        review_parts = list(issue_parts)
+        if missing_terms:
+            review_parts.append(f"missing statement constraint terms: {', '.join(missing_terms)}")
+
+        message = "" if passed else "; ".join(review_parts if missing_terms else issue_parts)
+        review_reason = "; ".join(review_parts) if needs_human_review else ""
         return {
             "passed": passed,
             "needs_human_review": needs_human_review,
-            "message": "" if passed else "statement samples or tutorial evidence is incomplete",
+            "message": message,
+            "review_reason": review_reason,
             "has_samples": has_samples,
             "tutorial_ready": tutorial_ready,
             "tests_manifest_present": has_tests_manifest,
