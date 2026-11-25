@@ -285,6 +285,31 @@ def test_verify_complexity_high_startup_plateau_with_vm_jitter_falsifies_quadrat
     assert res_nlogn["passed"] is True
 
 
+def test_verify_complexity_noisy_middle_point_falsifies_quadratic_via_last_pair_without_linear_fp() -> None:
+    """中段低信噪比点受 VM 抖动拉低 3 点 R² 时，高信噪比末对 2x 陡增仍须拦截 O(n^2)，且线性带缓存抖动不误报。"""
+    ci_quad_samples = [
+        {"n": 200, "cpu_time_ms": 7.77, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 7.57, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 12.38, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 15.03, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 80.0, "status": "ok"},
+    ]
+    res_quad = EmpiricalRatioAnalyzer.verify_complexity("O(n)", ci_quad_samples, time_limit_ms=2000.0)
+    assert res_quad["passed"] is False
+    assert res_quad["verdict"] == "ratio_mismatch"
+    assert res_quad["fitted_complexity"] == "O(n^2)"
+
+    linear_cache_bump = [
+        {"n": 200, "cpu_time_ms": 7.7, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 7.6, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 11.0, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 18.0, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 55.0, "status": "ok"},
+    ]
+    res_lin = EmpiricalRatioAnalyzer.verify_complexity("O(n)", linear_cache_bump, time_limit_ms=2000.0)
+    assert res_lin["passed"] is True
+
+
 def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> None:
     """极窄 N 跨度（<2x，如 n=[11..15]）的温和进程启动抖动应豁免，但真正指数爆炸（16x）仍必须拦截。"""
     jitter_samples = [
