@@ -835,7 +835,7 @@ def _has_local_headers(
 async def compile_cpp(
     source_path: str,
     binary_path: str,
-    timeout: int = 30,
+    timeout: int | float = 30,
     compiler: str = "g++",
     std: str = "c++20",
     opt_level: str = "O2",
@@ -982,6 +982,10 @@ async def compile_cpp(
     if sys.platform != "win32":
         popen_kwargs["start_new_session"] = True
 
+    effective_timeout: int | float = (
+        90 if sys.platform == "win32" and timeout == 30 else timeout
+    )
+
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -991,7 +995,9 @@ async def compile_cpp(
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=effective_timeout
+            )
         except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as e:
             if process.pid:
                 await terminate_pid_tree(process.pid)
@@ -1003,7 +1009,7 @@ async def compile_cpp(
                 raise
             return CompileResult(
                 success=False,
-                error=f"Compilation timeout after {timeout}s. Consider increasing timeout or simplifying source code.",
+                error=f"Compilation timeout after {effective_timeout}s. Consider increasing timeout or simplifying source code.",
             )
 
         if process.returncode != 0:

@@ -765,9 +765,9 @@ class EmpiricalRatioAnalyzer:
                 else:
                     min_delta = 8.0 if plateau <= 5.0 else 15.0
                     head_flat = (
-                        abs(v1 - v0) <= 2.0
-                        and (plateau <= 5.0 or (max(v0, v1) / max(plateau, 0.1)) <= 1.25)
-                    ) or (plateau <= 5.0 and max(v0, v1) <= 6.0)
+                        (plateau <= 5.0 and max(v0, v1) <= 6.0)
+                        or (max(v0, v1) / max(plateau, 0.1)) <= 1.35
+                    )
                     is_flat_head = head_flat and (v_last - plateau) >= min_delta
                     offset = max(0.0, plateau - 0.1)
                     min_net = 1.5
@@ -799,6 +799,28 @@ class EmpiricalRatioAnalyzer:
                             alpha = net_alpha
                             fitted_cat = cls.infer_complexity_category(net_alpha)
                             r_squared = net_r2
+                        elif (
+                            len(adjusted_tail) >= 3
+                            and n_prev > 0
+                            and (float(n_last) / float(n_prev)) >= 2.0
+                        ):
+                            v_first_net = float(adjusted_tail[0][active_metric])
+                            min_last_net = 1000.0 if is_instruction_metric else 30.0
+                            min_prev_net = 10.0 if is_instruction_metric else 3.0
+                            if (
+                                v_first_net <= v_prev_net < v_last_net
+                                and v_last_net >= min_last_net
+                                and v_prev_net >= min_prev_net
+                                and obs_net_ratio >= max(2.0, exp_last_ratio * 2.0)
+                            ):
+                                pair_alpha, pair_r2 = cls.fit_log_linear(
+                                    adjusted_tail[-2:], metric=active_metric
+                                )
+                                if pair_alpha > expected_range[1]:
+                                    is_alpha_match = False
+                                    alpha = pair_alpha
+                                    fitted_cat = cls.infer_complexity_category(pair_alpha)
+                                    r_squared = pair_r2
 
         growth_ratios: list[dict[str, Any]] = []
         for i in range(len(fittable_samples) - 1):

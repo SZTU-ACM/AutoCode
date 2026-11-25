@@ -920,3 +920,43 @@ def test_linux_resolve_compiler_upgrades_legacy_gcc_and_windows_commitment_limit
         ) is True
 
 
+@pytest.mark.asyncio
+async def test_compile_cpp_windows_default_timeout_floor(monkeypatch, tmp_path):
+    """Windows 冷编译 testlib.h + Defender 扫描下，默认 timeout=30 应自动放宽到 90s，显式传参保持不变。"""
+    src = tmp_path / "main.cpp"
+    src.write_text(HELLO_WORLD_CODE, encoding="utf-8")
+    out = tmp_path / "main.exe"
+
+    seen_timeouts: list[float | int | None] = []
+
+    class _FakeProc:
+        pid = 12345
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def _fake_wait_for(coro, timeout=None):
+        seen_timeouts.append(timeout)
+        return await coro
+
+    monkeypatch.setattr(compiler_module.sys, "platform", "win32")
+    monkeypatch.setattr(compiler_module, "_resolve_compiler", lambda c: c)
+    monkeypatch.setattr(
+        compiler_module.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+    )
+    monkeypatch.setattr(compiler_module.asyncio, "wait_for", _fake_wait_for)
+
+    res_default = await compile_cpp(str(src), str(out), use_cache=False)
+    assert res_default.success is True
+    assert seen_timeouts[-1] == 90
+
+    res_explicit = await compile_cpp(str(src), str(out), timeout=15, use_cache=False)
+    assert res_explicit.success is True
+    assert seen_timeouts[-1] == 15
+
+
+
