@@ -140,3 +140,42 @@ async def test_run_monitored_process_windows_uses_qpc_below_64ms(monkeypatch, tm
     assert res["status"] == "ok"
     assert res["cpu_time_ms"] is not None
     assert res["cpu_time_ms"] != 15.625
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX subprocess kwargs require POSIX host")
+@pytest.mark.asyncio
+async def test_run_monitored_process_linux_uses_wall_below_50ms(monkeypatch, tmp_path):
+    """Linux 下 <50ms CPU 样本应使用高精度 wall time 扣减启动底噪，避免 10ms jiffy 跃变。"""
+    import autocode_mcp.utils.execution_monitor as em_mod
+
+    in_file = tmp_path / "in.txt"
+    in_file.write_text("1\n", encoding="utf-8")
+
+    monkeypatch.setattr(em_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        DynamicExecutionMonitor, "get_cpu_times_ms", classmethod(lambda cls, p: 10.0)
+    )
+
+    res_low = await DynamicExecutionMonitor.run_monitored_process(
+        [sys.executable, "-c", "print('ok')"],
+        str(in_file),
+        time_limit_ms=2000.0,
+        baseline_overhead_ms=1.5,
+        metric="cpu_time",
+    )
+    assert res_low["status"] == "ok"
+    assert res_low["cpu_time_ms"] is not None
+    assert res_low["cpu_time_ms"] != 10.0
+
+    monkeypatch.setattr(
+        DynamicExecutionMonitor, "get_cpu_times_ms", classmethod(lambda cls, p: 80.0)
+    )
+    res_high = await DynamicExecutionMonitor.run_monitored_process(
+        [sys.executable, "-c", "import time; time.sleep(0.03); print('ok')"],
+        str(in_file),
+        time_limit_ms=2000.0,
+        baseline_overhead_ms=1.5,
+        metric="cpu_time",
+    )
+    assert res_high["status"] == "ok"
+    assert res_high["cpu_time_ms"] == 80.0

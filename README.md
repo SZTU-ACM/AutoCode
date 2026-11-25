@@ -15,6 +15,17 @@
 
 仓库内部包含 `autocode-mcp` MCP Server（22 个原子工具、MCP 2026 Tasks/Apps 与可选无状态 Streamable HTTP）及 `autocode-audit`、`autocode-verify` 等独立命令行工具，所有受支持的 AI 客户端共享同一套工作流 Agent、Skills 与服务端门禁。
 
+## v4.0 核心能力总览
+
+| 能力域 | v4.0 核心升级 |
+| :--- | :--- |
+| **MCP 2026 协议与交互式 UI** | 22 个工具全量附带 `ToolAnnotations`、Pydantic 内联 `outputSchema` 与 `structuredContent`；长耗时工具支持有界异步 `MCP Tasks`；内置 3 个零 CDN `ui://autocode/*` MCP Apps 交互视图（复杂度拟合图、审计仪表盘、交互/通信回放）；`stdio` 默认 + 可选无状态 Streamable HTTP（`--transport http`） |
+| **红队审计、覆盖率与强变异测试** | 专职 `autocode-redteam-auditor` 与 `redteam-hacking` 技能；内置 `jngen.h` + `testlib.h`；`expected_verdict`（`AC\|WA\|TLE\|MLE\|RE\|PE`）精确拦截；`llvm-cov` (MC/DC) / `gcov` 分支覆盖率；`CounterexampleShrinker` 最小反例缩减、AST 语义变异（`--extra ast`）、多编译器 `-O0/-O2` / ASan / UBSan / MSan 探针与 `test_compactor` 去冗 |
+| **可插拔沙箱与三平台硬核底座** | `--sandbox auto\|none\|bwrap\|nsjail\|isolate\|apple_container` 多后端隔离；Linux `VmHWM`/`prlimit` 与旧版 GCC 自动择优、macOS `wait4` 与原子新 inode 缓存、Windows Job Object `STATUS_COMMITMENT_LIMIT` 精确归因 |
+| **形式化约束、歧义与原创性核查** | 可选 `--extra formal` Z3 SMT 子任务可满足性验证与 `constraints.h` 单一约束源生成；`Orchid` 四维歧义与反语义坍缩审计；`originality.py` 本地查重比对；AST/调用图 + `perf`/`cachegrind` 硬件计数与客观难度证据 |
+| **多语言评测与 5 大 OJ 互操作** | 支持 `cpp` / `python` / `pypy` / `rust` / `java` 分语言倍率；支持 Polygon（含 `problem.xml` / 无后缀 `01`+`01.a`）/ Hydro / QOJ / ICPC-Kattis / IOI CMS 5 种格式导出与回读校验；Polygon REST 同步（`cli.polygon_sync`）与 Typst PDF 渲染（`cli.render_pdf`） |
+| **进化式数据生成与评测闭环** | `scripts/evolve_generator.py` 面向覆盖率与错解杀伤的多岛进化生成器；`evals/` 离线 TPR/TNR 基准、4 题型 Harbor 任务与 Promptfoo 四宿主矩阵；`scripts/optimize_skills_gepa.py` 与门禁防篡改红队回归 |
+
 ## 为什么需要 AutoCode
 
 AI 可以快速给出题目想法和代码，但竞赛题真正难的是“可信”。无论是 AI 自动出题还是人工命题，常见翻车点往往不在第一眼能看出来的地方：

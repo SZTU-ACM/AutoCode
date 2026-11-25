@@ -57,10 +57,10 @@ int main() {
     for (int i = 0; i < n; ++i) {
         std::cin >> a[i];
     }
-    long long cnt = 0;
+    volatile long long cnt = 1;
     for (int i = 0; i < n; ++i) {
         for (int j = i + 1; j < n; ++j) {
-            cnt += (a[i] ^ a[j]) + (a[j] ^ i) + ((cnt + j) & 255);
+            cnt = (cnt * 1315423911LL + (a[i] ^ a[j]) + j) & 0x7fffffffLL;
         }
     }
     std::cout << cnt << "\\n";
@@ -171,7 +171,7 @@ async def test_small_constant_quadratic_solution_blocked_e2e():
 
         assert result.success
         empirical = result.data.get("empirical_verification", {})
-        assert empirical.get("passed") is False
+        assert empirical.get("passed") is False, f"unexpected empirical pass: {empirical}"
         assert empirical.get("verdict") == "ratio_mismatch"
         assert empirical.get("fitted_complexity") in (
             "O(n^2)",

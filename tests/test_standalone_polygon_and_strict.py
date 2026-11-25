@@ -519,7 +519,7 @@ def test_standalone_isolated_empirical_detects_mismatch_with_zero_writes(tmp_pat
             "    volatile long long acc = 0;\n"
             "    for (long long i = 0; i < n; ++i) {\n"
             "        for (long long j = 0; j < n; ++j) {\n"
-            "            acc += ((i ^ j) & 1);\n"
+            "            acc = (acc * 1103515245LL + (i ^ j) + 12345LL) & 0x7fffffffLL;\n"
             "        }\n"
             "    }\n"
             "    std::cout << (n + (acc & 0)) << '\\n';\n"
@@ -558,7 +558,7 @@ def test_standalone_isolated_empirical_detects_mismatch_with_zero_writes(tmp_pat
     emp = out.data["quality_signals"]["empirical_complexity"]
     assert emp["executed"] is True
     assert emp["evidence"]["isolated_standalone"] is True
-    assert emp["passed"] is False
+    assert emp["passed"] is False, f"unexpected standalone empirical pass: {emp}"
     assert out.data["decision"] == "no_go"
     assert any(b["gate"] == "empirical_complexity" for b in out.data["blocking_issues"])
 

@@ -523,9 +523,12 @@ class DynamicExecutionMonitor:
         calc_wall_ms = max(0.1, wall_elapsed_ms - baseline_overhead_ms)
         if status == "ok":
             # Windows 上 psutil.cpu_times() 为 15.625ms 调度滴答粒度，
-            # 64ms 以下（不足 4 个 tick）改用高精度 QPC wall time 扣减启动底噪。
+            # Linux 上 /proc/<pid>/stat 为 10ms (USER_HZ=100) jiffy 粒度；
+            # 低耗时（不足 4~5 个 tick）改用高精度 monotonic wall time 扣减启动底噪，
+            # 避免短运行样本随机跳变到 10ms / 20ms 破坏 log-log 复杂度斜率。
             use_qpc_wall = (
                 (sys.platform == "win32" and accumulated_cpu_ms < 64.0)
+                or (sys.platform.startswith("linux") and accumulated_cpu_ms < 50.0)
                 or accumulated_cpu_ms <= 0.5
             )
             final_cpu_ms = round(calc_wall_ms, 2) if use_qpc_wall else round(accumulated_cpu_ms, 2)
@@ -759,6 +762,7 @@ class DynamicExecutionMonitor:
             if status == "ok":
                 use_qpc_wall = (
                     (sys.platform == "win32" and accumulated_cpu_ms < 64.0)
+                    or (sys.platform.startswith("linux") and accumulated_cpu_ms < 50.0)
                     or accumulated_cpu_ms <= 0.5
                 )
                 final_cpu_ms = (
