@@ -1,0 +1,52 @@
+schema_version: "1.0"
+task_id: autocode-communication-run-twice-ecc
+name: Communication Problem Authoring & Audit (Two-Pass ECC)
+benchmark: autocode-harbor
+problem_type: communication
+protocol_mode: run_twice
+reference_example: examples/communication-sample
+difficulty: hard
+timeout_sec: 420
+sandbox:
+  type: docker
+  image: autocode-eval:py312-gpp14
+  network_disabled: true
+  read_only_reference: true
+instruction: |
+  Using AutoCode MCP tools, build a verified `run_twice` communication problem
+  (`problem_type="communication"`, `oracle_mode="interactor_only"`,
+  `protocol.mode="run_twice"`, `max_bits=12`, `max_bytes=2`, `max_rounds=2`)
+  encoding a 4-bit integer X in [0, 15] across a noisy single-bit-flip channel.
+  Requirements:
+  - Document `## 通信协议` in `statements/README.md` specifying Pass 1 / Pass 2
+    process isolation, numeric bit/byte budgets, noise model, and multi-stage transcripts.
+  - Implement `files/communicator.cpp` using `registerTestlibCmd(argc, argv)`, reading
+    `AUTOCODE_COMM_STAGE`, rejecting over-budget payloads (`> 12` bits), and emitting
+    `bits_used=... bytes_used=... rounds=...` in `quitf` messages.
+  - Include a compiled wrong solution (`solutions/wrong_no_ecc.cpp`) lacking error
+    correction that fails on `mode=1` noisy cases and is killed by `wrong_solution_kill`.
+  - Confirm `problem_audit(mode="full")` reports `communication_metrics.budget_exceeded == false`.
+required_artifacts:
+  - .autocode/manifest.json
+  - statements/README.md
+  - statements/tutorial.md
+  - solutions/sol.cpp
+  - solutions/wrong_no_ecc.cpp
+  - files/gen.cpp
+  - files/communicator.cpp
+  - tests/01.in
+acceptance_checks:
+  autocode_audit_cmd: "uv run autocode-audit . --standalone --strict --format json"
+  expected_decision: go
+  require_compiled_wrong_kill: true
+  expected_wrong_kill_count_min: 1
+  zero_write_on_standalone_audit: true
+  check_commands:
+    - "uv run autocode-verify . --status"
+    - "uv run autocode-audit . --standalone --strict --format json"
+scoring:
+  weights:
+    audit_decision_go: 0.35
+    compiled_wrong_killed: 0.3
+    communication_budget_enforced: 0.25
+    zero_write_standalone: 0.1

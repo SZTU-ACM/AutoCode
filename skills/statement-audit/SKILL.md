@@ -9,17 +9,15 @@ Use `problem_validate` and `problem_audit` to check statement, constraint consis
 
 ## Trigger Conditions
 
-- Before freezing test data or running `pack_polygon` / final `problem_audit`.
+- Before freezing test data or running `problem_pack_polygon` / final `problem_audit`.
 - Whenever the statement, constraints, `files/constraints.h`, `files/val.cpp`, or samples are created or edited.
 
 ## Checkpoints
 
-- Statement section order follows this sequence: title -> time/memory limits -> optional background -> problem description -> input format (with all variable constraints) -> output format -> samples (numbered ascending) -> explanation.
-- Input/output protocol is complete and unambiguous.
-- Sample input/output matches actual execution of `sol`.
-- All sample explanations appear only in the explanation section (not embedded under individual samples); only representative samples need explanation.
-- `tutorial.md` includes approach, correctness, and complexity (not placeholder text).
-- Special judging rules (`checker`/`interactor`) are explicitly documented in the statement.
+- Statement section order: title -> time/memory limits -> optional background -> problem description -> input format (with all variable constraints) -> output format -> samples (numbered ascending) -> explanation (never mixed into sample blocks; only representative samples need explanation).
+- Input/output protocol is complete, unambiguous, and matches `sol` execution on all samples (including at least one boundary case).
+- `tutorial.md` includes approach, correctness, and complexity (no placeholder text), with terminology consistent across statement, editorial, and code.
+- Special judging rules (`checker` / `interactor` / `communicator`) are explicitly documented.
 
 ## Orchid 4D Ambiguity Checklist (`arXiv:2604.21505`)
 
@@ -42,44 +40,18 @@ Audit every statement systematically across all four Orchid ambiguity dimensions
 - Confirm boundary samples or `case_plan` extreme cases cover synthesized tight boundary witnesses (`min`, `max`, extreme parity/coupled values).
 - If `files/constraints.h` is used as the single source of truth, verify with `check_constraints_header_drift` that header constants match `.autocode/manifest.json` without drift.
 
-## Additional Requirements
+## Protocol Requirements Summary
 
-- Terminology and variable naming stay consistent across statement, editorial, and code.
-- Samples include at least one boundary case.
-- For interactive problems, the statement must define the complete interaction contract: who outputs first, every query/final-answer command, judge response format and meaning, query limit, hidden parameter bounds, flush requirement, termination rule, and verdict consequences for invalid output, out-of-range parameters, too many queries, premature EOF, and missing flush.
-- Interactive samples must be written as transcripts with judge/contestant sides clearly marked; do not approve a fake static input/output sample that hides the conversation order.
-
-## Interactive Statement Checklist
-
-For `interactive: true`, require all items below before `go`:
-
-- `Input format` says the contestant does not receive ordinary static input, and lists the interactor's hidden input/range/randomness/adaptiveness.
-- `Output format` lists every contestant command, including final answer syntax and whether the program must terminate immediately.
-- `Interaction protocol` states the exact order of reads/writes for every round and the meaning of every judge response.
-- Query/round limits are numeric, and the statement says what happens at the limit and after exceeding it.
-- The flush rule is explicit: after each query/final answer the contestant must flush stdout.
-- Illegal behavior verdicts are explicit: malformed command, invalid token, out-of-range argument, too many queries, early termination, continuing after final answer, and blocked protocol.
-- Transcript examples identify lines from the judge and contestant and are consistent with the protocol.
-- If the judge is adaptive, the maintained invariant is stated so contestants know what they are solving.
-
-## Communication Statement Checklist
-
-For `problem_type: "communication"`, require all items below before `go`:
-
-- `## 通信协议` section is present and specifies the exact communication mode (`run_twice` / `grader_linked` / `multi_process`).
-- Process isolation rules (no cross-pass globals, temp files, or shared state) or exact `problem.h` C++ function signatures are stated unambiguously.
-- Numeric communication budgets (`max_bits`, `max_bytes`, `max_rounds`, `max_queries`) and over-budget verdict/scoring rules are stated explicitly.
-- Channel transformation / noise / adversarial corruption model is defined (or explicitly stated as noiseless).
-- Invalid output format, premature EOF, extra output, and multi-stage verdicts are defined.
-- Sample section provides a complete multi-stage transcript (e.g., Pass 1 -> Channel -> Pass 2) consistent with `communicator.cpp` / `grader.cpp` and `sol.cpp`.
-- If subtasks are defined in `manifest.json`, subtask scores, constraints, and dependencies match the statement.
+- **Interactive (`## 交互协议`)**: document hidden inputs, turn order, every query/final command, numeric query limits, `std::cout` stdout flush rule, termination rules, error verdicts, and judge/contestant transcripts (`registerInteraction`).
+- **Communication (`## 通信协议`)**: document mode (`run_twice` / `grader_linked` / `multi_process`), isolation/`problem.h` signatures, numeric budgets (`max_bits` / `max_bytes` / `max_rounds` / `max_queries`), noise model, error verdicts, multi-stage transcripts, and `subtasks`.
+- Full line-by-line interactive & communication audit checklists: [references/protocol-checklists.md](references/protocol-checklists.md).
 
 ## Output Format
 
 - `decision`: `go` / `no_go`
 - `doc_issues`: documentation and Orchid 4D ambiguity issue list
 - `sample_issues`: sample issue list
-- `second_interpretation`: documented second plausible interpretation and whether it diverges from the intended semantics
+- `second_interpretation`: documented second plausible interpretation and whether it diverges from intended semantics
 - `rewrite_targets`: section titles that require rewriting
 
 ## Decision Rules

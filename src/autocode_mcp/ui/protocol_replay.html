@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AutoCode Protocol Replay</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-alt: #162033;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --judge: #818cf8;
+    --contestant: #34d399;
+    --good: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+  }
+  [data-theme="light"] {
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --panel-alt: #f1f5f9;
+    --border: #cbd5e1;
+    --text: #0f172a;
+    --muted: #475569;
+    --accent: #0284c7;
+    --judge: #4f46e5;
+    --contestant: #059669;
+    --good: #16a34a;
+    --warn: #d97706;
+    --bad: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.45;
+  }
+  .header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .header h1 { margin: 0; font-size: 1.15rem; }
+  .subtitle { font-size: 0.82rem; color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  select, button, textarea {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .meta-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; background: var(--panel); border: 1px solid var(--border); }
+  .pill.good { background: rgba(34,197,94,0.16); color: var(--good); border-color: transparent; }
+  .pill.bad { background: rgba(239,68,68,0.16); color: var(--bad); border-color: transparent; }
+  .player-bar {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .scrubber { flex: 1 1 200px; accent-color: var(--accent); }
+  .timeline {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 440px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .turn {
+    display: flex;
+    flex-direction: column;
+    max-width: 82%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    opacity: 0.45;
+    transition: opacity 0.15s, border-color 0.15s;
+  }
+  .turn.visible { opacity: 1; }
+  .turn.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .turn.judge { align-self: flex-start; border-left: 3px solid var(--judge); }
+  .turn.contestant { align-self: flex-end; border-right: 3px solid var(--contestant); }
+  .turn.system { align-self: center; max-width: 95%; border-style: dashed; }
+  .turn-head { display: flex; justify-content: space-between; gap: 12px; font-size: 0.74rem; color: var(--muted); margin-bottom: 4px; }
+  .turn-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.84rem; white-space: pre-wrap; word-break: break-word; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; font-size: 0.84rem; color: var(--muted); }
+  textarea { width: 100%; min-height: 90px; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 0.78rem; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Interactive &amp; Communication Protocol Replay</h1>
+      <div class="subtitle" id="sourceLabel">Standalone Demo Fallback (waiting for MCP tool-result)</div>
+    </div>
+    <div class="controls">
+      <select id="presetSelect" aria-label="Demo preset">
+        <option value="interactive_ac">Demo: Interactive Guess AC</option>
+        <option value="comm_wa">Demo: Communication Run-Twice WA</option>
+      </select>
+      <button id="themeBtn" type="button">Light/Dark</button>
+    </div>
+  </div>
+
+  <div class="meta-bar" id="metaBar"></div>
+
+  <div class="player-bar">
+    <button id="resetBtn" type="button">Reset</button>
+    <button id="prevBtn" type="button">Prev</button>
+    <button id="playBtn" type="button">Play</button>
+    <button id="nextBtn" type="button">Next</button>
+    <input id="scrubber" class="scrubber" type="range" min="0" max="0" value="0" aria-label="Transcript step" />
+    <span id="stepCounter" style="font-size:0.84rem; min-width:72px; text-align:right;">0 / 0</span>
+    <select id="speedSelect" aria-label="Playback speed">
+      <option value="1000">0.5x</option>
+      <option value="550" selected>1x</option>
+      <option value="250">2x</option>
+    </select>
+  </div>
+
+  <div class="timeline" id="timeline"></div>
+
+  <details>
+    <summary>Load Custom JSON (solution_run / interactor_build / problem_validate)</summary>
+    <textarea id="jsonInput" placeholder='Paste JSON containing transcript or interaction scenarios...'></textarea>
+    <button id="loadJsonBtn" type="button" style="margin-top:6px;">Render Transcript</button>
+  </details>
+
+<script>
+(function() {
+  const DEMOS = {
+    interactive_ac: {
+      mode: "interactive",
+      verdict: "AC",
+      time_ms: 14,
+      metrics: { queries: 5, max_queries: 10 },
+      transcript: [
+        "[judge] 1 100",
+        "[contestant] ? 50",
+        "[judge] <",
+        "[contestant] ? 25",
+        "[judge] >",
+        "[contestant] ? 37",
+        "[judge] =",
+        "[contestant] ! 37",
+        "[system] Interactor exit=0: OK 3 queries"
+      ].join("\n")
+    },
+    comm_wa: {
+      mode: "communication:run_twice",
+      verdict: "WA",
+      time_ms: 21,
+      detail: "Expected decoded value 12, got 11",
+      metrics: { bits_used: 8, max_bits: 16, rounds: 2 },
+      transcript: [
+        "[pass1:judge] encode 12",
+        "[pass1:contestant] 00001011",
+        "[communicator] relayed bits_used=8",
+        "[pass2:judge] decode 00001011",
+        "[pass2:contestant] 11",
+        "[system] verdict=WA: mismatch (expected 12, got 11)"
+      ].join("\n")
+    }
+  };
+
+  let currentPayload = DEMOS.interactive_ac;
+  let turns = [];
+  let cursor = 0;
+  let timer = null;
+
+  function el(tag, attrs, text) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    }
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function classifyRole(rawRole) {
+    const r = String(rawRole || "").toLowerCase();
+    if (r.includes("contestant") || r.includes("solution") || r.includes("player") || r.includes("alice") || r.includes("bob")) {
+      return "contestant";
+    }
+    if (r.includes("judge") || r.includes("interactor") || r.includes("communicator") || r.includes("pass")) {
+      return "judge";
+    }
+    return "system";
+  }
+
+  function parseTranscript(payload) {
+    if (!payload || typeof payload !== "object") return [];
+    const d = (payload.data && typeof payload.data === "object") ? payload.data : payload;
+    let raw = d.transcript;
+    if (!raw && Array.isArray(d.reference_results) && d.reference_results[0]) {
+      raw = d.reference_results[0].transcript;
+    }
+    if (!raw && Array.isArray(d.mutant_results) && d.mutant_results[0]) {
+      raw = d.mutant_results[0].transcript;
+    }
+    if (Array.isArray(raw)) {
+      return raw.map((item, i) => ({
+        idx: i + 1,
+        roleLabel: String(item.role || "event"),
+        lane: classifyRole(item.role),
+        text: String(item.text ?? item.message ?? JSON.stringify(item))
+      }));
+    }
+    if (typeof raw !== "string" || !raw.trim()) return [];
+    const lines = raw.split(/\r?\n/).filter(l => l.length > 0);
+    return lines.map((line, i) => {
+      const m = line.match(/^\[([^\]]+)\]\s*(.*)$/) || line.match(/^(Judge|Contestant|Interactor|Communicator|System)\s*:\s*(.*)$/i);
+      if (m) {
+        return { idx: i + 1, roleLabel: m[1], lane: classifyRole(m[1]), text: m[2] };
+      }
+      return { idx: i + 1, roleLabel: "trace", lane: "system", text: line };
+    });
+  }
+
+  function stopPlay() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    document.getElementById("playBtn").textContent = "Play";
+  }
+
+  function render() {
+    const d = (currentPayload && currentPayload.data) ? currentPayload.data : (currentPayload || {});
+    const metaBar = document.getElementById("metaBar");
+    metaBar.replaceChildren();
+    const verdict = String(d.verdict || "N/A");
+    metaBar.appendChild(el("span", { class: `pill ${verdict === "AC" ? "good" : (verdict === "N/A" ? "" : "bad")}` }, `Verdict: ${verdict}`));
+    if (d.mode) metaBar.appendChild(el("span", { class: "pill" }, `Mode: ${d.mode}`));
+    if (d.time_ms != null) metaBar.appendChild(el("span", { class: "pill" }, `Time: ${d.time_ms}ms`));
+    if (d.metrics && typeof d.metrics === "object") {
+      for (const [k, v] of Object.entries(d.metrics)) {
+        metaBar.appendChild(el("span", { class: "pill" }, `${k}: ${v}`));
+      }
+    }
+    if (d.detail) metaBar.appendChild(el("span", { class: "pill" }, d.detail));
+
+    const scrubber = document.getElementById("scrubber");
+    scrubber.max = String(turns.length);
+    scrubber.value = String(cursor);
+    document.getElementById("stepCounter").textContent = `${cursor} / ${turns.length}`;
+
+    const timeline = document.getElementById("timeline");
+    timeline.replaceChildren();
+    if (turns.length === 0) {
+      timeline.appendChild(el("div", { style: "color:var(--muted);" }, "No transcript turns found in payload."));
+      return;
+    }
+    let activeNode = null;
+    for (let i = 0; i < turns.length; i++) {
+      const t = turns[i];
+      const stepNo = i + 1;
+      const cls = ["turn", t.lane];
+      if (stepNo <= cursor) cls.push("visible");
+      if (stepNo === cursor) cls.push("active");
+      const card = el("div", { class: cls.join(" ") });
+      const head = el("div", { class: "turn-head" });
+      head.appendChild(el("strong", null, `#${t.idx} ${t.roleLabel}`));
+      head.appendChild(el("span", null, `${t.text.length} chars`));
+      card.appendChild(head);
+      card.appendChild(el("div", { class: "turn-body" }, t.text));
+      card.addEventListener("click", () => { stopPlay(); cursor = stepNo; render(); });
+      timeline.appendChild(card);
+      if (stepNo === cursor) activeNode = card;
+    }
+    if (activeNode) activeNode.scrollIntoView({ block: "nearest" });
+  }
+
+  function loadPayload(raw, label) {
+    stopPlay();
+    currentPayload = raw;
+    turns = parseTranscript(raw);
+    cursor = turns.length;
+    document.getElementById("sourceLabel").textContent = label || "Live MCP Tool Result";
+    render();
+  }
+
+  document.getElementById("resetBtn").addEventListener("click", () => { stopPlay(); cursor = 0; render(); });
+  document.getElementById("prevBtn").addEventListener("click", () => { stopPlay(); cursor = Math.max(0, cursor - 1); render(); });
+  document.getElementById("nextBtn").addEventListener("click", () => { stopPlay(); cursor = Math.min(turns.length, cursor + 1); render(); });
+  document.getElementById("scrubber").addEventListener("input", (e) => { stopPlay(); cursor = Number(e.target.value); render(); });
+  document.getElementById("playBtn").addEventListener("click", () => {
+    if (timer !== null) return stopPlay();
+    if (cursor >= turns.length) cursor = 0;
+    const ms = Number(document.getElementById("speedSelect").value) || 550;
+    document.getElementById("playBtn").textContent = "Pause";
+    timer = setInterval(() => {
+      if (cursor >= turns.length) return stopPlay();
+      cursor += 1;
+      render();
+    }, ms);
+  });
+  document.getElementById("presetSelect").addEventListener("change", (e) => {
+    loadPayload(DEMOS[e.target.value] || DEMOS.interactive_ac, "Standalone Demo Fallback");
+  });
+  document.getElementById("themeBtn").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute("data-theme", cur === "light" ? "dark" : "light");
+  });
+  document.getElementById("loadJsonBtn").addEventListener("click", () => {
+    try {
+      loadPayload(JSON.parse(document.getElementById("jsonInput").value), "Custom JSON Input");
+    } catch (err) {
+      alert("Invalid JSON: " + err.message);
+    }
+  });
+
+  window.addEventListener("message", (event) => {
+    const msg = event.data;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.method === "ui/notifications/tool-result" && msg.params) {
+      const p = msg.params;
+      if (p.structuredContent) return loadPayload(p.structuredContent, "MCP Tool Result");
+      if (Array.isArray(p.content) && p.content[0] && typeof p.content[0].text === "string") {
+        try { loadPayload(JSON.parse(p.content[0].text), "MCP Tool Result"); } catch (_) {}
+      }
+      return;
+    }
+    if (msg.result && msg.result.hostContext && msg.result.hostContext.theme) {
+      document.documentElement.setAttribute("data-theme", msg.result.hostContext.theme);
+    }
+    if (msg.type === "autocode:data" && msg.payload) {
+      loadPayload(msg.payload, "Embedded Bridge Payload");
+    } else if (msg.transcript || msg.reference_results || msg.mutant_results || msg.data) {
+      loadPayload(msg, "Embedded Bridge Payload");
+    }
+  });
+
+  if (window.parent && window.parent !== window) {
+    try {
+      window.parent.postMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "ui/initialize",
+        params: { appInfo: { name: "autocode-protocol-replay", version: "1.0.0" }, appCapabilities: {}, protocolVersion: "2026-01-26" }
+      }, "*");
+      window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*");
+    } catch (_) {}
+  }
+
+  loadPayload(DEMOS.interactive_ac, "Standalone Demo Fallback");
+})();
+</script>
+</body>
+</html>

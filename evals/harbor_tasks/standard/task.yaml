@@ -1,0 +1,53 @@
+schema_version: "1.0"
+task_id: autocode-standard-sum-range
+name: Standard Problem Authoring & Audit (Exact Output)
+benchmark: autocode-harbor
+problem_type: standard
+reference_example: examples/exact-sample
+difficulty: easy
+timeout_sec: 300
+sandbox:
+  type: docker
+  image: autocode-eval:py312-gpp14
+  network_disabled: true
+  read_only_reference: true
+instruction: |
+  Using AutoCode MCP tools (`problem_create`, `solution_build`, `solution_analyze`,
+  `solution_audit_std`, `solution_audit_brute`, `validator_build`, `generator_build`,
+  `stress_test_run`, `problem_validate`, `problem_generate_tests`, `problem_verify_tests`,
+  `problem_audit`, `problem_pack_polygon`), build a verified standard problem package in the
+  workspace computing the sum of n (1 <= n <= 200000) integers a_i (|a_i| <= 10^9).
+  Requirements:
+  - Avoid `<bits/stdc++.h>`; use portable C++20 headers.
+  - Provide `validator_build` test cases with BOTH positive (`expected_valid=True`) and
+    negative (`expected_valid=False`) inputs achieving accuracy >= 0.9.
+  - Include at least one compiled wrong solution (`solutions/wrong_int32.cpp`) using 32-bit
+    `int` overflow and verify `wrong_solution_kill` kills it with `expected_verdict="WA"`.
+  - Ensure `type=3` and `type=4` generated tests are semantically distinct and account for
+    at least 50% of final tests.
+required_artifacts:
+  - .autocode/manifest.json
+  - statements/README.md
+  - statements/tutorial.md
+  - solutions/sol.cpp
+  - solutions/brute.cpp
+  - solutions/wrong_int32.cpp
+  - files/val.cpp
+  - files/gen.cpp
+  - tests/01.in
+  - tests/01.ans
+acceptance_checks:
+  autocode_audit_cmd: "uv run autocode-audit . --standalone --strict --format json"
+  expected_decision: go
+  require_compiled_wrong_kill: true
+  expected_wrong_kill_count_min: 1
+  zero_write_on_standalone_audit: true
+  check_commands:
+    - "uv run autocode-verify . --status"
+    - "uv run autocode-audit . --standalone --strict --format json"
+scoring:
+  weights:
+    audit_decision_go: 0.4
+    compiled_wrong_killed: 0.3
+    validator_positive_negative: 0.2
+    zero_write_standalone: 0.1

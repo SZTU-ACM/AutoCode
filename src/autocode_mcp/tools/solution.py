@@ -4,6 +4,7 @@ Solution 工具组 - 解法构建和运行。
 
 import os
 import shutil
+import sys
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -19,9 +20,23 @@ from ..utils.compiler import (
     resolve_effective_compiler,
 )
 from ..utils.judge_runner import InteractiveRunner
+from ..utils.lang_runner import (
+    compile_or_prepare,
+    infer_language_from_path,
+    resolve_runtime_executable,
+    resolve_time_limit_multiplier,
+    run_source,
+)
 from ..utils.logs import safe_prepare_autocode_subdir
 from ..utils.platform import get_exe_extension
-from ..workflow import load_manifest, manifest_is_communication, manifest_is_interactive
+from ..utils.resource_limit import get_resource_limit
+from ..workflow import (
+    AutoCodeManifest,
+    load_manifest,
+    manifest_is_communication,
+    manifest_is_interactive,
+)
+from ..workflow.models import SolutionEntry, validate_executable_solution_language
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin, RunToolMixin, resolve_source
 from .schemas import SolutionBuildInput, SolutionRunInput
@@ -31,6 +46,138 @@ def _is_safe_solution_stem(value: str) -> bool:
     if not value or value in {".", ".."}:
         return False
     return not any(sep and sep in value for sep in (os.sep, os.altsep, "/", "\\", ":"))
+
+
+def _match_manifest_solution(
+    manifest: AutoCodeManifest | None,
+    solution_type: Literal["sol", "brute", "wrong", "reference"],
+    effective_name: str,
+    explicit_name: str | None,
+) -> SolutionEntry | None:
+    if manifest is None:
+        return None
+    for entry in manifest.solutions:
+        if entry.name == effective_name:
+            return entry
+    if explicit_name is None and solution_type in {"sol", "brute"}:
+        target_role = "main" if solution_type == "sol" else "brute"
+        for entry in manifest.solutions:
+            if entry.role == target_role:
+                return entry
+    return None
+
+
+def _resolve_build_defaults(
+    problem_dir: str,
+    manifest: AutoCodeManifest | None,
+    solution_type: Literal["sol", "brute", "wrong", "reference"],
+    effective_name: str,
+    explicit_name: str | None,
+    code: str | None,
+    source_path: str | None,
+) -> tuple[str, SolutionEntry | None]:
+    matched_entry = _match_manifest_solution(manifest, solution_type, effective_name, explicit_name)
+    is_primary = solution_type in {"sol", "brute"}
+    default_stem = solution_type if is_primary else effective_name
+
+    if source_path:
+        return os.path.join("solutions", f"{default_stem}.cpp"), matched_entry
+
+    if code is not None:
+        if matched_entry is not None and (
+            matched_entry.language == "python"
+            or infer_language_from_path(matched_entry.path) == "python"
+        ):
+            return os.path.join("solutions", f"{default_stem}.py"), matched_entry
+        return os.path.join("solutions", f"{default_stem}.cpp"), matched_entry
+
+    # No explicit code or source_path: resolve existing files cleanly (.cpp or .py).
+    if matched_entry is not None:
+        resolved_entry = safe_resolve_under_root(problem_dir, matched_entry.path)
+        if resolved_entry is not None and os.path.isfile(resolved_entry):
+            return matched_entry.path, matched_entry
+
+    candidate_rels: list[str] = []
+    if matched_entry is not None and (
+        matched_entry.language == "python"
+        or infer_language_from_path(matched_entry.path) == "python"
+    ):
+        candidate_rels.extend(
+            [
+                os.path.join("solutions", f"{effective_name}.py"),
+                os.path.join("solutions", f"{default_stem}.py"),
+                os.path.join("solutions", f"{effective_name}.cpp"),
+                os.path.join("solutions", f"{default_stem}.cpp"),
+            ]
+        )
+    else:
+        candidate_rels.extend(
+            [
+                os.path.join("solutions", f"{effective_name}.cpp"),
+                os.path.join("solutions", f"{default_stem}.cpp"),
+                os.path.join("solutions", f"{effective_name}.py"),
+                os.path.join("solutions", f"{default_stem}.py"),
+            ]
+        )
+
+    for rel in candidate_rels:
+        resolved = safe_resolve_under_root(problem_dir, rel)
+        if resolved is not None and os.path.isfile(resolved):
+            return rel, matched_entry
+
+    if matched_entry is not None:
+        return matched_entry.path, matched_entry
+    return os.path.join("solutions", f"{default_stem}.cpp"), None
+
+
+def _resolve_runnable_target(
+    problem_dir: str,
+    manifest: AutoCodeManifest | None,
+    solution_type: Literal["sol", "brute", "wrong", "reference"],
+    effective_name: str,
+    explicit_name: str | None,
+    exe_ext: str,
+) -> tuple[str | None, Literal["cpp", "python"]]:
+    matched_entry = _match_manifest_solution(manifest, solution_type, effective_name, explicit_name)
+    if matched_entry is not None:
+        entry_lang = validate_executable_solution_language(matched_entry)
+        if entry_lang == "python":
+            for py_rel in (
+                matched_entry.path,
+                os.path.join("solutions", f"{effective_name}.py"),
+                f"{effective_name}.py",
+            ):
+                resolved_py = safe_resolve_under_root(problem_dir, py_rel)
+                if resolved_py is not None and os.path.isfile(resolved_py):
+                    return resolved_py, "python"
+        else:
+            stem_rel = f"{os.path.splitext(matched_entry.path)[0]}{exe_ext}"
+            for cpp_rel in (
+                os.path.join("solutions", f"{effective_name}{exe_ext}"),
+                f"{effective_name}{exe_ext}",
+                stem_rel,
+            ):
+                resolved_bin = safe_resolve_under_root(problem_dir, cpp_rel)
+                if resolved_bin is not None and os.path.isfile(resolved_bin):
+                    return resolved_bin, "cpp"
+
+    for bin_rel in (
+        os.path.join("solutions", f"{effective_name}{exe_ext}"),
+        f"{effective_name}{exe_ext}",
+    ):
+        candidate_bin = os.path.join(problem_dir, bin_rel)
+        if os.path.exists(candidate_bin):
+            return candidate_bin, "cpp"
+
+    for py_rel in (
+        os.path.join("solutions", f"{effective_name}.py"),
+        f"{effective_name}.py",
+    ):
+        candidate_py = os.path.join(problem_dir, py_rel)
+        if os.path.isfile(candidate_py):
+            return candidate_py, "python"
+
+    return None, "cpp"
 
 
 class SolutionBuildTool(Tool, BuildToolMixin):
@@ -99,15 +246,14 @@ class SolutionBuildTool(Tool, BuildToolMixin):
         except (ValidationError, OSError, ValueError) as exc:
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
 
-        try:
-            effective_compiler = resolve_effective_compiler(compiler, manifest)
-        except ValueError as exc:
-            return ToolResult.fail(f"invalid compiler: {exc}")
-
-        default_rel = (
-            os.path.join("solutions", f"{solution_type}.cpp")
-            if is_primary
-            else os.path.join("solutions", f"{effective_name}.cpp")
+        default_rel, matched_entry = _resolve_build_defaults(
+            problem_dir,
+            manifest,
+            solution_type,
+            effective_name,
+            name,
+            code,
+            source_path,
         )
         resolved, err = resolve_source(
             problem_dir,
@@ -119,10 +265,85 @@ class SolutionBuildTool(Tool, BuildToolMixin):
             return err
         assert resolved is not None
 
+        inferred_lang = (
+            infer_language_from_path(resolved.original_source_path)
+            if resolved.original_source_path
+            else None
+        )
+        try:
+            if inferred_lang is not None:
+                target_lang = validate_executable_solution_language(inferred_lang)
+            elif matched_entry is not None:
+                target_lang = validate_executable_solution_language(matched_entry)
+            else:
+                target_lang = "cpp"
+        except ValueError as exc:
+            return ToolResult.fail(str(exc))
+
+        if target_lang == "cpp" or compiler is not None:
+            try:
+                effective_compiler = resolve_effective_compiler(compiler, manifest)
+            except ValueError as exc:
+                return ToolResult.fail(f"invalid compiler: {exc}")
+        else:
+            effective_compiler = resolve_runtime_executable("python") or sys.executable
+
         # 确保目录存在
         os.makedirs(problem_dir, exist_ok=True)
         solutions_dir = os.path.join(problem_dir, "solutions")
         os.makedirs(solutions_dir, exist_ok=True)
+
+        if target_lang == "python":
+            canonical_path = os.path.join(solutions_dir, f"{effective_name}.py")
+            standard_source_path = (
+                os.path.join(solutions_dir, f"{solution_type}.py")
+                if is_primary
+                else canonical_path
+            )
+            binary_path = canonical_path
+            standard_binary_path = standard_source_path
+
+            try:
+                if (
+                    resolved.original_source_path is None
+                    or os.path.normcase(os.path.abspath(resolved.original_source_path))
+                    != os.path.normcase(os.path.abspath(canonical_path))
+                ):
+                    with open(canonical_path, "w", encoding="utf-8") as f:
+                        f.write(resolved.code)
+                if is_primary and os.path.normcase(canonical_path) != os.path.normcase(
+                    standard_source_path
+                ):
+                    shutil.copy2(canonical_path, standard_source_path)
+            except Exception as e:
+                return ToolResult.fail(f"Failed to save code: {str(e)}")
+
+            compile_source = resolved.original_source_path or canonical_path
+            py_result = await compile_or_prepare(compile_source, language="python")
+            if not py_result.success:
+                return ToolResult.fail(
+                    f"Compilation failed: {py_result.error}",
+                    source_path=compile_source,
+                    canonical_path=canonical_path,
+                    compile_log=py_result.stderr,
+                    compiler=effective_compiler,
+                    language="python",
+                )
+
+            binary_size = os.path.getsize(binary_path) if os.path.exists(binary_path) else 0
+            return ToolResult.ok(
+                source_path=compile_source,
+                canonical_path=canonical_path,
+                standard_source_path=standard_source_path,
+                binary_path=binary_path,
+                standard_binary_path=standard_binary_path,
+                binary_size=binary_size,
+                compile_log=py_result.stderr,
+                compiler=effective_compiler,
+                effective_name=effective_name,
+                language="python",
+                message=f"Successfully built {effective_name}",
+            )
 
         # 确定文件名（wrong/reference 绝不覆盖 sol.cpp / brute.cpp；
         # enable_sanitizers=True 隔离输出到 .autocode/san_bin/，不覆盖生产 -O2 二进制）
@@ -326,13 +547,21 @@ class SolutionRunTool(Tool, RunToolMixin):
         except (ValidationError, OSError, ValueError) as exc:
             return ToolResult.fail(f"invalid or unreadable manifest.json: {exc}")
 
-        binary_path = os.path.join(problem_dir, "solutions", f"{effective_name}{exe_ext}")
+        try:
+            resolved_target, target_lang = _resolve_runnable_target(
+                problem_dir,
+                manifest,
+                solution_type,
+                effective_name,
+                name,
+                exe_ext,
+            )
+        except ValueError as exc:
+            return ToolResult.fail(str(exc))
 
-        # 如果子目录没有，检查根目录（向后兼容）
-        if not os.path.exists(binary_path):
-            binary_path = os.path.join(problem_dir, f"{effective_name}{exe_ext}")
+        binary_path = resolved_target or ""
 
-        if not os.path.exists(binary_path):
+        if not binary_path or not os.path.exists(binary_path):
             if (
                 manifest is not None
                 and manifest_is_communication(manifest)
@@ -343,6 +572,7 @@ class SolutionRunTool(Tool, RunToolMixin):
                 parts = resolve_participant_binaries(problem_dir, manifest, None, exe_ext)
                 if parts and all(os.path.isfile(p) for p in parts):
                     binary_path = os.path.join(problem_dir, "solutions", f"sol{exe_ext}")
+                    target_lang = "cpp"
                 else:
                     return ToolResult.fail(
                         "Participant solution binaries not found: "
@@ -352,6 +582,85 @@ class SolutionRunTool(Tool, RunToolMixin):
                 return ToolResult.fail(
                     f"Binary not found: {effective_name}. Please run solution_build first."
                 )
+
+        if target_lang == "python":
+            if manifest is not None and (
+                manifest_is_communication(manifest) or manifest_is_interactive(manifest)
+            ):
+                return ToolResult.fail(
+                    "Interactive/communication solution_run currently requires a compiled binary; "
+                    f"got Python source: {binary_path}"
+                )
+            try:
+                multiplier = resolve_time_limit_multiplier("python", manifest)
+            except ValueError as exc:
+                return ToolResult.fail(f"invalid time_limit_multipliers: {exc}")
+
+            scaled_arg_timeout = float(timeout) * multiplier
+            if (
+                solution_type == "brute"
+                or manifest is None
+                or manifest.time_limit_ms <= 0
+            ):
+                effective_timeout = scaled_arg_timeout
+            else:
+                scaled_manifest_timeout = (float(manifest.time_limit_ms) / 1000.0) * multiplier
+                effective_timeout = min(scaled_manifest_timeout, scaled_arg_timeout)
+
+            limit = get_resource_limit(problem_dir, solution_type, timeout=effective_timeout)
+            py_run_result = await run_source(
+                binary_path,
+                input_data,
+                language="python",
+                timeout=effective_timeout,
+                memory_mb=float(limit.memory_mb),
+                manifest=manifest,
+                apply_multiplier=False,
+            )
+
+            if py_run_result.memory_limit_exceeded:
+                return ToolResult.fail(
+                    f"Memory limit exceeded (MLE) after {py_run_result.time_ms}ms",
+                    stdout=py_run_result.stdout,
+                    stderr=py_run_result.stderr,
+                    time_ms=py_run_result.time_ms,
+                    memory_limit_exceeded=True,
+                    language="python",
+                    time_limit_multiplier=multiplier,
+                    effective_timeout_sec=effective_timeout,
+                )
+
+            if py_run_result.timed_out:
+                return ToolResult.fail(
+                    f"Execution timed out after {effective_timeout:g}s",
+                    stdout=py_run_result.stdout,
+                    stderr=py_run_result.stderr,
+                    time_ms=py_run_result.time_ms,
+                    language="python",
+                    time_limit_multiplier=multiplier,
+                    effective_timeout_sec=effective_timeout,
+                )
+
+            if not py_run_result.success:
+                return ToolResult.fail(
+                    f"Execution failed with return code {py_run_result.return_code}",
+                    stdout=py_run_result.stdout,
+                    stderr=py_run_result.stderr,
+                    time_ms=py_run_result.time_ms,
+                    language="python",
+                    time_limit_multiplier=multiplier,
+                    effective_timeout_sec=effective_timeout,
+                )
+
+            return ToolResult.ok(
+                stdout=py_run_result.stdout,
+                stderr=py_run_result.stderr,
+                time_ms=py_run_result.time_ms,
+                return_code=py_run_result.return_code,
+                language="python",
+                time_limit_multiplier=multiplier,
+                effective_timeout_sec=effective_timeout,
+            )
 
         if manifest is not None and manifest_is_communication(manifest):
             if solution_type in {"brute", "wrong"}:

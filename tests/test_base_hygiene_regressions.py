@@ -517,7 +517,7 @@ def test_all_example_manifests_load_cleanly_after_schema_freeze():
 
 
 def test_additive_schema_fields_and_python_language_guard():
-    """Additive Wave 1-2 fields validate cleanly, and Python runtime execution is rejected."""
+    """Additive Wave 1-2 fields validate cleanly; 'cpp' and 'python' are allowed while others fail."""
     manifest = AutoCodeManifest(
         problem_name="Schema Freeze",
         multi_test=True,
@@ -565,10 +565,12 @@ def test_additive_schema_fields_and_python_language_guard():
     assert roundtrip == manifest
 
     assert validate_executable_solution_language(manifest.solutions[0]) == "cpp"
-    with pytest.raises(ValueError, match="python"):
-        validate_executable_solution_language(manifest.solutions[1])
+    assert validate_executable_solution_language(manifest.solutions[1]) == "python"
+    assert validate_executable_solution_language("python") == "python"
     with pytest.raises(ValueError, match="Unsupported"):
         validate_executable_solution_language("rust")
+    with pytest.raises(ValueError, match="Unsupported"):
+        validate_executable_solution_language("ruby")
 
     with pytest.raises(ValidationError):
         AutoCodeManifest.model_validate({"problem_name": "Bad Bool", "scale_token_index": True})

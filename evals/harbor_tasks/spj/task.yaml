@@ -1,0 +1,52 @@
+schema_version: "1.0"
+task_id: autocode-spj-pair-sum
+name: Special Judge Problem Authoring & Audit (Testlib Checker)
+benchmark: autocode-harbor
+problem_type: spj
+reference_example: examples/checker-sample
+difficulty: medium
+timeout_sec: 360
+sandbox:
+  type: docker
+  image: autocode-eval:py312-gpp14
+  network_disabled: true
+  read_only_reference: true
+instruction: |
+  Using AutoCode MCP tools, build a verified Special Judge (`problem_type="spj"`,
+  `special_judge=true`, `stress_comparison="checker"`) problem where the contestant
+  must output any valid pair (x, y) such that x + y == n (1 <= n <= 10^9).
+  Requirements:
+  - Implement `files/checker.cpp` using `registerTestlibCmd(argc, argv)`, rejecting extra
+    tokens (`_pe`), signed-64-bit overflow, and invalid sums (`_wa`).
+  - Build `checker_build` BEFORE `stress_test_run` (since `stress_comparison="checker"`).
+  - Include `solutions/sol.cpp`, `solutions/brute.cpp` (producing a different valid pair
+    than `sol.cpp` to confirm checker acceptance of multiple valid outputs), and at least
+    one compiled wrong solution (`solutions/wrong-greedy.cpp`) killed by the checker.
+  - Validate with `validator_build` positive + negative cases (`accuracy >= 0.9`).
+required_artifacts:
+  - .autocode/manifest.json
+  - statements/README.md
+  - statements/tutorial.md
+  - solutions/sol.cpp
+  - solutions/brute.cpp
+  - solutions/wrong-greedy.cpp
+  - files/val.cpp
+  - files/gen.cpp
+  - files/checker.cpp
+  - tests/01.in
+  - tests/01.ans
+acceptance_checks:
+  autocode_audit_cmd: "uv run autocode-audit . --standalone --strict --format json"
+  expected_decision: go
+  require_compiled_wrong_kill: true
+  expected_wrong_kill_count_min: 1
+  zero_write_on_standalone_audit: true
+  check_commands:
+    - "uv run autocode-verify . --status"
+    - "uv run autocode-audit . --standalone --strict --format json"
+scoring:
+  weights:
+    audit_decision_go: 0.4
+    compiled_wrong_killed: 0.3
+    checker_multi_output_accept: 0.2
+    zero_write_standalone: 0.1

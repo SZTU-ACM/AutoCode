@@ -1,7 +1,9 @@
-"""Multi-OJ exporters (Hydro, QOJ/UOJ, Polygon) and export package verification."""
+"""Multi-OJ exporters (Hydro, QOJ/UOJ, Polygon, ICPC/Kattis, IOI CMS) and export package verification."""
 
 from __future__ import annotations
 
+from .cms import _validate_cms_export as _validate_cms_export
+from .cms import export_cms
 from .common import (
     _ALLOWED_DATA_MODES as _ALLOWED_DATA_MODES,
 )
@@ -104,6 +106,8 @@ from .common import (
 )
 from .hydro import _validate_hydro_export_config as _validate_hydro_export_config
 from .hydro import export_hydro
+from .icpc_kattis import _validate_icpc_kattis_export as _validate_icpc_kattis_export
+from .icpc_kattis import export_icpc_kattis
 from .polygon import export_polygon
 from .qoj import _validate_qoj_export_config as _validate_qoj_export_config
 from .qoj import export_qoj
@@ -112,7 +116,9 @@ from .verify import verify_exported_packages
 __all__ = [
     "ExportDataMode",
     "map_tests_to_subtasks",
+    "export_cms",
     "export_hydro",
+    "export_icpc_kattis",
     "export_qoj",
     "export_polygon",
     "verify_exported_packages",
