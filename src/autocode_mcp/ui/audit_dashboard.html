@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AutoCode Audit Dashboard</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-alt: #162033;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --good: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+  }
+  [data-theme="light"] {
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --panel-alt: #f1f5f9;
+    --border: #cbd5e1;
+    --text: #0f172a;
+    --muted: #475569;
+    --accent: #0284c7;
+    --good: #16a34a;
+    --warn: #d97706;
+    --bad: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.45;
+  }
+  .header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .header h1 { margin: 0; font-size: 1.15rem; }
+  .subtitle { font-size: 0.82rem; color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  select, button, textarea {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button.active { border-color: var(--accent); background: rgba(56,189,248,0.14); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .card-label { font-size: 0.74rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card-val { font-size: 1.15rem; font-weight: 700; margin-top: 2px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .pill.good { background: rgba(34,197,94,0.16); color: var(--good); }
+  .pill.warn { background: rgba(245,158,11,0.16); color: var(--warn); }
+  .pill.bad { background: rgba(239,68,68,0.16); color: var(--bad); }
+  .section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+  .section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .section-head h2 { margin: 0; font-size: 0.96rem; }
+  .bar-track { height: 8px; background: var(--panel-alt); border-radius: 999px; overflow: hidden; margin-top: 6px; }
+  .bar-fill { height: 100%; background: var(--good); transition: width 0.2s; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { background: var(--panel-alt); color: var(--muted); }
+  .grid-signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+  .sig-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 0.82rem; }
+  .mutant-card { background: var(--panel-alt); border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; font-size: 0.82rem; }
+  pre { margin: 6px 0 0; padding: 6px; background: var(--bg); border-radius: 4px; overflow-x: auto; font-size: 0.76rem; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; font-size: 0.84rem; color: var(--muted); }
+  textarea { width: 100%; min-height: 90px; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 0.78rem; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>AutoCode Problem Audit &amp; Kill Matrix</h1>
+      <div class="subtitle" id="sourceLabel">Standalone Demo Fallback (waiting for MCP tool-result)</div>
+    </div>
+    <div class="controls">
+      <select id="presetSelect" aria-label="Demo preset">
+        <option value="nogo">Demo: NO_GO (Surviving Mutant &amp; Wrong Sol)</option>
+        <option value="go">Demo: GO (All Wrong Solutions &amp; Mutants Killed)</option>
+      </select>
+      <button id="themeBtn" type="button">Light/Dark</button>
+    </div>
+  </div>
+
+  <div class="kpis" id="kpiCards"></div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Wrong-Solution Kill Ratio Matrix</h2>
+      <div class="controls" id="killFilters">
+        <button type="button" data-filter="all" class="active">All</button>
+        <button type="button" data-filter="survived">Survived</button>
+        <button type="button" data-filter="killed">Killed</button>
+        <button type="button" data-filter="mismatch">Verdict Mismatch</button>
+      </div>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="killBar" style="width:0%"></div></div>
+    <div style="overflow-x:auto; margin-top:10px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Solution</th>
+            <th>Expected</th>
+            <th>Actual</th>
+            <th>Status</th>
+            <th>Max Time (ms)</th>
+            <th>Ratio vs Std</th>
+            <th>Killed By / Evidence</th>
+          </tr>
+        </thead>
+        <tbody id="killMatrixBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Surviving Mutants Viewer</h2>
+      <span id="mutantSummary" class="pill warn">-</span>
+    </div>
+    <div id="mutantsContainer"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Quality &amp; Structural Signals Board</h2>
+      <span id="blockersSummary" class="pill good">0 blockers</span>
+    </div>
+    <div id="blockersList" style="margin-bottom:10px;"></div>
+    <div class="grid-signals" id="signalsGrid"></div>
+  </div>
+
+  <details>
+    <summary>Load Custom JSON (problem_audit / problem_verify_tests)</summary>
+    <textarea id="jsonInput" placeholder='Paste JSON from problem_audit or problem_verify_tests...'></textarea>
+    <button id="loadJsonBtn" type="button" style="margin-top:6px;">Render JSON</button>
+  </details>
+
+<script>
+(function() {
+  const DEMOS = {
+    nogo: {
+      decision: "no_go",
+      mode: "full",
+      standalone: true,
+      detected_layout: "autocode",
+      blocking_issues: [
+        { gate: "wrong_solution_kill", reason: "wrong_greedy.cpp survived all 24 tests" },
+        { gate: "mutation_testing", reason: "1 surviving mutant in off-by-one boundary condition" }
+      ],
+      risk_report: {
+        warnings: ["Host CPU is fast: wrong_n2.cpp completed in 420ms (TL=2000ms)"]
+      },
+      structural_signals: {
+        manifest: { passed: true, message: "manifest.json parsed" },
+        statement_path: { passed: true, path: "statements/README.md" },
+        main_solution_source: { passed: true, path: "solutions/sol.cpp" },
+        tests_present: { passed: true, total: 24 }
+      },
+      quality_signals: {
+        validator_check: { executed: true, passed: true, message: "24/24 tests valid" },
+        limit_semantics: { executed: true, passed: true, message: "limit ratio 0.54 >= 0.50" },
+        wrong_solution_kill: {
+          executed: true,
+          passed: false,
+          evidence: {
+            details: [
+              { name: "wrong_overflow.cpp", expected_verdict: "WA", actual_verdict: "WA", killed: true, max_time_ms: 12.4, max_ratio_to_std: 1.1, killed_by: "07.in (WA)" },
+              { name: "wrong_n2.cpp", expected_verdict: "TLE", actual_verdict: "TLE", killed: true, max_time_ms: 2050.0, max_ratio_to_std: 45.2, killed_by: "19.in (TLE)" },
+              { name: "wrong_greedy.cpp", expected_verdict: "WA", actual_verdict: "AC", killed: false, max_time_ms: 14.1, max_ratio_to_std: 1.05, killed_by: null }
+            ]
+          }
+        },
+        mutation_testing: {
+          executed: true,
+          passed: false,
+          evidence: {
+            total: 5,
+            killed: 4,
+            kill_rate: 0.8,
+            surviving_mutants: [
+              { id: "mut_3", operator: "REL_OP", line: 42, original: "if (dist[v] <= d + w)", mutated: "if (dist[v] < d + w)", reason: "No equal-weight alternate path test case" }
+            ]
+          }
+        }
+      }
+    },
+    go: {
+      decision: "go",
+      mode: "full",
+      standalone: true,
+      detected_layout: "polygon",
+      blocking_issues: [],
+      risk_report: { warnings: [] },
+      structural_signals: {
+        manifest: { passed: true, message: "inferred polygon layout" },
+        tests_present: { passed: true, total: 36 }
+      },
+      quality_signals: {
+        validator_check: { executed: true, passed: true, message: "36/36 tests valid" },
+        limit_semantics: { executed: true, passed: true, message: "limit ratio 0.61" },
+        wrong_solution_kill: {
+          executed: true,
+          passed: true,
+          evidence: {
+            details: [
+              { name: "wrong_overflow.cpp", expected_verdict: "WA", actual_verdict: "WA", killed: true, max_time_ms: 11.2, max_ratio_to_std: 1.0, killed_by: "04.in (WA)" },
+              { name: "wrong_n2.cpp", expected_verdict: "TLE", actual_verdict: "TLE", killed: true, max_time_ms: 2100.0, max_ratio_to_std: 51.4, killed_by: "32.in (TLE)" }
+            ]
+          }
+        },
+        mutation_testing: {
+          executed: true,
+          passed: true,
+          evidence: { total: 6, killed: 6, kill_rate: 1.0, surviving_mutants: [] }
+        }
+      }
+    }
+  };
+
+  let currentData = DEMOS.nogo;
+  let activeFilter = "all";
+
+  function el(tag, attrs, text) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    }
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function normalizeAudit(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    if (raw.data && typeof raw.data === "object") raw = raw.data;
+    if (raw.quality_signals || raw.structural_signals || raw.results || raw.decision) return raw;
+    return null;
+  }
+
+  function extractKillDetails(d) {
+    const q = d.quality_signals || {};
+    const r = d.results || {};
+    const wsk = (q.wrong_solution_kill && q.wrong_solution_kill.evidence) || q.wrong_solution_kill || r.wrong_solution_kill || {};
+    if (Array.isArray(wsk.details)) return wsk.details;
+    if (Array.isArray(d.mutant_results)) return d.mutant_results;
+    return [];
+  }
+
+  function extractMutationInfo(d) {
+    const q = d.quality_signals || {};
+    const r = d.results || {};
+    const mut = q.mutation_testing || r.mutation_testing || {};
+    const ev = (mut.evidence && typeof mut.evidence === "object") ? mut.evidence : mut;
+    const survivors = Array.isArray(ev.surviving_mutants)
+      ? ev.surviving_mutants
+      : (Array.isArray(ev.survivors) ? ev.survivors : []);
+    const total = Number(ev.total ?? ev.total_mutants ?? survivors.length ?? 0);
+    const killed = Number(ev.killed ?? ev.killed_mutants ?? Math.max(0, total - survivors.length));
+    const rate = ev.kill_rate != null ? Number(ev.kill_rate) : (total > 0 ? killed / total : 1.0);
+    return { total, killed, rate, survivors, executed: mut.executed !== false && (total > 0 || survivors.length > 0) };
+  }
+
+  function render() {
+    const d = currentData || {};
+    const details = extractKillDetails(d);
+    const killedCount = details.filter(x => Boolean(x.killed)).length;
+    const totalWrong = details.length;
+    const killPct = totalWrong > 0 ? Math.round((killedCount / totalWrong) * 100) : 0;
+    const mutInfo = extractMutationInfo(d);
+    const blockers = Array.isArray(d.blocking_issues) ? d.blocking_issues : [];
+    const decision = String(d.decision || (d.passed === false ? "no_go" : (blockers.length ? "no_go" : "go")));
+
+    const kpi = document.getElementById("kpiCards");
+    kpi.replaceChildren();
+    const cards = [
+      ["Decision", decision.toUpperCase(), decision === "go" ? "good" : "bad"],
+      ["Wrong Kill Ratio", `${killedCount}/${totalWrong} (${killPct}%)`, totalWrong && killedCount === totalWrong ? "good" : (totalWrong ? "bad" : "warn")],
+      ["Mutant Kill Rate", mutInfo.executed ? `${mutInfo.killed}/${mutInfo.total} (${Math.round(mutInfo.rate * 100)}%)` : "N/A", mutInfo.survivors.length === 0 ? "good" : "warn"],
+      ["Mode / Layout", `${d.mode || "verify"} / ${d.detected_layout || "autocode"}`, null],
+      ["Blocking Issues", String(blockers.length), blockers.length === 0 ? "good" : "bad"]
+    ];
+    for (const [label, val, pillCls] of cards) {
+      const c = el("div", { class: "card" });
+      c.appendChild(el("div", { class: "card-label" }, label));
+      const v = el("div", { class: "card-val" });
+      if (pillCls) v.appendChild(el("span", { class: `pill ${pillCls}` }, val));
+      else v.textContent = val;
+      c.appendChild(v);
+      kpi.appendChild(c);
+    }
+
+    document.getElementById("killBar").style.width = `${killPct}%`;
+    document.getElementById("killBar").style.background = killPct === 100 ? "var(--good)" : "var(--warn)";
+
+    const tbody = document.getElementById("killMatrixBody");
+    tbody.replaceChildren();
+    const filtered = details.filter(item => {
+      const isKilled = Boolean(item.killed);
+      const mismatch = item.expected_verdict && item.actual_verdict && item.expected_verdict !== item.actual_verdict;
+      if (activeFilter === "killed") return isKilled;
+      if (activeFilter === "survived") return !isKilled;
+      if (activeFilter === "mismatch") return Boolean(mismatch);
+      return true;
+    });
+    if (filtered.length === 0) {
+      const tr = el("tr");
+      const td = el("td", { colspan: 7 }, "No wrong-solution entries matching filter.");
+      td.style.color = "var(--muted)";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    } else {
+      for (const item of filtered) {
+        const tr = el("tr");
+        const isKilled = Boolean(item.killed);
+        tr.appendChild(el("td", null, item.name || item.path || "unknown"));
+        tr.appendChild(el("td", null, item.expected_verdict || item.expected || "-"));
+        tr.appendChild(el("td", null, item.actual_verdict || item.verdict || "-"));
+        const stTd = el("td");
+        stTd.appendChild(el("span", { class: `pill ${isKilled ? "good" : "bad"}` }, isKilled ? "KILLED" : "SURVIVED"));
+        tr.appendChild(stTd);
+        tr.appendChild(el("td", null, item.max_time_ms != null ? Number(item.max_time_ms).toFixed(1) : "-"));
+        tr.appendChild(el("td", null, item.max_ratio_to_std != null ? `${Number(item.max_ratio_to_std).toFixed(2)}x` : "-"));
+        tr.appendChild(el("td", null, item.killed_by || item.detail || (isKilled ? "killed" : "survived all tests")));
+        tbody.appendChild(tr);
+      }
+    }
+
+    const mutSummary = document.getElementById("mutantSummary");
+    mutSummary.textContent = `${mutInfo.survivors.length} surviving`;
+    mutSummary.className = `pill ${mutInfo.survivors.length === 0 ? "good" : "warn"}`;
+    const mutBox = document.getElementById("mutantsContainer");
+    mutBox.replaceChildren();
+    if (mutInfo.survivors.length === 0) {
+      mutBox.appendChild(el("div", { style: "color: var(--muted); font-size: 0.85rem;" }, mutInfo.executed ? "All generated mutants were killed by the test suite." : "No mutation testing survivors reported."));
+    } else {
+      for (const m of mutInfo.survivors) {
+        const mc = el("div", { class: "mutant-card" });
+        const head = el("strong", null, `${m.id || "mutant"} (${m.operator || "MUT"} @ line ${m.line ?? "?"})`);
+        mc.appendChild(head);
+        if (m.reason) mc.appendChild(el("div", { style: "margin-top:4px; color: var(--muted);" }, m.reason));
+        if (m.original || m.mutated) {
+          mc.appendChild(el("pre", null, `- ${m.original || ""}\n+ ${m.mutated || ""}`));
+        }
+        mutBox.appendChild(mc);
+      }
+    }
+
+    const bSum = document.getElementById("blockersSummary");
+    bSum.textContent = `${blockers.length} blocker(s)`;
+    bSum.className = `pill ${blockers.length === 0 ? "good" : "bad"}`;
+    const bList = document.getElementById("blockersList");
+    bList.replaceChildren();
+    for (const b of blockers) {
+      const msg = typeof b === "string" ? b : `[${b.gate || "gate"}] ${b.reason || b.message || JSON.stringify(b)}`;
+      bList.appendChild(el("div", { class: "mutant-card", style: "border-left-color: var(--bad);" }, msg));
+    }
+
+    const sigGrid = document.getElementById("signalsGrid");
+    sigGrid.replaceChildren();
+    const allSignals = [
+      ...Object.entries(d.quality_signals || {}).map(([k, v]) => ["quality", k, v]),
+      ...Object.entries(d.structural_signals || {}).map(([k, v]) => ["structural", k, v])
+    ];
+    for (const [group, name, val] of allSignals) {
+      const passed = val && typeof val === "object" ? Boolean(val.passed) : Boolean(val);
+      const sc = el("div", { class: "sig-card" });
+      const top = el("div", { style: "display:flex; justify-content:space-between; align-items:center; gap:6px;" });
+      top.appendChild(el("strong", null, name));
+      top.appendChild(el("span", { class: `pill ${passed ? "good" : "bad"}` }, passed ? "PASS" : "FAIL"));
+      sc.appendChild(top);
+      const detailText = val && typeof val === "object"
+        ? (val.message || val.path || (val.total != null ? `total=${val.total}` : group))
+        : group;
+      sc.appendChild(el("div", { style: "margin-top:4px; color:var(--muted);" }, detailText));
+      sigGrid.appendChild(sc);
+    }
+  }
+
+  function applyPayload(raw, label) {
+    const parsed = normalizeAudit(raw);
+    if (parsed) {
+      currentData = parsed;
+      document.getElementById("sourceLabel").textContent = label || "Live MCP Tool Result";
+      render();
+    }
+  }
+
+  document.getElementById("killFilters").addEventListener("click", (e) => {
+    if (e.target.tagName !== "BUTTON") return;
+    activeFilter = e.target.getAttribute("data-filter") || "all";
+    document.querySelectorAll("#killFilters button").forEach(b => b.classList.toggle("active", b === e.target));
+    render();
+  });
+  document.getElementById("presetSelect").addEventListener("change", (e) => {
+    currentData = DEMOS[e.target.value] || DEMOS.nogo;
+    document.getElementById("sourceLabel").textContent = "Standalone Demo Fallback";
+    render();
+  });
+  document.getElementById("themeBtn").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute("data-theme", cur === "light" ? "dark" : "light");
+  });
+  document.getElementById("loadJsonBtn").addEventListener("click", () => {
+    try {
+      applyPayload(JSON.parse(document.getElementById("jsonInput").value), "Custom JSON Input");
+    } catch (err) {
+      alert("Invalid JSON: " + err.message);
+    }
+  });
+
+  window.addEventListener("message", (event) => {
+    const msg = event.data;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.method === "ui/notifications/tool-result" && msg.params) {
+      const p = msg.params;
+      if (p.structuredContent) return applyPayload(p.structuredContent, "MCP Tool Result");
+      if (Array.isArray(p.content) && p.content[0] && typeof p.content[0].text === "string") {
+        try { applyPayload(JSON.parse(p.content[0].text), "MCP Tool Result"); } catch (_) {}
+      }
+      return;
+    }
+    if (msg.result && msg.result.hostContext && msg.result.hostContext.theme) {
+      document.documentElement.setAttribute("data-theme", msg.result.hostContext.theme);
+    }
+    if (msg.type === "autocode:data" && msg.payload) {
+      applyPayload(msg.payload, "Embedded Bridge Payload");
+    } else if (msg.quality_signals || msg.structural_signals || msg.decision || msg.data) {
+      applyPayload(msg, "Embedded Bridge Payload");
+    }
+  });
+
+  if (window.parent && window.parent !== window) {
+    try {
+      window.parent.postMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "ui/initialize",
+        params: { appInfo: { name: "autocode-audit-dashboard", version: "1.0.0" }, appCapabilities: {}, protocolVersion: "2026-01-26" }
+      }, "*");
+      window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*");
+    } catch (_) {}
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

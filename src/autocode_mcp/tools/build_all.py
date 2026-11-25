@@ -13,9 +13,17 @@ from pydantic import ValidationError
 
 from .. import TEMPLATES_DIR
 from ..utils.communication_runner import is_safe_stem, safe_resolve_under_root
-from ..utils.compiler import BuildSpec, compile_all, resolve_effective_compiler
+from ..utils.compiler import (
+    BuildSpec,
+    CompileResult,
+    compile_all,
+    resolve_effective_compiler,
+    run_batch,
+)
+from ..utils.lang_runner import compile_or_prepare, infer_language_from_path
 from ..utils.platform import get_exe_extension
 from ..workflow import load_manifest, manifest_is_communication
+from ..workflow.models import validate_executable_solution_language
 from .base import Tool, ToolResult, input_schema_from_model
 from .mixins import BuildToolMixin
 from .schemas import ProblemBuildAllInput
@@ -26,6 +34,10 @@ _STANDARD_SOURCES = (
     ("files/val.cpp", "files"),
     ("solutions/sol.cpp", "solutions"),
     ("solutions/brute.cpp", "solutions"),
+)
+_STANDARD_PYTHON_SOURCES = (
+    "solutions/sol.py",
+    "solutions/brute.py",
 )
 _OPTIONAL_SOURCES = (
     ("files/checker.cpp", "files"),
@@ -142,20 +154,37 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                     candidate_sources.append((part_rel, "solutions", True))
                     seen_rels.add(part_rel)
 
+        python_candidates: list[str] = []
+        seen_py_rels: set[str] = set()
+        for py_rel in _STANDARD_PYTHON_SOURCES:
+            norm_py = _norm_rel(py_rel)
+            if norm_py not in seen_py_rels:
+                python_candidates.append(norm_py)
+                seen_py_rels.add(norm_py)
+
         if manifest is not None:
             for sol_entry in manifest.solutions:
-                if sol_entry.language != "cpp":
-                    continue
+                try:
+                    sol_lang = validate_executable_solution_language(sol_entry)
+                except ValueError as exc:
+                    return ToolResult.fail(f"invalid manifest solution language: {exc}")
                 sol_rel = _norm_rel(sol_entry.path)
                 if safe_resolve_under_root(problem_dir, sol_rel) is None:
                     return ToolResult.fail(
                         f"manifest solution path escapes problem_dir: {sol_entry.path}"
                     )
+                inferred_lang = infer_language_from_path(sol_rel)
+                if sol_lang == "python" or inferred_lang == "python":
+                    if sol_rel not in seen_py_rels:
+                        python_candidates.append(sol_rel)
+                        seen_py_rels.add(sol_rel)
+                    continue
                 if sol_rel not in seen_rels and sol_rel.endswith(".cpp"):
                     candidate_sources.append((sol_rel, os.path.dirname(sol_rel) or "solutions", True))
                     seen_rels.add(sol_rel)
 
         specs: list[BuildSpec] = []
+        python_targets: list[tuple[str, str]] = []
         discovered: list[str] = []
         for rel, inc, is_solution in candidate_sources:
             src_path = safe_resolve_under_root(problem_dir, rel)
@@ -179,7 +208,15 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                 )
                 discovered.append(rel)
 
-        if not specs:
+        for py_rel in python_candidates:
+            py_abs = safe_resolve_under_root(problem_dir, py_rel)
+            if py_abs is None:
+                return ToolResult.fail(f"source path escapes problem_dir: {py_rel}")
+            if os.path.isfile(py_abs):
+                python_targets.append((py_rel, py_abs))
+                discovered.append(py_rel)
+
+        if not specs and not python_targets:
             return ToolResult.fail(
                 "No compilable sources found (gen/val/sol/brute/checker/interactor/communicator)",
                 discovered=[],
@@ -197,7 +234,19 @@ class ProblemBuildAllTool(Tool, BuildToolMixin):
                 except OSError:
                     pass
 
-        results = await compile_all(problem_dir, specs, max_concurrent=max(1, max_concurrent))
+        concurrency = max(1, max_concurrent)
+        results: dict[str, CompileResult] = {}
+        if specs:
+            results.update(await compile_all(problem_dir, specs, max_concurrent=concurrency))
+        if python_targets:
+            async def _check_py(item: tuple[str, str]) -> tuple[str, CompileResult]:
+                rel_path, abs_path = item
+                res = await compile_or_prepare(abs_path, language="python")
+                return rel_path, res
+
+            py_checked = await run_batch(python_targets, _check_py, limit=concurrency)
+            for rel_path, res in py_checked:
+                results[rel_path] = res
 
         compiled: dict[str, str | None] = {}
         failures: dict[str, str] = {}

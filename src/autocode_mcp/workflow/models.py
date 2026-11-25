@@ -128,22 +128,16 @@ class SolutionEntry(BaseModel):
         return str(res)
 
 
-def validate_executable_solution_language(entry: SolutionEntry | str) -> Literal["cpp"]:
-    """Validate that a solution entry targets a currently executable runtime language.
-
-    Manifest deserialization permits ``language="python"`` for forward schema
-    compatibility, while current execution paths only support C++ until Wave 2
-    Python runner support is implemented.
-    """
+def validate_executable_solution_language(entry: SolutionEntry | str) -> Literal["cpp", "python"]:
+    """Validate that a solution entry targets a supported executable runtime language."""
     lang = entry.language if isinstance(entry, SolutionEntry) else str(entry).strip().lower()
     if lang == "cpp":
         return "cpp"
     if lang == "python":
-        raise ValueError(
-            "Solution execution for language='python' is not yet supported "
-            "(supported executable languages: 'cpp'); Python execution will be enabled in Wave 2 (T2E)."
-        )
-    raise ValueError(f"Unsupported executable solution language: {lang!r} (supported: 'cpp')")
+        return "python"
+    raise ValueError(
+        f"Unsupported executable solution language: {lang!r} (supported: 'cpp', 'python')"
+    )
 
 
 class ProtocolConfig(BaseModel):

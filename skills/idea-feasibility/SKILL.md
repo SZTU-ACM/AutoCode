@@ -52,3 +52,7 @@ Return `decision=no_go` if any of the following is true:
 - reproducible generation/verification cannot be defined;
 - interactive or communication protocol rules are incomplete;
 - local originality check detects an unaddressed near-duplicate against the reference corpus.
+
+## Additional Resources
+
+- Orchid 4D probe examples, Anti-Semantic-Collapse walkthrough, and `OriginalityIndex` / `constraints.h` usage: [references/orchid-and-originality.md](references/orchid-and-originality.md)

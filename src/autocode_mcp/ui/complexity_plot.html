@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AutoCode Complexity Plot</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-alt: #162033;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --good: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --fit: #a78bfa;
+  }
+  [data-theme="light"] {
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --panel-alt: #f1f5f9;
+    --border: #cbd5e1;
+    --text: #0f172a;
+    --muted: #475569;
+    --accent: #0284c7;
+    --good: #16a34a;
+    --warn: #d97706;
+    --bad: #dc2626;
+    --fit: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.45;
+  }
+  .header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .title-wrap h1 { margin: 0; font-size: 1.15rem; font-weight: 700; }
+  .subtitle { font-size: 0.82rem; color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  select, button, textarea {
+    font: inherit;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .card-label { font-size: 0.74rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card-val { font-size: 1.12rem; font-weight: 700; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .badge.good { background: rgba(34,197,94,0.16); color: var(--good); }
+  .badge.warn { background: rgba(245,158,11,0.16); color: var(--warn); }
+  .badge.bad { background: rgba(239,68,68,0.16); color: var(--bad); }
+  .note {
+    background: var(--panel-alt);
+    border-left: 3px solid var(--warn);
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    margin-bottom: 14px;
+  }
+  .note.ok { border-left-color: var(--good); }
+  .note.bad { border-left-color: var(--bad); }
+  .plot-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 14px;
+    position: relative;
+  }
+  .plot-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .plot-toolbar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  svg { width: 100%; height: auto; display: block; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    display: none;
+    z-index: 10;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 0.84rem;
+  }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: var(--panel-alt); color: var(--muted); font-weight: 600; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; font-size: 0.84rem; color: var(--muted); }
+  textarea { width: 100%; min-height: 90px; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 0.78rem; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-wrap">
+      <h1>Empirical Complexity Log-Log Plot</h1>
+      <div class="subtitle" id="sourceLabel">Standalone Demo Fallback (waiting for MCP tool-result)</div>
+    </div>
+    <div class="controls">
+      <select id="presetSelect" aria-label="Demo preset">
+        <option value="nlogn">Demo: O(N log N) Verified</option>
+        <option value="cache_jump">Demo: Cache-Jump Transition</option>
+        <option value="mismatch">Demo: O(N^2) TLE Mismatch</option>
+      </select>
+      <button id="themeBtn" type="button">Light/Dark</button>
+    </div>
+  </div>
+
+  <div class="cards" id="kpiCards"></div>
+  <div class="note" id="noteBox" style="display:none;"></div>
+
+  <div class="plot-box">
+    <div class="plot-toolbar">
+      <div>
+        <strong>Metric:</strong>
+        <label><input type="radio" name="metric" value="wall" checked /> Wall Time (ms)</label>
+        <label><input type="radio" name="metric" value="cpu" /> CPU Time (ms)</label>
+      </div>
+      <div>
+        <strong>Guides:</strong>
+        <label><input type="checkbox" id="showFit" checked /> Fitted OLS</label>
+        <label><input type="checkbox" id="showGuides" checked /> Ref Slopes (1, 2)</label>
+      </div>
+    </div>
+    <svg id="plotSvg" viewBox="0 0 760 360" role="img" aria-label="Log N vs Log T complexity chart"></svg>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Scale N</th>
+        <th>Wall (ms)</th>
+        <th>CPU (ms)</th>
+        <th>Memory (MB)</th>
+        <th>log10(N)</th>
+        <th>log10(T)</th>
+        <th>Step Slope α</th>
+      </tr>
+    </thead>
+    <tbody id="sampleRows"></tbody>
+  </table>
+
+  <details>
+    <summary>Load Custom JSON (ToolResult / empirical_verification)</summary>
+    <textarea id="jsonInput" placeholder='Paste JSON from solution_analyze or solution_audit_std...'></textarea>
+    <button id="loadJsonBtn" type="button" style="margin-top:6px;">Render JSON</button>
+  </details>
+
+<script>
+(function() {
+  const DEMOS = {
+    nlogn: {
+      verdict: "verified",
+      passed: true,
+      claimed_complexity: "O(N log N)",
+      fitted_complexity: "O(N log N)",
+      fitted_alpha: 1.08,
+      r_squared: 0.996,
+      max_scale_headroom_ratio: 0.14,
+      samples: [
+        { n: 1000, time_ms: 1.2, cpu_time_ms: 1.1, memory_mb: 3.4 },
+        { n: 5000, time_ms: 6.8, cpu_time_ms: 6.5, memory_mb: 3.8 },
+        { n: 20000, time_ms: 31.4, cpu_time_ms: 30.8, memory_mb: 5.1 },
+        { n: 100000, time_ms: 182.0, cpu_time_ms: 179.4, memory_mb: 11.2 },
+        { n: 200000, time_ms: 389.0, cpu_time_ms: 385.0, memory_mb: 18.6 }
+      ]
+    },
+    cache_jump: {
+      verdict: "verified_with_cache_jump",
+      passed: true,
+      claimed_complexity: "O(N log N)",
+      fitted_complexity: "O(N log N)",
+      fitted_alpha: 1.24,
+      r_squared: 0.981,
+      max_scale_headroom_ratio: 0.24,
+      cache_jump_note: "Slight ratio jump observed at maximum scale likely due to L1/L2 cache capacity transition, well within time limit.",
+      samples: [
+        { n: 1000, time_ms: 1.0, cpu_time_ms: 0.9, memory_mb: 3.1 },
+        { n: 10000, time_ms: 11.5, cpu_time_ms: 11.1, memory_mb: 4.2 },
+        { n: 50000, time_ms: 64.0, cpu_time_ms: 63.0, memory_mb: 9.8 },
+        { n: 200000, time_ms: 468.0, cpu_time_ms: 461.0, memory_mb: 34.0 }
+      ]
+    },
+    mismatch: {
+      verdict: "ratio_mismatch",
+      passed: false,
+      claimed_complexity: "O(N log N)",
+      fitted_complexity: "O(N^2)",
+      fitted_alpha: 1.98,
+      r_squared: 0.999,
+      max_scale_headroom_ratio: 1.45,
+      failure_reason: "Measured complexity exponent alpha=1.98 (fitted as O(N^2)) outside claimed O(N log N) range [0.75, 1.35]",
+      samples: [
+        { n: 500, time_ms: 1.6, cpu_time_ms: 1.5, memory_mb: 3.0 },
+        { n: 2000, time_ms: 24.5, cpu_time_ms: 24.1, memory_mb: 3.2 },
+        { n: 8000, time_ms: 388.0, cpu_time_ms: 385.0, memory_mb: 3.5 },
+        { n: 20000, time_ms: 2410.0, cpu_time_ms: 2390.0, memory_mb: 4.1 }
+      ]
+    }
+  };
+
+  let currentData = DEMOS.nlogn;
+
+  function el(tag, attrs, text) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    }
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function svgEl(tag, attrs, text) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    }
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function extractEmpirical(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    if (raw.data && typeof raw.data === "object") raw = raw.data;
+    if (raw.empirical_verification && typeof raw.empirical_verification === "object") {
+      return raw.empirical_verification;
+    }
+    if (Array.isArray(raw.samples)) return raw;
+    return null;
+  }
+
+  function computeOLS(pts) {
+    if (pts.length < 2) return null;
+    let sx = 0, sy = 0, sxy = 0, sxx = 0;
+    for (const p of pts) {
+      sx += p.lx; sy += p.ly; sxy += p.lx * p.ly; sxx += p.lx * p.lx;
+    }
+    const n = pts.length;
+    const denom = n * sxx - sx * sx;
+    if (Math.abs(denom) < 1e-12) return null;
+    const slope = (n * sxy - sx * sy) / denom;
+    const intercept = (sy - slope * sx) / n;
+    const meanY = sy / n;
+    let ssTot = 0, ssRes = 0;
+    for (const p of pts) {
+      ssTot += (p.ly - meanY) ** 2;
+      ssRes += (p.ly - (slope * p.lx + intercept)) ** 2;
+    }
+    const r2 = ssTot > 1e-12 ? Math.max(0, 1 - ssRes / ssTot) : 1.0;
+    return { slope, intercept, r2 };
+  }
+
+  function render() {
+    const d = currentData || {};
+    const metric = document.querySelector('input[name="metric"]:checked').value;
+    const showFit = document.getElementById("showFit").checked;
+    const showGuides = document.getElementById("showGuides").checked;
+
+    const rawSamples = Array.isArray(d.samples) ? d.samples : [];
+    const pts = [];
+    for (const s of rawSamples) {
+      const n = Number(s.n);
+      const tRaw = metric === "cpu" ? (s.cpu_time_ms ?? s.time_ms) : (s.time_ms ?? s.cpu_time_ms);
+      const t = Math.max(0.01, Number(tRaw) || 0.01);
+      if (n > 0 && Number.isFinite(t)) {
+        pts.push({
+          n,
+          t,
+          wall: Number(s.time_ms ?? t),
+          cpu: Number(s.cpu_time_ms ?? t),
+          mem: s.memory_mb != null ? Number(s.memory_mb) : null,
+          lx: Math.log10(n),
+          ly: Math.log10(t)
+        });
+      }
+    }
+    pts.sort((a, b) => a.n - b.n);
+    const ols = computeOLS(pts);
+
+    const kpi = document.getElementById("kpiCards");
+    kpi.replaceChildren();
+    const verdict = String(d.verdict || (d.passed ? "verified" : "unknown"));
+    const badgeCls = verdict === "ratio_mismatch" || d.passed === false
+      ? "bad"
+      : (verdict === "verified_with_cache_jump" ? "warn" : "good");
+
+    const cards = [
+      ["Verdict", verdict, badgeCls],
+      ["Claimed", d.claimed_complexity || "-", null],
+      ["Fitted", d.fitted_complexity || "-", null],
+      ["Slope α", d.fitted_alpha != null ? Number(d.fitted_alpha).toFixed(2) : (ols ? ols.slope.toFixed(2) : "-"), null],
+      ["R²", d.r_squared != null ? Number(d.r_squared).toFixed(3) : (ols ? ols.r2.toFixed(3) : "-"), null],
+      ["Peak Headroom", d.max_scale_headroom_ratio != null ? `${(Number(d.max_scale_headroom_ratio)*100).toFixed(1)}%` : "-", null]
+    ];
+    for (const [label, val, bCls] of cards) {
+      const card = el("div", { class: "card" });
+      card.appendChild(el("div", { class: "card-label" }, label));
+      const vNode = el("div", { class: "card-val" });
+      if (bCls) {
+        vNode.appendChild(el("span", { class: `badge ${bCls}` }, val));
+      } else {
+        vNode.textContent = String(val);
+      }
+      card.appendChild(vNode);
+      kpi.appendChild(card);
+    }
+
+    const noteBox = document.getElementById("noteBox");
+    const noteText = d.cache_jump_note || d.failure_reason || d.noise_floor_note || "";
+    if (noteText) {
+      noteBox.style.display = "block";
+      noteBox.className = "note " + (d.passed === false ? "bad" : (d.cache_jump_note ? "" : "ok"));
+      noteBox.textContent = noteText;
+    } else {
+      noteBox.style.display = "none";
+    }
+
+    const svg = document.getElementById("plotSvg");
+    svg.replaceChildren();
+    const W = 760, H = 360, padL = 68, padR = 24, padT = 20, padB = 46;
+    const pw = W - padL - padR, ph = H - padT - padB;
+
+    if (pts.length === 0) {
+      svg.appendChild(svgEl("text", { x: W / 2, y: H / 2, fill: "#94a3b8", "text-anchor": "middle" }, "No empirical scale samples available."));
+      document.getElementById("sampleRows").replaceChildren();
+      return;
+    }
+
+    let minX = Math.min(...pts.map(p => p.lx));
+    let maxX = Math.max(...pts.map(p => p.lx));
+    let minY = Math.min(...pts.map(p => p.ly));
+    let maxY = Math.max(...pts.map(p => p.ly));
+    if (maxX - minX < 0.5) { minX -= 0.5; maxX += 0.5; }
+    if (maxY - minY < 0.5) { minY -= 0.5; maxY += 0.5; }
+    minX = Math.floor(minX * 2) / 2;
+    maxX = Math.ceil(maxX * 2) / 2;
+    minY = Math.floor(minY * 2) / 2;
+    maxY = Math.ceil(maxY * 2) / 2;
+
+    const sx = (lx) => padL + ((lx - minX) / (maxX - minX)) * pw;
+    const sy = (ly) => padT + ph - ((ly - minY) / (maxY - minY)) * ph;
+
+    // Gridlines
+    for (let x = Math.ceil(minX); x <= Math.floor(maxX); x += 1) {
+      const px = sx(x);
+      svg.appendChild(svgEl("line", { x1: px, y1: padT, x2: px, y2: padT + ph, stroke: "#334155", "stroke-dasharray": "3 3", "stroke-width": 1 }));
+      svg.appendChild(svgEl("text", { x: px, y: padT + ph + 18, fill: "#94a3b8", "font-size": 11, "text-anchor": "middle" }, `10^${x}`));
+    }
+    for (let y = Math.ceil(minY); y <= Math.floor(maxY); y += 1) {
+      const py = sy(y);
+      svg.appendChild(svgEl("line", { x1: padL, y1: py, x2: padL + pw, y2: py, stroke: "#334155", "stroke-dasharray": "3 3", "stroke-width": 1 }));
+      svg.appendChild(svgEl("text", { x: padL - 8, y: py + 4, fill: "#94a3b8", "font-size": 11, "text-anchor": "end" }, `${Math.pow(10, y).toPrecision(2)}`));
+    }
+    // Axes
+    svg.appendChild(svgEl("line", { x1: padL, y1: padT, x2: padL, y2: padT + ph, stroke: "#64748b", "stroke-width": 1.5 }));
+    svg.appendChild(svgEl("line", { x1: padL, y1: padT + ph, x2: padL + pw, y2: padT + ph, stroke: "#64748b", "stroke-width": 1.5 }));
+    svg.appendChild(svgEl("text", { x: padL + pw / 2, y: H - 8, fill: "#94a3b8", "font-size": 12, "text-anchor": "middle" }, "Input Scale N (log10)"));
+    svg.appendChild(svgEl("text", { x: 16, y: padT + ph / 2, fill: "#94a3b8", "font-size": 12, "text-anchor": "middle", transform: `rotate(-90 16 ${padT + ph / 2})` }, "Time ms (log10)"));
+
+    // Reference slopes anchored at first point
+    if (showGuides && pts.length >= 1) {
+      const anchor = pts[0];
+      for (const [slopeVal, label, color] of [[1.0, "O(N)", "#22c55e"], [2.0, "O(N^2)", "#f59e0b"]]) {
+        const y1 = anchor.ly + slopeVal * (minX - anchor.lx);
+        const y2 = anchor.ly + slopeVal * (maxX - anchor.lx);
+        svg.appendChild(svgEl("line", {
+          x1: sx(minX), y1: sy(y1), x2: sx(maxX), y2: sy(y2),
+          stroke: color, "stroke-width": 1.2, "stroke-dasharray": "5 4", opacity: 0.65
+        }));
+        const labelX = maxX - 0.15;
+        const labelY = Math.min(maxY - 0.1, Math.max(minY + 0.1, anchor.ly + slopeVal * (labelX - anchor.lx)));
+        svg.appendChild(svgEl("text", { x: sx(labelX) - 6, y: sy(labelY) - 6, fill: color, "font-size": 11, "text-anchor": "end" }, label));
+      }
+    }
+
+    // Fitted OLS line
+    if (showFit && ols) {
+      svg.appendChild(svgEl("line", {
+        x1: sx(minX), y1: sy(ols.slope * minX + ols.intercept),
+        x2: sx(maxX), y2: sy(ols.slope * maxX + ols.intercept),
+        stroke: "#a78bfa", "stroke-width": 2, "stroke-dasharray": "6 3"
+      }));
+    }
+
+    // Observed polyline (highlight last segment if cache_jump)
+    const isCacheJump = verdict === "verified_with_cache_jump" || Boolean(d.cache_jump_note);
+    for (let i = 1; i < pts.length; i++) {
+      const jumpSeg = isCacheJump && i === pts.length - 1;
+      svg.appendChild(svgEl("line", {
+        x1: sx(pts[i - 1].lx), y1: sy(pts[i - 1].ly),
+        x2: sx(pts[i].lx), y2: sy(pts[i].ly),
+        stroke: jumpSeg ? "#f59e0b" : "#38bdf8",
+        "stroke-width": jumpSeg ? 3 : 2.5
+      }));
+    }
+
+    const tooltip = document.getElementById("tooltip");
+    const tbody = document.getElementById("sampleRows");
+    tbody.replaceChildren();
+
+    pts.forEach((p, idx) => {
+      const prev = idx > 0 ? pts[idx - 1] : null;
+      const stepAlpha = prev && p.lx !== prev.lx ? ((p.ly - prev.ly) / (p.lx - prev.lx)).toFixed(2) : "-";
+      const isJumpPt = isCacheJump && idx === pts.length - 1;
+      const circle = svgEl("circle", {
+        cx: sx(p.lx), cy: sy(p.ly), r: isJumpPt ? 6.5 : 5,
+        fill: isJumpPt ? "#f59e0b" : "#38bdf8",
+        stroke: "#0f172a", "stroke-width": 1.5,
+        style: "cursor:pointer;"
+      });
+      circle.addEventListener("mouseenter", (ev) => {
+        tooltip.style.display = "block";
+        tooltip.textContent = `N=${p.n.toLocaleString()} | Wall=${p.wall.toFixed(2)}ms | CPU=${p.cpu.toFixed(2)}ms | Step α=${stepAlpha}`;
+        const rect = svg.getBoundingClientRect();
+        tooltip.style.left = Math.min(rect.width - 220, Math.max(8, ev.clientX - rect.left + 10)) + "px";
+        tooltip.style.top = Math.max(8, ev.clientY - rect.top - 28) + "px";
+      });
+      circle.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+      svg.appendChild(circle);
+
+      const tr = el("tr");
+      tr.appendChild(el("td", null, p.n.toLocaleString()));
+      tr.appendChild(el("td", null, p.wall.toFixed(2)));
+      tr.appendChild(el("td", null, p.cpu.toFixed(2)));
+      tr.appendChild(el("td", null, p.mem != null ? p.mem.toFixed(2) : "-"));
+      tr.appendChild(el("td", null, p.lx.toFixed(2)));
+      tr.appendChild(el("td", null, p.ly.toFixed(2)));
+      tr.appendChild(el("td", null, stepAlpha));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function applyPayload(raw, label) {
+    const emp = extractEmpirical(raw);
+    if (emp) {
+      currentData = emp;
+      document.getElementById("sourceLabel").textContent = label || "Live MCP Tool Result";
+      render();
+    }
+  }
+
+  document.getElementById("presetSelect").addEventListener("change", (e) => {
+    currentData = DEMOS[e.target.value] || DEMOS.nlogn;
+    document.getElementById("sourceLabel").textContent = "Standalone Demo Fallback";
+    render();
+  });
+  document.getElementById("themeBtn").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute("data-theme", cur === "light" ? "dark" : "light");
+  });
+  document.querySelectorAll('input[name="metric"], #showFit, #showGuides').forEach((n) => n.addEventListener("change", render));
+  document.getElementById("loadJsonBtn").addEventListener("click", () => {
+    try {
+      const parsed = JSON.parse(document.getElementById("jsonInput").value);
+      applyPayload(parsed, "Custom JSON Input");
+    } catch (err) {
+      alert("Invalid JSON: " + err.message);
+    }
+  });
+
+  window.addEventListener("message", (event) => {
+    const msg = event.data;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.method === "ui/notifications/tool-result" && msg.params) {
+      const p = msg.params;
+      if (p.structuredContent) return applyPayload(p.structuredContent, "MCP Tool Result");
+      if (Array.isArray(p.content) && p.content[0] && typeof p.content[0].text === "string") {
+        try { applyPayload(JSON.parse(p.content[0].text), "MCP Tool Result"); } catch (_) {}
+      }
+      return;
+    }
+    if (msg.result && msg.result.hostContext && msg.result.hostContext.theme) {
+      document.documentElement.setAttribute("data-theme", msg.result.hostContext.theme);
+    }
+    if (msg.type === "autocode:data" && msg.payload) {
+      applyPayload(msg.payload, "Embedded Bridge Payload");
+    } else if (msg.samples || msg.empirical_verification || msg.data) {
+      applyPayload(msg, "Embedded Bridge Payload");
+    }
+  });
+
+  if (window.parent && window.parent !== window) {
+    try {
+      window.parent.postMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "ui/initialize",
+        params: { appInfo: { name: "autocode-complexity-plot", version: "1.0.0" }, appCapabilities: {}, protocolVersion: "2026-01-26" }
+      }, "*");
+      window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*");
+    } catch (_) {}
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

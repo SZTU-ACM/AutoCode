@@ -1,0 +1,55 @@
+schema_version: "1.0"
+task_id: autocode-interactive-guess-number
+name: Interactive Problem Authoring & Audit (Testlib Interactor)
+benchmark: autocode-harbor
+problem_type: interactive
+protocol_mode: interactive_1v1
+reference_example: examples/interactive-sample
+difficulty: medium
+timeout_sec: 420
+sandbox:
+  type: docker
+  image: autocode-eval:py312-gpp14
+  network_disabled: true
+  read_only_reference: true
+instruction: |
+  Using AutoCode MCP tools, build a verified interactive binary-search problem
+  (`problem_type="interactive"`, `protocol.mode="interactive_1v1"`, `max_queries=20`)
+  where the contestant locates a secret integer S in [1, 100].
+  Requirements:
+  - Document the full interaction protocol in `statements/README.md` (who writes first,
+    `? x` and `! s` commands, query limit 20, flush requirement, and error verdicts) with
+    a clearly marked judge/contestant transcript sample.
+  - Implement `files/interactor.cpp` using `registerInteraction(argc, argv)`, reading
+    test data from `inf` and contestant output from `ouf`, writing prompts to the
+    contestant via `std::cout << ... << std::flush` (NEVER `tout` for contestant I/O;
+    use `tout` strictly for diagnostic logging), and terminating every branch with `quitf`.
+  - Pass scripted `interaction_scenarios` in `interactor_build` covering AC, WA,
+    malformed token (`PE`), query-limit exceedance, and premature EOF.
+  - Include a compiled wrong solution (`solutions/wrong_over_limit.cpp`) that exceeds
+    the 20-query budget and verify `wrong_solution_kill` rejects it.
+required_artifacts:
+  - .autocode/manifest.json
+  - statements/README.md
+  - statements/tutorial.md
+  - solutions/sol.cpp
+  - solutions/brute.cpp
+  - solutions/wrong_over_limit.cpp
+  - files/gen.cpp
+  - files/interactor.cpp
+  - tests/01.in
+acceptance_checks:
+  autocode_audit_cmd: "uv run autocode-audit . --standalone --strict --format json"
+  expected_decision: go
+  require_compiled_wrong_kill: true
+  expected_wrong_kill_count_min: 1
+  zero_write_on_standalone_audit: true
+  check_commands:
+    - "uv run autocode-verify . --status"
+    - "uv run autocode-audit . --standalone --strict --format json"
+scoring:
+  weights:
+    audit_decision_go: 0.35
+    compiled_wrong_killed: 0.3
+    interactor_stdout_flush_and_scenarios: 0.25
+    zero_write_standalone: 0.1

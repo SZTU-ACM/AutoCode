@@ -67,3 +67,25 @@ jobs:
             audit_report.json
             audit_report.md
           if-no-files-found: ignore
+
+      # Optional PR failure comment (disabled by default):
+      # Only enable `vars.AUTOCODE_PR_COMMENT == 'true'` on trusted setups with
+      # `pull-requests: write`; keep `on: pull_request` (NEVER `pull_request_target`)
+      # and never expose sensitive secrets to untrusted fork PRs.
+      - name: Post audit report PR comment on failure (opt-in)
+        if: ${{ failure() && github.event_name == 'pull_request' && vars.AUTOCODE_PR_COMMENT == 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            if (!fs.existsSync("audit_report.md")) return;
+            const raw = fs.readFileSync("audit_report.md", "utf8");
+            const body = raw.length > 60000
+              ? `${raw.slice(0, 60000)}\n\n...(truncated; see uploaded autocode-audit-report artifact)`
+              : raw;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

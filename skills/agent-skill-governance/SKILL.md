@@ -5,72 +5,44 @@ description: Define and enforce project-wide quality standards for agent and ski
 
 # Agent and Skill Governance
 
-This skill defines mandatory authoring standards for files under `agents/` and `skills/`.
+Mandatory authoring and review standards for `agents/*.md` and `skills/**/SKILL.md` (+ `references/*.md`).
 
-## Scope
+## Trigger Conditions
 
-- Agent definitions in `agents/*.md`
-- Skill definitions in `skills/**/SKILL.md`
+- Creating, reviewing, slimming, or refactoring any file under `agents/` or `skills/`.
 
-## Language and Terminology
+## Scope & Terminology
 
-- Use English only.
-- Keep terminology consistent across files:
-  - `decision: go|no_go`
-  - `blocking_issues`
-  - `next_actions`
-  - `validator`, `generator`, `checker`, `interactor`
-  - `limit_ratio`, `limit_semantics`, `wrong_solution_kill`
+- Use English consistently (except canonical Chinese statement headings such as `## 交互协议` or `## 通信协议`).
+- Standard terms: `decision: go|no_go`, `blocking_issues`, `next_actions`, `validator`, `generator`, `checker`, `interactor`, `limit_ratio`, `limit_semantics`, `wrong_solution_kill`.
 
 ## Required Structure
 
-### Agent files
-
-Must include:
-
-1. Role and responsibility statement.
-2. Workflow or audit scope.
-3. Mandatory output contract.
-4. Fail-fast behavior.
-5. Forbidden behavior.
-
-### Skill files
-
-Must include:
-
-1. Purpose.
-2. Trigger conditions.
-3. Step-by-step execution guidance.
-4. Required output format.
-5. Decision rules (`go` vs `no_go`).
-6. Forbidden behavior.
+1. **Agent files (`agents/*.md`)**: Role/responsibility statement, workflow or audit scope, mandatory output contract, fail-fast behavior, forbidden behavior.
+2. **Skill files (`skills/<skill>/SKILL.md`)**: YAML frontmatter (`name`, `description`), purpose, trigger conditions, step-by-step execution guidance, required output format, decision rules (`go` vs `no_go`), forbidden behavior, and progressive-disclosure links to `references/*.md` when templates or checklists are long.
 
 ## Workflow Consistency Rules
 
-- Do not define contradictory workflow steps between agents and skills.
-- Do not relax hard gates in documentation unless workflow guard and tool behavior are updated accordingly.
+- Never contradict `src/autocode_mcp/workflow/enforcement.py` gates or relax hard gates in prose without matching code changes.
 - Never infer completion from file presence when structured tool evidence is required.
+- Project-specific constraints (such as max clarifications) are allowed when explicit and non-contradictory.
 
-## Quality Bar
+## Output Format
 
-Before finalizing edits:
+- `decision`: `go` / `no_go`
+- `blocking_issues`: governance or consistency violations
+- `next_actions`: concrete edits required
 
-1. Ensure no duplicated instruction blocks.
-2. Ensure no mixed-language fragments.
-3. Ensure contract fields are spelled identically across files.
-4. Ensure each file has explicit no-go criteria.
-5. Ensure examples do not conflict with enforced gates.
+## Decision Rules
 
-## Review Checklist Template
+- `go`: structure, terminology, gate alignment, and all `references/*.md` links pass review.
+- `no_go`: missing required sections, broken links, contradictory gates, or missing `no_go` criteria.
 
-Use this checklist when updating any `agents/` or `skills/` file:
+## Forbidden Behavior
 
-- [ ] Role/scope is explicit.
-- [ ] Trigger conditions are explicit (skills).
-- [ ] Output contract is explicit.
-- [ ] Gate behavior is explicit.
-- [ ] Decision rules are explicit.
-- [ ] Forbidden behavior is explicit.
-- [ ] Terminology is consistent with project standards.
+- Do not duplicate instruction blocks across files or leave broken relative `references/` links.
+- Do not strip required safety/checklist terms (`Orchid`, `Anti-Semantic-Collapse`, `enable_sanitizers`, `std::cout`, YAML frontmatter) when slimming skills.
 
-Project-specific constraints such as maximum clarification count are allowed as long as they are explicit and non-contradictory.
+## Additional Resources
+
+- Extended quality bar and review checklist template: [references/review-checklist.md](references/review-checklist.md)

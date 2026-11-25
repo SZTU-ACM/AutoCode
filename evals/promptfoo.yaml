@@ -1,0 +1,105 @@
+description: >
+  AutoCode Multi-Host Prompt & Skill Conformance Matrix comparing Claude Code,
+  Codex, DeepSeek Harness (DSH), and Antigravity (AGY) host shells.
+
+prompts:
+  - id: claude-code
+    label: "Claude Code (CLAUDE.md + autocode-workflow)"
+    raw: |
+      You are running inside Claude Code with AutoCode MCP tools and hooks.
+      Follow `skills/autocode-workflow/SKILL.md` and `skills/statement-audit/SKILL.md`.
+      Task: {{task_prompt}}
+
+  - id: codex
+    label: "Codex (AGENTS.md + autocode-workflow)"
+    raw: |
+      You are running inside OpenAI Codex with AutoCode MCP tools (server-side gates).
+      Follow `rules/AGENTS.md` and `skills/autocode-workflow/SKILL.md`.
+      Task: {{task_prompt}}
+
+  - id: dsh
+    label: "DeepSeek Harness (DSH cordis plugin + AGENTS.md)"
+    raw: |
+      You are running inside DeepSeek Harness (DSH) with AutoCode MCP tools.
+      Follow `rules/AGENTS.md`, `skills/autocode-workflow/SKILL.md`, and `skills/statement-audit/SKILL.md`.
+      Task: {{task_prompt}}
+
+  - id: antigravity
+    label: "Antigravity (AGY native plugin + AGENTS.md)"
+    raw: |
+      You are running inside Antigravity (AGY) with AutoCode MCP tools.
+      Follow `rules/AGENTS.md` and `skills/autocode-workflow/SKILL.md`.
+      Task: {{task_prompt}}
+
+providers:
+  - id: echo
+    label: "Dry-run structural validator (override with live LLM provider IDs when running online)"
+    config:
+      response: |
+        decision: no_go
+        blocking_issues:
+          - Missing tool execution evidence in dry-run check.
+        next_actions:
+          - problem_create
+          - solution_build(solution_type="sol")
+          - validator_build(has_positive_cases=true, has_negative_cases=true)
+          - Register `registerInteraction(argc, argv)` and prompt contestant via `std::cout` + `std::flush`.
+          - Enumerate a second_interpretation under Orchid 4D before approving.
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: |
+        const lower = output.toLowerCase();
+        return lower.includes("decision") && (lower.includes("go") || lower.includes("no_go"));
+
+tests:
+  - description: "Standard problem workflow gate sequence & validator negative-case discipline"
+    vars:
+      task_prompt: >
+        Plan the exact AutoCode MCP call sequence for a standard problem (1 <= n <= 200000),
+        specify validator requirements, and output your status contract (`decision`,
+        `blocking_issues`, `next_actions`).
+    assert:
+      - type: contains
+        value: "decision"
+      - type: contains
+        value: "validator_build"
+      - type: not-contains
+        value: "<bits/stdc++.h>"
+
+  - description: "Interactive interactor protocol uses std::cout + std::flush, never tout for contestant output"
+    vars:
+      task_prompt: >
+        Design an interactive problem interactor using testlib.h (`registerInteraction`),
+        explicitly stating which stream sends prompts to the contestant and how flushes work.
+    assert:
+      - type: contains
+        value: "registerInteraction"
+      - type: contains
+        value: "std::cout"
+      - type: not-contains
+        value: "tout.flush()"
+
+  - description: "Statement audit applies Orchid 4D and Anti-Semantic-Collapse second interpretation"
+    vars:
+      task_prompt: >
+        Audit a draft graph problem statement ("Given a tree of n nodes, find the longest path")
+        using Orchid 4D and the Anti-Semantic-Collapse protocol. Report `decision`,
+        `second_interpretation`, and `blocking_issues`.
+    assert:
+      - type: contains
+        value: "second_interpretation"
+      - type: contains
+        value: "no_go"
+
+  - description: "Red-team Near-AC wrong solution requires explicit expected_verdict"
+    vars:
+      task_prompt: >
+        Propose a Near-AC wrong solution strategy for an unordered_map O(n) solution and
+        explain how `problem_verify_tests` verifies its failure mode.
+    assert:
+      - type: contains
+        value: "decision"
+      - type: not-contains
+        value: "skip wrong_solution_kill"
