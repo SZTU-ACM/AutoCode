@@ -250,6 +250,41 @@ def test_verify_complexity_linux_sub_15ms_flat_plateau_falsifies_quadratic_witho
     assert res_cold_quad["verdict"] == "ratio_mismatch"
 
 
+def test_verify_complexity_high_startup_plateau_with_vm_jitter_falsifies_quadratic_without_linear_fp() -> None:
+    """高启动平台（~14ms）带 >2ms 调度抖动时，干净 O(n^2) 仍须拦截，且线性与 O(n log n) 不误报。"""
+    ci_quad_samples = [
+        {"n": 200, "cpu_time_ms": 13.28, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 15.86, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 14.73, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 28.24, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 140.0, "status": "ok"},
+    ]
+    res_quad = EmpiricalRatioAnalyzer.verify_complexity("O(n)", ci_quad_samples, time_limit_ms=2000.0)
+    assert res_quad["passed"] is False
+    assert res_quad["verdict"] == "ratio_mismatch"
+    assert res_quad["fitted_complexity"] == "O(n^2)"
+
+    linear_samples = [
+        {"n": 200, "cpu_time_ms": 13.0, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 16.5, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 24.0, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 44.0, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 114.0, "status": "ok"},
+    ]
+    res_lin = EmpiricalRatioAnalyzer.verify_complexity("O(n)", linear_samples, time_limit_ms=2000.0)
+    assert res_lin["passed"] is True
+
+    nlogn_samples = [
+        {"n": 200, "cpu_time_ms": 14.0, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 16.0, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 16.0, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 21.0, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 40.6, "status": "ok"},
+    ]
+    res_nlogn = EmpiricalRatioAnalyzer.verify_complexity("O(n log n)", nlogn_samples, time_limit_ms=2000.0)
+    assert res_nlogn["passed"] is True
+
+
 def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> None:
     """极窄 N 跨度（<2x，如 n=[11..15]）的温和进程启动抖动应豁免，但真正指数爆炸（16x）仍必须拦截。"""
     jitter_samples = [
