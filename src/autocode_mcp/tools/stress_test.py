@@ -179,11 +179,20 @@ class StressTestRunTool(Tool):
                     },
                 )
 
+        mem_mb = (
+            float(manifest_model.memory_limit_mb)
+            if (
+                manifest_model is not None
+                and manifest_model.memory_limit_mb
+                and manifest_model.memory_limit_mb > 0
+            )
+            else 256.0
+        )
+
         if is_interactive or (is_communication and manifest_model is not None):
             tl_ms = float(
                 getattr(manifest_model, "time_limit_ms", None) or min(timeout * 1000, 5000)
             )
-            mem_mb = float(getattr(manifest_model, "memory_limit_mb", None) or 256)
             eff_tl_ms = min(tl_ms, float(timeout) * 1000.0)
 
             if is_communication and manifest_model is not None:
@@ -282,6 +291,7 @@ class StressTestRunTool(Tool):
             sol_exe,
             input_data,
             timeout=timeout,
+            memory_mb=mem_mb,
             env=san_env,
             disable_as_limit=san_disable_as,
         )
@@ -305,6 +315,7 @@ class StressTestRunTool(Tool):
             brute_exe,
             input_data,
             timeout=timeout,
+            memory_mb=mem_mb,
             env=san_env,
             disable_as_limit=san_disable_as,
         )

@@ -127,12 +127,24 @@ def test_cache_invalidation_on_content_change():
 
 
 def test_cache_directory_creation():
-    """测试缓存目录自动创建。"""
+    """测试缓存目录不在 __init__ 阶段创建，而在首次写入时懒创建。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_dir = os.path.join(tmpdir, "nested", "cache", "dir")
-        CompileCache(cache_dir)
+        src = os.path.join(tmpdir, "main.cpp")
+        bin_path = os.path.join(tmpdir, "main.bin")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("int main() { return 0; }")
+        with open(bin_path, "wb") as f:
+            f.write(b"binary")
 
+        cache = CompileCache(cache_dir)
+        assert not os.path.exists(cache_dir)
+        assert cache.get(src, "g++", "c++20", "O2") is None
+        assert not os.path.exists(cache_dir)
+
+        stored = cache.set(src, bin_path, "g++", "c++20", "O2")
         assert os.path.exists(cache_dir)
+        assert os.path.exists(stored)
 
 
 def test_cache_path_bucketing():
@@ -185,25 +197,73 @@ def test_cache_mtime_fast_path_builds_index():
 
 
 def test_compile_cache_falls_back_on_readonly_cwd(monkeypatch, tmp_path):
-    """只读默认缓存目录（如 macOS '/'）应降级到临时目录而不崩溃。"""
+    """只读默认用户级缓存目录应在懒写入时降级到临时目录而不崩溃。"""
     from pathlib import Path
+
+    monkeypatch.delenv("AUTOCODE_CACHE_DIR", raising=False)
+    xdg_ro = tmp_path / "ro_xdg"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(xdg_ro))
 
     orig_mkdir = Path.mkdir
 
     def guarded_mkdir(self, mode=0o777, parents=False, exist_ok=False):
-        if str(self) == ".cache/compile" or str(self).endswith(f".cache{os.sep}compile"):
-            raise PermissionError("read-only root")
+        if str(self).startswith(str(xdg_ro)):
+            raise PermissionError("read-only user cache")
         return orig_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
 
     monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
     cache = CompileCache()
     assert not cache._disabled
-    assert "autocode_mcp_compile_cache" in str(cache.cache_dir)
+    # 初始化阶段未写入任何目录，仍指向预期用户缓存路径
+    assert str(cache.cache_dir).startswith(str(xdg_ro))
 
     src = tmp_path / "a.cpp"
     src.write_text("int main(){return 0;}", encoding="utf-8")
     bin_file = tmp_path / "a.bin"
     bin_file.write_text("bin", encoding="utf-8")
     stored = cache.set(str(src), str(bin_file), "g++", "c++20", "-O2")
+    assert not cache._disabled
+    assert "autocode_mcp_compile_cache" in str(cache.cache_dir)
     assert os.path.exists(stored)
     assert cache.get(str(src), "g++", "c++20", "-O2") == stored
+
+
+def test_cached_compile_restore_replaces_inode(monkeypatch, tmp_path):
+    """Restoring a cached binary over an existing executable must allocate a fresh inode."""
+    import asyncio
+    import shutil
+
+    if not shutil.which("g++") or os.name == "nt":
+        return
+
+    from autocode_mcp.utils import compiler as comp_mod
+    from autocode_mcp.utils.compiler import compile_cpp, run_binary
+
+    iso_cache = CompileCache(str(tmp_path / "cache"))
+    monkeypatch.setattr(comp_mod, "_cache", iso_cache)
+
+    src = tmp_path / "prog.cpp"
+    exe = tmp_path / "prog"
+
+    # 1. Seed cache with exit-0 binary.
+    src.write_text("int main() { return 0; }\n", encoding="utf-8")
+    res1 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res1.success
+
+    # 2. Overwrite with exit-1 binary and run it (simulates previously executed inode).
+    src.write_text("int main() { return 1; }\n", encoding="utf-8")
+    res2 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res2.success
+    run2 = asyncio.run(run_binary(str(exe), ""))
+    assert run2.return_code == 1
+    old_ino = os.stat(exe).st_ino
+
+    # 3. Restore cached exit-0 binary back onto same target path -> must get fresh inode & exit 0.
+    src.write_text("int main() { return 0; }\n", encoding="utf-8")
+    res3 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res3.success
+    assert res3.stderr == "(cached)"
+    new_ino = os.stat(exe).st_ino
+    assert new_ino != old_ino
+    run3 = asyncio.run(run_binary(str(exe), ""))
+    assert run3.success and run3.return_code == 0

@@ -18,11 +18,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import IO, TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from .. import TEMPLATES_DIR
 from .cache import CompileCache
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _cache = CompileCache()
+_DEFAULT_CREATE_SUBPROCESS_EXEC = asyncio.create_subprocess_exec
 
 
 def _normalize_windows_stdin(stdin: str) -> str:
@@ -495,7 +497,7 @@ def has_bits_stdcpp_include(code: str) -> bool:
 
 
 def _find_suggested_gcc_compilers() -> list[str]:
-    """Probe common GNU g++ versioned binaries (e.g. Homebrew g++-14 on macOS)."""
+    """Probe common GNU g++ versioned binaries (e.g. Homebrew or RHEL/TencentOS gcc-toolset)."""
     candidates = ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11")
     extra_dirs = ("/opt/homebrew/bin", "/usr/local/bin")
     found: list[str] = []
@@ -511,6 +513,19 @@ def _find_suggested_gcc_compilers() -> list[str]:
         if path and path not in seen:
             seen.add(path)
             found.append(path)
+    if sys.platform.startswith("linux"):
+        for ver in (15, 14, 13, 12, 11, 10):
+            for base in ("gcc-toolset", "devtoolset"):
+                if base == "devtoolset" and ver > 12:
+                    continue
+                toolset_gpp = f"/opt/rh/{base}-{ver}/root/usr/bin/g++"
+                if (
+                    toolset_gpp not in seen
+                    and os.path.isfile(toolset_gpp)
+                    and os.access(toolset_gpp, os.X_OK)
+                ):
+                    seen.add(toolset_gpp)
+                    found.append(toolset_gpp)
     return found
 
 
@@ -690,39 +705,96 @@ def cleanup_work_dir(work_dir: str) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _compiler_has_asan_runtime(compiler_path: str) -> bool:
+    """Return True if ``compiler_path`` provides an ASan runtime library (``libasan``)."""
+    for lib_name in ("libasan.a", "libasan.so"):
+        try:
+            proc = subprocess.run(
+                [compiler_path, f"-print-file-name={lib_name}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3.0,
+                check=False,
+            )
+            if proc.returncode == 0:
+                out = (proc.stdout or "").strip()
+                if out and out != lib_name and os.path.isfile(out):
+                    return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
 @functools.lru_cache(maxsize=8)
 def _resolve_compiler(compiler: str) -> str:
-    """Resolve `g++` on macOS away from Apple Clang toward Homebrew GCC if installed.
-
-    Apple's `/usr/bin/g++` is a Clang shim lacking GNU `<bits/stdc++.h>`. When the
-    caller requests the default `"g++"` on darwin, probe `g++-15`..`g++-10` via
-    PATH and standard Homebrew prefixes and return the first working GCC binary.
-    """
-    if sys.platform != "darwin" or compiler != "g++":
+    """Resolve default ``g++`` away from Apple Clang (macOS) or pre-C++20 GCC (<10, Linux)."""
+    if compiler != "g++":
         return compiler
+    is_darwin = sys.platform == "darwin"
+    is_linux = sys.platform.startswith("linux")
+    if not (is_darwin or is_linux):
+        return compiler
+
     resolved = shutil.which(compiler) or compiler
     try:
         probe = subprocess.run(
             [resolved, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
-        banner = f"{probe.stdout}\n{probe.stderr}".lower()
-        if "clang" not in banner:
+        banner = f"{probe.stdout}\n{probe.stderr}"
+        lower_banner = banner.lower()
+        if is_darwin and "clang" not in lower_banner:
             return compiler
+        if is_linux and "clang" not in lower_banner:
+            first_line = banner.splitlines()[0] if banner.splitlines() else ""
+            ver_match = re.search(r"\b(\d+)\.\d+\.\d+\b", first_line)
+            if not ver_match or int(ver_match.group(1)) >= 10:
+                return compiler
     except (OSError, subprocess.SubprocessError):
         return compiler
 
+    linux_candidates: list[str] = []
+    seen_linux: set[str] = set()
     for candidate in ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11", "g++-10"):
         found = shutil.which(candidate)
         if found:
-            return found
-        for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
-            full_path = os.path.join(prefix, candidate)
-            if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
-                return full_path
+            if is_darwin:
+                return found
+            if found not in seen_linux:
+                seen_linux.add(found)
+                linux_candidates.append(found)
+        if is_darwin:
+            for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+                full_path = os.path.join(prefix, candidate)
+                if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+                    return full_path
+    if is_linux:
+        for ver in (15, 14, 13, 12, 11, 10):
+            for base in ("gcc-toolset", "devtoolset"):
+                if base == "devtoolset" and ver > 12:
+                    continue
+                toolset_gpp = f"/opt/rh/{base}-{ver}/root/usr/bin/g++"
+                if (
+                    toolset_gpp not in seen_linux
+                    and os.path.isfile(toolset_gpp)
+                    and os.access(toolset_gpp, os.X_OK)
+                ):
+                    seen_linux.add(toolset_gpp)
+                    linux_candidates.append(toolset_gpp)
+        if len(linux_candidates) == 1:
+            return linux_candidates[0]
+        if linux_candidates:
+            for cand in linux_candidates:
+                if _compiler_has_asan_runtime(cand):
+                    return cand
+            return linux_candidates[0]
     return compiler
 
 
@@ -832,19 +904,38 @@ async def compile_cpp(
             extra_flags=compile_extra_flags or None,
         )
         if cached_binary:
-            output_dir = os.path.dirname(binary_path)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-            shutil.copy2(cached_binary, binary_path)
+            output_dir = os.path.dirname(os.path.abspath(binary_path))
+            os.makedirs(output_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=".autocode_bin_", dir=output_dir)
+            os.close(fd)
             try:
-                os.utime(binary_path, None)
-            except OSError:
-                pass
-            if sys.platform != "win32":
+                shutil.copy2(cached_binary, tmp_path)
                 try:
-                    os.chmod(binary_path, os.stat(binary_path).st_mode | 0o111)
+                    os.utime(tmp_path, None)
                 except OSError:
                     pass
+                if sys.platform != "win32":
+                    try:
+                        os.chmod(tmp_path, os.stat(tmp_path).st_mode | 0o111)
+                    except OSError:
+                        pass
+                if sys.platform == "win32":
+                    for retry_delay in (0.02, 0.05, 0.10):
+                        try:
+                            os.replace(tmp_path, binary_path)
+                            break
+                        except PermissionError:
+                            time.sleep(retry_delay)
+                    else:
+                        os.replace(tmp_path, binary_path)
+                else:
+                    os.replace(tmp_path, binary_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             return CompileResult(
                 success=True,
                 binary_path=binary_path,
@@ -969,6 +1060,24 @@ async def compile_cpp(
         )
 
 
+_LINUX_VM_HWM_RE = re.compile(r"^VmHWM:\s*(\d+)\s*kB", re.MULTILINE)
+
+
+def _read_linux_vm_hwm_mb(pid: int) -> float | None:
+    """Read Linux kernel post-exec high-water RSS (``VmHWM``) from ``/proc/<pid>/status``."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    match = _LINUX_VM_HWM_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1)) / 1024.0
+
+
 def _clamp_rlimit_bytes(memory_bytes: int, limit_attr: str) -> int:
     """将请求的内存上限钳制到当前进程的 POSIX hard limit 以内，避免 EPERM/ValueError。"""
     if _resource is None:
@@ -1009,8 +1118,74 @@ def _set_macos_resource_limit(memory_mb: int | float) -> None:
     _set_posix_resource_limit(memory_mb)
 
 
+class _SubprocessLike(Protocol):
+    @property
+    def pid(self) -> int: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]: ...
+
+    def kill(self) -> None: ...
+
+    async def wait(self) -> int: ...
+
+
+class _PosixWait4Process:
+    """Async POSIX subprocess wrapper reaping via ``os.wait4`` for kernel ``ru_maxrss``.
+
+    Polling ``psutil.Process.memory_info().rss`` alone can miss short-lived (<10ms)
+    allocations on platforms such as macOS where ``RLIMIT_AS`` does not enforce
+    physical memory caps. Waiting via ``os.wait4`` captures exact per-child
+    kernel ``ru_maxrss`` even for sub-millisecond exits.
+    """
+
+    def __init__(self, popen: subprocess.Popen[bytes]) -> None:
+        self._popen = popen
+        self.pid: int = popen.pid
+        self.returncode: int | None = None
+        self.ru_maxrss_mb: float | None = None
+        self._reap_task: asyncio.Task[int] = asyncio.create_task(
+            asyncio.to_thread(self._reap_blocking)
+        )
+
+    def _reap_blocking(self) -> int:
+        if self.returncode is not None:
+            return self.returncode
+        if sys.platform == "win32":  # pragma: no cover
+            rc = self._popen.wait()
+            self.returncode = rc
+            return rc
+        try:
+            _, status, rusage = os.wait4(self._popen.pid, 0)
+            rc = os.waitstatus_to_exitcode(status)
+            if rusage.ru_maxrss > 0:
+                divisor = (1024.0 * 1024.0) if sys.platform == "darwin" else 1024.0
+                self.ru_maxrss_mb = rusage.ru_maxrss / divisor
+        except ChildProcessError:
+            polled = self._popen.poll()
+            rc = polled if polled is not None else -1
+        self.returncode = rc
+        self._popen.returncode = rc
+        return rc
+
+    def kill(self) -> None:
+        if self.returncode is not None:
+            raise ProcessLookupError("Process already reaped")
+        os.kill(self.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+    async def wait(self) -> int:
+        return await asyncio.shield(self._reap_task)
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+        _ = input
+        await self.wait()
+        return b"", b""
+
+
 async def _force_terminate_process(
-    process: asyncio.subprocess.Process,
+    process: _SubprocessLike,
     job: WinJobObject | None = None,
 ) -> None:
     """强制终止进程，确保不会卡住。
@@ -1055,6 +1230,75 @@ async def _force_terminate_process(
             _logger.debug("Second kill attempt failed: %s", e)
 
 
+def _classify_memory_limit_exceeded(
+    *,
+    return_code: int,
+    stderr_text: str,
+    memory_limit_mb: int | float,
+    peak_rss_mb: float | None,
+    rss_limit_exceeded: bool,
+    disable_as_limit: bool,
+) -> bool:
+    """判定进程失败是否为真实的内存超限（MLE）。
+
+    避免将低 RSS 下由外部 kill -9 / 容器拦截触发的 SIGKILL (-9 / 137) 误归因成 MLE。
+    """
+    if rss_limit_exceeded:
+        return True
+    limit_mb = max(1.0, float(memory_limit_mb))
+    if not disable_as_limit and peak_rss_mb is not None and peak_rss_mb > limit_mb:
+        return True
+    # Windows STATUS_NO_MEMORY (0xC0000017) / STATUS_COMMITMENT_LIMIT (0xC000012D)
+    if return_code in (3221225495, -1073741801, 3221225773, -1073741523):
+        return True
+    lowered_err = stderr_text.lower()
+    if (
+        "bad_alloc" in stderr_text
+        or "out of memory" in lowered_err
+        or "cannot allocate memory" in lowered_err
+        or "failed to map segment" in lowered_err
+    ):
+        return True
+    sigkill_rc = return_code in (-9, 137) or (
+        hasattr(signal, "SIGKILL") and return_code == -signal.SIGKILL
+    )
+    if sigkill_rc and not disable_as_limit and peak_rss_mb is not None:
+        return peak_rss_mb >= limit_mb * 0.85
+    return False
+
+
+def _build_posix_command_and_preexec(
+    cmd: list[str],
+    safe_memory_mb: int,
+    disable_as_limit: bool,
+) -> tuple[list[str], Callable[[], None] | None]:
+    """Build effective POSIX command (with prlimit on Linux when available) and preexec hook."""
+    if sys.platform == "darwin":
+        preexec = (
+            disable_posix_core_dumps
+            if disable_as_limit
+            else (lambda: _set_posix_resource_limit(safe_memory_mb))
+        )
+        return list(cmd), preexec
+
+    prlimit_path = shutil.which("prlimit")
+    if disable_as_limit:
+        if prlimit_path:
+            return [prlimit_path, "--core=0", *cmd], None
+        return list(cmd), disable_posix_core_dumps
+
+    if prlimit_path:
+        memory_bytes = safe_memory_mb * 1024 * 1024
+        as_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_AS")
+        data_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_DATA")
+        return [prlimit_path, f"--as={as_bytes}", f"--data={data_bytes}", "--core=0", *cmd], None
+
+    preexec_fallback: Callable[[], None] | None = (
+        (lambda: _set_posix_resource_limit(safe_memory_mb)) if os.name != "nt" else None
+    )
+    return list(cmd), preexec_fallback
+
+
 async def _run_process(
     cmd: list[str],
     stdin: str = "",
@@ -1070,10 +1314,13 @@ async def _run_process(
     import tempfile
 
     start_time = time.perf_counter()
-    safe_memory_mb = max(1, int(round(float(memory_mb))))
-    job = None
-    process = None
-    out_f = err_f = None
+    effective_limit_mb = max(1.0, float(memory_mb))
+    safe_memory_mb = max(1, int(round(effective_limit_mb)))
+    job: WinJobObject | None = None
+    process: _SubprocessLike | None = None
+    in_f: IO[bytes] | None = None
+    out_f: IO[bytes] | None = None
+    err_f: IO[bytes] | None = None
     stdout_path = stderr_path = None
     proc_env: dict[str, str] | None = None
     if env:
@@ -1081,6 +1328,12 @@ async def _run_process(
         proc_env.update(env)
 
     try:
+        # Windows 上 testlib strict 模式期望 CRLF 换行符
+        processed_stdin = stdin
+        if sys.platform == "win32" and stdin:
+            processed_stdin = _normalize_windows_stdin(stdin)
+        stdin_bytes = (processed_stdin or "").encode("utf-8")
+
         # 大输出重定向到临时文件，避免全量读入内存：运行期间输出由 OS 落盘，
         # 峰值内存仅受单次写入块大小限制，而非整份输出。
         out_f = tempfile.NamedTemporaryFile("wb", delete=False, suffix=".autocode.out")
@@ -1123,86 +1376,46 @@ async def _run_process(
                         cmd[0] if cmd else "",
                         e,
                     )
-        elif sys.platform == "darwin":
-            # macOS: 使用 preexec_fn 设置资源限制；sanitizer 模式下跳过 RLIMIT_AS 但仍禁用 core dump
-            darwin_kwargs: dict[str, Any] = {
-                "stdin": asyncio.subprocess.PIPE,
-                "stdout": out_f,
-                "stderr": err_f,
-                "start_new_session": True,
-                "env": proc_env,
-                "cwd": cwd,
-                "preexec_fn": (
-                    disable_posix_core_dumps
-                    if disable_as_limit
-                    else (lambda: _set_posix_resource_limit(safe_memory_mb))
-                ),
-            }
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                **darwin_kwargs,
-            )
         else:
-            # Linux: 优先使用 prlimit（含 --core=0，避免 preexec_fn）；无 prlimit 时回退 preexec_fn
-            if disable_as_limit:
-                prlimit_path = shutil.which("prlimit")
-                if prlimit_path:
-                    process = await asyncio.create_subprocess_exec(
-                        prlimit_path,
-                        "--core=0",
-                        *cmd,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=out_f,
-                        stderr=err_f,
-                        start_new_session=True,
-                        env=proc_env,
-                        cwd=cwd,
-                    )
-                else:
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=out_f,
-                        stderr=err_f,
-                        start_new_session=True,
-                        env=proc_env,
-                        cwd=cwd,
-                        preexec_fn=disable_posix_core_dumps,
-                    )
+            effective_cmd, preexec_fn = _build_posix_command_and_preexec(
+                cmd, safe_memory_mb, disable_as_limit
+            )
+            use_wait4 = (
+                sys.platform == "darwin"
+                and asyncio.create_subprocess_exec is _DEFAULT_CREATE_SUBPROCESS_EXEC
+            )
+            if use_wait4:
+                stdin_target: int | IO[bytes] = subprocess.DEVNULL
+                if stdin_bytes:
+                    in_f = tempfile.TemporaryFile("w+b")
+                    in_f.write(stdin_bytes)
+                    in_f.flush()
+                    in_f.seek(0)
+                    stdin_target = in_f
+                popen_kwargs: dict[str, Any] = {
+                    "stdin": stdin_target,
+                    "stdout": out_f,
+                    "stderr": err_f,
+                    "start_new_session": True,
+                    "env": proc_env,
+                    "cwd": cwd,
+                }
+                if preexec_fn is not None:
+                    popen_kwargs["preexec_fn"] = preexec_fn
+                popen = subprocess.Popen(effective_cmd, **popen_kwargs)
+                process = _PosixWait4Process(popen)
             else:
-                memory_bytes = safe_memory_mb * 1024 * 1024
-                prlimit_path = shutil.which("prlimit")
-                if prlimit_path:
-                    as_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_AS")
-                    data_bytes = _clamp_rlimit_bytes(memory_bytes, "RLIMIT_DATA")
-                    process = await asyncio.create_subprocess_exec(
-                        prlimit_path,
-                        f"--as={as_bytes}",
-                        f"--data={data_bytes}",
-                        "--core=0",
-                        *cmd,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=out_f,
-                        stderr=err_f,
-                        start_new_session=True,
-                        env=proc_env,
-                        cwd=cwd,
-                    )
-                else:
-                    exec_kwargs: dict[str, Any] = {
-                        "stdin": asyncio.subprocess.PIPE,
-                        "stdout": out_f,
-                        "stderr": err_f,
-                        "start_new_session": True,
-                        "env": proc_env,
-                        "cwd": cwd,
-                    }
-                    if os.name != "nt":
-                        exec_kwargs["preexec_fn"] = lambda: _set_posix_resource_limit(safe_memory_mb)
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        **exec_kwargs,
-                    )
+                async_kwargs: dict[str, Any] = {
+                    "stdin": asyncio.subprocess.PIPE,
+                    "stdout": out_f,
+                    "stderr": err_f,
+                    "start_new_session": True,
+                    "env": proc_env,
+                    "cwd": cwd,
+                }
+                if preexec_fn is not None:
+                    async_kwargs["preexec_fn"] = preexec_fn
+                process = await asyncio.create_subprocess_exec(*effective_cmd, **async_kwargs)
 
         if process and process.pid and process_start_hook:
             try:
@@ -1211,35 +1424,44 @@ async def _run_process(
                 _logger.debug("process_start_hook failed: %s", e)
 
         peak_rss_mb: float | None = None
+        rss_limit_exceeded = False
         rss_task: asyncio.Task[None] | None = None
         if process and process.pid and _psutil is not None:
+            active_proc = process
+
             async def _sample_rss(pid: int) -> None:
-                nonlocal peak_rss_mb
+                nonlocal peak_rss_mb, rss_limit_exceeded
                 assert _psutil is not None
                 try:
                     p_obj = _psutil.Process(pid)
+                    sample_idx = 0
                     while True:
                         try:
                             rss = p_obj.memory_info().rss / (1024.0 * 1024.0)
+                            if sys.platform.startswith("linux"):
+                                vm_hwm = _read_linux_vm_hwm_mb(pid)
+                                if vm_hwm is not None and vm_hwm > rss:
+                                    rss = vm_hwm
                             if peak_rss_mb is None or rss > peak_rss_mb:
                                 peak_rss_mb = rss
+                            if not disable_as_limit and rss > effective_limit_mb:
+                                rss_limit_exceeded = True
+                                await _force_terminate_process(active_proc, job)
+                                break
                         except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                             break
-                        await asyncio.sleep(0.01)
+                        sample_idx += 1
+                        await asyncio.sleep(
+                            0.001 if (sys.platform.startswith("linux") and sample_idx < 30) else 0.005
+                        )
                 except Exception:
                     return
 
             rss_task = asyncio.create_task(_sample_rss(process.pid))
 
         try:
-            # Windows 上 testlib strict 模式期望 CRLF 换行符
-            # 将 LF 转换为 CRLF 以满足 validator 的 readEoln() 要求
-            processed_stdin = stdin
-            if sys.platform == "win32" and stdin:
-                processed_stdin = _normalize_windows_stdin(stdin)
-
             await asyncio.wait_for(
-                process.communicate(input=(processed_stdin or "").encode("utf-8")),
+                process.communicate(input=stdin_bytes),
                 timeout=timeout,
             )
         except asyncio.CancelledError:
@@ -1253,6 +1475,9 @@ async def _run_process(
             if rss_task is not None:
                 rss_task.cancel()
             await _force_terminate_process(process, job)
+            if isinstance(process, _PosixWait4Process) and process.ru_maxrss_mb is not None:
+                if peak_rss_mb is None or process.ru_maxrss_mb > peak_rss_mb:
+                    peak_rss_mb = process.ru_maxrss_mb
             for _timeout_fh in (out_f, err_f):
                 if _timeout_fh is not None:
                     try:
@@ -1297,6 +1522,10 @@ async def _run_process(
         if job:
             job.close()
 
+        if isinstance(process, _PosixWait4Process) and process.ru_maxrss_mb is not None:
+            if peak_rss_mb is None or process.ru_maxrss_mb > peak_rss_mb:
+                peak_rss_mb = process.ru_maxrss_mb
+
         out_f.close()
         err_f.close()
         with open(stdout_path, "rb") as _out, open(stderr_path, "rb") as _err:
@@ -1305,15 +1534,16 @@ async def _run_process(
         ret = process.returncode if process.returncode is not None else -1
         out_str = stdout_data.decode("utf-8", errors="replace")
         err_str = stderr_data.decode("utf-8", errors="replace")
-        mle = False
-        if ret in (-9, 137, 3221225495, -1073741801) or (
-            hasattr(signal, "SIGKILL") and ret == -signal.SIGKILL
-        ):
-            mle = True
-        elif "bad_alloc" in err_str or "Out of memory" in err_str:
-            mle = True
+        mle = _classify_memory_limit_exceeded(
+            return_code=ret,
+            stderr_text=err_str,
+            memory_limit_mb=effective_limit_mb,
+            peak_rss_mb=peak_rss_mb,
+            rss_limit_exceeded=rss_limit_exceeded,
+            disable_as_limit=disable_as_limit,
+        )
         return RunResult(
-            success=ret == 0,
+            success=(ret == 0 and not mle),
             return_code=ret,
             stdout=out_str,
             stderr=err_str,
@@ -1336,7 +1566,12 @@ async def _run_process(
             error=f"Execution error: {str(e)}",
         )
     finally:
-        for _fh in (out_f, err_f):
+        if isinstance(process, _PosixWait4Process) and not process._reap_task.done():
+            try:
+                await _force_terminate_process(process, job)
+            except BaseException:
+                pass
+        for _fh in (in_f, out_f, err_f):
             if _fh is not None:
                 try:
                     _fh.close()
