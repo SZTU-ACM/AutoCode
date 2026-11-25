@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -496,7 +497,7 @@ def has_bits_stdcpp_include(code: str) -> bool:
 
 
 def _find_suggested_gcc_compilers() -> list[str]:
-    """Probe common GNU g++ versioned binaries (e.g. Homebrew g++-14 on macOS)."""
+    """Probe common GNU g++ versioned binaries (e.g. Homebrew or RHEL/TencentOS gcc-toolset)."""
     candidates = ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11")
     extra_dirs = ("/opt/homebrew/bin", "/usr/local/bin")
     found: list[str] = []
@@ -512,6 +513,19 @@ def _find_suggested_gcc_compilers() -> list[str]:
         if path and path not in seen:
             seen.add(path)
             found.append(path)
+    if sys.platform.startswith("linux"):
+        for ver in (15, 14, 13, 12, 11, 10):
+            for base in ("gcc-toolset", "devtoolset"):
+                if base == "devtoolset" and ver > 12:
+                    continue
+                toolset_gpp = f"/opt/rh/{base}-{ver}/root/usr/bin/g++"
+                if (
+                    toolset_gpp not in seen
+                    and os.path.isfile(toolset_gpp)
+                    and os.access(toolset_gpp, os.X_OK)
+                ):
+                    seen.add(toolset_gpp)
+                    found.append(toolset_gpp)
     return found
 
 
@@ -691,39 +705,96 @@ def cleanup_work_dir(work_dir: str) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _compiler_has_asan_runtime(compiler_path: str) -> bool:
+    """Return True if ``compiler_path`` provides an ASan runtime library (``libasan``)."""
+    for lib_name in ("libasan.a", "libasan.so"):
+        try:
+            proc = subprocess.run(
+                [compiler_path, f"-print-file-name={lib_name}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3.0,
+                check=False,
+            )
+            if proc.returncode == 0:
+                out = (proc.stdout or "").strip()
+                if out and out != lib_name and os.path.isfile(out):
+                    return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
 @functools.lru_cache(maxsize=8)
 def _resolve_compiler(compiler: str) -> str:
-    """Resolve `g++` on macOS away from Apple Clang toward Homebrew GCC if installed.
-
-    Apple's `/usr/bin/g++` is a Clang shim lacking GNU `<bits/stdc++.h>`. When the
-    caller requests the default `"g++"` on darwin, probe `g++-15`..`g++-10` via
-    PATH and standard Homebrew prefixes and return the first working GCC binary.
-    """
-    if sys.platform != "darwin" or compiler != "g++":
+    """Resolve default ``g++`` away from Apple Clang (macOS) or pre-C++20 GCC (<10, Linux)."""
+    if compiler != "g++":
         return compiler
+    is_darwin = sys.platform == "darwin"
+    is_linux = sys.platform.startswith("linux")
+    if not (is_darwin or is_linux):
+        return compiler
+
     resolved = shutil.which(compiler) or compiler
     try:
         probe = subprocess.run(
             [resolved, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
-        banner = f"{probe.stdout}\n{probe.stderr}".lower()
-        if "clang" not in banner:
+        banner = f"{probe.stdout}\n{probe.stderr}"
+        lower_banner = banner.lower()
+        if is_darwin and "clang" not in lower_banner:
             return compiler
+        if is_linux and "clang" not in lower_banner:
+            first_line = banner.splitlines()[0] if banner.splitlines() else ""
+            ver_match = re.search(r"\b(\d+)\.\d+\.\d+\b", first_line)
+            if not ver_match or int(ver_match.group(1)) >= 10:
+                return compiler
     except (OSError, subprocess.SubprocessError):
         return compiler
 
+    linux_candidates: list[str] = []
+    seen_linux: set[str] = set()
     for candidate in ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11", "g++-10"):
         found = shutil.which(candidate)
         if found:
-            return found
-        for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
-            full_path = os.path.join(prefix, candidate)
-            if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
-                return full_path
+            if is_darwin:
+                return found
+            if found not in seen_linux:
+                seen_linux.add(found)
+                linux_candidates.append(found)
+        if is_darwin:
+            for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+                full_path = os.path.join(prefix, candidate)
+                if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+                    return full_path
+    if is_linux:
+        for ver in (15, 14, 13, 12, 11, 10):
+            for base in ("gcc-toolset", "devtoolset"):
+                if base == "devtoolset" and ver > 12:
+                    continue
+                toolset_gpp = f"/opt/rh/{base}-{ver}/root/usr/bin/g++"
+                if (
+                    toolset_gpp not in seen_linux
+                    and os.path.isfile(toolset_gpp)
+                    and os.access(toolset_gpp, os.X_OK)
+                ):
+                    seen_linux.add(toolset_gpp)
+                    linux_candidates.append(toolset_gpp)
+        if len(linux_candidates) == 1:
+            return linux_candidates[0]
+        if linux_candidates:
+            for cand in linux_candidates:
+                if _compiler_has_asan_runtime(cand):
+                    return cand
+            return linux_candidates[0]
     return compiler
 
 
@@ -833,19 +904,38 @@ async def compile_cpp(
             extra_flags=compile_extra_flags or None,
         )
         if cached_binary:
-            output_dir = os.path.dirname(binary_path)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-            shutil.copy2(cached_binary, binary_path)
+            output_dir = os.path.dirname(os.path.abspath(binary_path))
+            os.makedirs(output_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=".autocode_bin_", dir=output_dir)
+            os.close(fd)
             try:
-                os.utime(binary_path, None)
-            except OSError:
-                pass
-            if sys.platform != "win32":
+                shutil.copy2(cached_binary, tmp_path)
                 try:
-                    os.chmod(binary_path, os.stat(binary_path).st_mode | 0o111)
+                    os.utime(tmp_path, None)
                 except OSError:
                     pass
+                if sys.platform != "win32":
+                    try:
+                        os.chmod(tmp_path, os.stat(tmp_path).st_mode | 0o111)
+                    except OSError:
+                        pass
+                if sys.platform == "win32":
+                    for retry_delay in (0.02, 0.05, 0.10):
+                        try:
+                            os.replace(tmp_path, binary_path)
+                            break
+                        except PermissionError:
+                            time.sleep(retry_delay)
+                    else:
+                        os.replace(tmp_path, binary_path)
+                else:
+                    os.replace(tmp_path, binary_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             return CompileResult(
                 success=True,
                 binary_path=binary_path,
@@ -968,6 +1058,24 @@ async def compile_cpp(
             success=False,
             error=f"Compilation error: {str(e)}",
         )
+
+
+_LINUX_VM_HWM_RE = re.compile(r"^VmHWM:\s*(\d+)\s*kB", re.MULTILINE)
+
+
+def _read_linux_vm_hwm_mb(pid: int) -> float | None:
+    """Read Linux kernel post-exec high-water RSS (``VmHWM``) from ``/proc/<pid>/status``."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    match = _LINUX_VM_HWM_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1)) / 1024.0
 
 
 def _clamp_rlimit_bytes(memory_bytes: int, limit_attr: str) -> int:
@@ -1140,8 +1248,8 @@ def _classify_memory_limit_exceeded(
     limit_mb = max(1.0, float(memory_limit_mb))
     if not disable_as_limit and peak_rss_mb is not None and peak_rss_mb > limit_mb:
         return True
-    # Windows STATUS_NO_MEMORY (0xC0000017)
-    if return_code in (3221225495, -1073741801):
+    # Windows STATUS_NO_MEMORY (0xC0000017) / STATUS_COMMITMENT_LIMIT (0xC000012D)
+    if return_code in (3221225495, -1073741801, 3221225773, -1073741523):
         return True
     lowered_err = stderr_text.lower()
     if (
@@ -1273,7 +1381,7 @@ async def _run_process(
                 cmd, safe_memory_mb, disable_as_limit
             )
             use_wait4 = (
-                os.name != "nt"
+                sys.platform == "darwin"
                 and asyncio.create_subprocess_exec is _DEFAULT_CREATE_SUBPROCESS_EXEC
             )
             if use_wait4:
@@ -1326,9 +1434,14 @@ async def _run_process(
                 assert _psutil is not None
                 try:
                     p_obj = _psutil.Process(pid)
+                    sample_idx = 0
                     while True:
                         try:
                             rss = p_obj.memory_info().rss / (1024.0 * 1024.0)
+                            if sys.platform.startswith("linux"):
+                                vm_hwm = _read_linux_vm_hwm_mb(pid)
+                                if vm_hwm is not None and vm_hwm > rss:
+                                    rss = vm_hwm
                             if peak_rss_mb is None or rss > peak_rss_mb:
                                 peak_rss_mb = rss
                             if not disable_as_limit and rss > effective_limit_mb:
@@ -1337,7 +1450,10 @@ async def _run_process(
                                 break
                         except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                             break
-                        await asyncio.sleep(0.005)
+                        sample_idx += 1
+                        await asyncio.sleep(
+                            0.001 if (sys.platform.startswith("linux") and sample_idx < 30) else 0.005
+                        )
                 except Exception:
                     return
 

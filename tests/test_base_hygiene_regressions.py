@@ -367,9 +367,9 @@ async def test_genuine_rss_overflow_still_flags_mle(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_posix_wait4_captures_short_lived_peak_rss_mb(tmp_path: Path):
-    """POSIX os.wait4 ru_maxrss captures accurate peak RSS even for <10ms -O2 binaries."""
-    if os.name == "nt":
-        pytest.skip("POSIX os.wait4 ru_maxrss test")
+    """macOS os.wait4 ru_maxrss captures accurate peak RSS even for <10ms -O2 binaries."""
+    if sys.platform != "darwin":
+        pytest.skip("macOS os.wait4 ru_maxrss test (Linux wait4 inherits parent RSS across fork/vfork)")
 
     src = tmp_path / "alloc24.cpp"
     exe = tmp_path / "alloc24"
@@ -392,6 +392,50 @@ async def test_posix_wait4_captures_short_lived_peak_rss_mb(tmp_path: Path):
         assert res.success, f"run {run_idx} failed: {res}"
         assert res.memory_limit_exceeded is False
         assert res.memory_mb is not None and res.memory_mb >= 16.0, f"run {run_idx}: {res}"
+
+
+@pytest.mark.asyncio
+async def test_linux_prlimit_and_vm_hwm_no_parent_rss_leak(tmp_path: Path):
+    """Linux reports post-exec VmHWM RSS without parent-RSS leakage and enforces prlimit."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux prlimit + VmHWM test")
+
+    echo_src = tmp_path / "echo.cpp"
+    echo_exe = tmp_path / "echo"
+    echo_src.write_text(
+        '#include <iostream>\nint main(){ int x; if (std::cin >> x) std::cout << x << "\\n"; return 0; }\n',
+        encoding="utf-8",
+    )
+    assert (await compile_cpp(str(echo_src), str(echo_exe), use_cache=False)).success
+    res_echo = await run_binary(str(echo_exe), "7\n", timeout=5, memory_mb=64)
+    assert res_echo.success, res_echo
+    assert res_echo.memory_limit_exceeded is False
+    assert res_echo.memory_mb is None or res_echo.memory_mb < 32.0, res_echo
+
+    alloc_src = tmp_path / "alloc32.cpp"
+    alloc_exe = tmp_path / "alloc32"
+    alloc_src.write_text(
+        "#include <chrono>\n#include <iostream>\n#include <thread>\n#include <vector>\n"
+        "int main() {\n"
+        "    std::vector<char> buf(32 * 1024 * 1024, 1);\n"
+        "    volatile char sum = 0;\n"
+        "    for (size_t i = 0; i < buf.size(); i += 4096) sum += buf[i];\n"
+        "    std::this_thread::sleep_for(std::chrono::milliseconds(30));\n"
+        "    std::cout << (int)sum << '\\n';\n"
+        "    return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert (await compile_cpp(str(alloc_src), str(alloc_exe), opt_level="O2", use_cache=False)).success
+
+    res_ok = await run_binary(str(alloc_exe), "", timeout=10, memory_mb=256)
+    assert res_ok.success, res_ok
+    assert res_ok.memory_limit_exceeded is False
+    assert res_ok.memory_mb is not None and 24.0 <= res_ok.memory_mb <= 64.0, res_ok
+
+    res_mle = await run_binary(str(alloc_exe), "", timeout=10, memory_mb=16)
+    assert not res_mle.success, res_mle
+    assert res_mle.memory_limit_exceeded is True, res_mle
 
 
 def test_mle_classifier_distinguishes_external_sigkill_from_oom_evidence():

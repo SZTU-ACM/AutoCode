@@ -226,3 +226,44 @@ def test_compile_cache_falls_back_on_readonly_cwd(monkeypatch, tmp_path):
     assert "autocode_mcp_compile_cache" in str(cache.cache_dir)
     assert os.path.exists(stored)
     assert cache.get(str(src), "g++", "c++20", "-O2") == stored
+
+
+def test_cached_compile_restore_replaces_inode(monkeypatch, tmp_path):
+    """Restoring a cached binary over an existing executable must allocate a fresh inode."""
+    import asyncio
+    import shutil
+
+    if not shutil.which("g++") or os.name == "nt":
+        return
+
+    from autocode_mcp.utils import compiler as comp_mod
+    from autocode_mcp.utils.compiler import compile_cpp, run_binary
+
+    iso_cache = CompileCache(str(tmp_path / "cache"))
+    monkeypatch.setattr(comp_mod, "_cache", iso_cache)
+
+    src = tmp_path / "prog.cpp"
+    exe = tmp_path / "prog"
+
+    # 1. Seed cache with exit-0 binary.
+    src.write_text("int main() { return 0; }\n", encoding="utf-8")
+    res1 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res1.success
+
+    # 2. Overwrite with exit-1 binary and run it (simulates previously executed inode).
+    src.write_text("int main() { return 1; }\n", encoding="utf-8")
+    res2 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res2.success
+    run2 = asyncio.run(run_binary(str(exe), ""))
+    assert run2.return_code == 1
+    old_ino = os.stat(exe).st_ino
+
+    # 3. Restore cached exit-0 binary back onto same target path -> must get fresh inode & exit 0.
+    src.write_text("int main() { return 0; }\n", encoding="utf-8")
+    res3 = asyncio.run(compile_cpp(str(src), str(exe)))
+    assert res3.success
+    assert res3.stderr == "(cached)"
+    new_ino = os.stat(exe).st_ino
+    assert new_ino != old_ino
+    run3 = asyncio.run(run_binary(str(exe), ""))
+    assert run3.success and run3.return_code == 0

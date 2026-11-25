@@ -806,3 +806,117 @@ async def test_compiler_allowlist_negative_cache_and_win_job_float_timeout(monke
     assert t_100ns == 15_000_000
     assert isinstance(fake_job._set_memory_limit(), int)
     assert fake_job._set_memory_limit() == 256 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_linux_vm_hwm_helper_and_wait4_darwin_only(monkeypatch, tmp_path):
+    """Linux avoids fork-RSS ru_maxrss contamination via _read_linux_vm_hwm_mb and skips os.wait4."""
+    import builtins
+    import io
+
+    real_open = builtins.open
+    monkeypatch.setattr(compiler_module.sys, "platform", "darwin")
+    assert compiler_module._read_linux_vm_hwm_mb(12345) is None
+
+    monkeypatch.setattr(compiler_module.sys, "platform", "linux")
+    fake_status = "Name:\techo\nVmPeak:\t   18000 kB\nVmRSS:\t   10240 kB\nVmHWM:\t   12288 kB\n"
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda path, *a, **k: io.StringIO(fake_status) if str(path) == "/proc/12345/status" else real_open(path, *a, **k),
+    )
+    assert compiler_module._read_linux_vm_hwm_mb(12345) == pytest.approx(12.0)
+
+    # Verify _run_process does NOT wrap with _PosixWait4Process on Linux (uses async wait / prlimit instead)
+    class FakeProc:
+        pid = 4321
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"", b""
+
+    monkeypatch.setattr(compiler_module.shutil, "which", lambda _name: None)
+    seen = []
+
+    async def fake_exec(*cmd, **kwargs):
+        seen.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(compiler_module.asyncio, "create_subprocess_exec", fake_exec)
+    dummy = tmp_path / "prog"
+    dummy.write_text("x", encoding="utf-8")
+    res = await run_binary(str(dummy), "", timeout=1.5, memory_mb=256)
+    assert res.success
+    assert seen
+
+
+def test_linux_resolve_compiler_upgrades_legacy_gcc_and_windows_commitment_limit(monkeypatch):
+    """Linux auto-upgrades legacy GCC (<10) to gcc-toolset/versioned g++; Windows STATUS_COMMITMENT_LIMIT counts as MLE."""
+    import subprocess as sp
+
+    from autocode_mcp.utils.compiler import _classify_memory_limit_exceeded
+
+    compiler_module._resolve_compiler.cache_clear()
+    try:
+        monkeypatch.setattr(compiler_module.sys, "platform", "linux")
+        monkeypatch.setattr(
+            compiler_module.shutil,
+            "which",
+            lambda name: "/usr/bin/g++" if name == "g++" else None,
+        )
+        monkeypatch.setattr(
+            compiler_module.subprocess,
+            "run",
+            lambda *a, **k: sp.CompletedProcess(
+                a[0], 0, stdout="g++ (GCC) 8.5.0 20210514 (TencentOS 8.5.0-18)\n", stderr=""
+            ),
+        )
+        monkeypatch.setattr(
+            compiler_module.os.path,
+            "isfile",
+            lambda p: p == "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+        )
+        monkeypatch.setattr(
+            compiler_module.os,
+            "access",
+            lambda p, mode: p == "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+        )
+        assert compiler_module._resolve_compiler("g++") == "/opt/rh/gcc-toolset-12/root/usr/bin/g++"
+
+        compiler_module._resolve_compiler.cache_clear()
+        both = {
+            "/opt/rh/gcc-toolset-15/root/usr/bin/g++",
+            "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+        }
+        monkeypatch.setattr(compiler_module.os.path, "isfile", lambda p: p in both)
+        monkeypatch.setattr(compiler_module.os, "access", lambda p, mode: p in both)
+        monkeypatch.setattr(
+            compiler_module,
+            "_compiler_has_asan_runtime",
+            lambda p: p == "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+        )
+        assert compiler_module._resolve_compiler("g++") == "/opt/rh/gcc-toolset-12/root/usr/bin/g++"
+
+        compiler_module._resolve_compiler.cache_clear()
+        monkeypatch.setattr(
+            compiler_module.subprocess,
+            "run",
+            lambda *a, **k: sp.CompletedProcess(
+                a[0], 0, stdout="g++ (GCC) 12.2.1 20221121\n", stderr=""
+            ),
+        )
+        assert compiler_module._resolve_compiler("g++") == "g++"
+    finally:
+        compiler_module._resolve_compiler.cache_clear()
+
+    for code in (3221225773, -1073741523):
+        assert _classify_memory_limit_exceeded(
+            return_code=code,
+            stderr_text="",
+            memory_limit_mb=256,
+            peak_rss_mb=12.0,
+            rss_limit_exceeded=False,
+            disable_as_limit=False,
+        ) is True
+
+
