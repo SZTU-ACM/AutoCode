@@ -237,6 +237,18 @@ def test_verify_complexity_linux_sub_15ms_flat_plateau_falsifies_quadratic_witho
     res_linear = EmpiricalRatioAnalyzer.verify_complexity("O(n)", linear_samples, time_limit_ms=2000.0)
     assert res_linear["passed"] is True
 
+    # 首个样本存在冷启动毛刺（4.5ms），后段仍呈 O(n^2) 时不得漏放，真线性仍须通过
+    cold_spike_quad = [
+        {"n": 200, "cpu_time_ms": 4.5, "status": "ok"},
+        {"n": 500, "cpu_time_ms": 1.8, "status": "ok"},
+        {"n": 1000, "cpu_time_ms": 2.0, "status": "ok"},
+        {"n": 3000, "cpu_time_ms": 4.5, "status": "ok"},
+        {"n": 10000, "cpu_time_ms": 26.0, "status": "ok"},
+    ]
+    res_cold_quad = EmpiricalRatioAnalyzer.verify_complexity("O(n)", cold_spike_quad, time_limit_ms=2000.0)
+    assert res_cold_quad["passed"] is False
+    assert res_cold_quad["verdict"] == "ratio_mismatch"
+
 
 def test_verify_complexity_narrow_scale_span_noise_vs_exponential_blowup() -> None:
     """极窄 N 跨度（<2x，如 n=[11..15]）的温和进程启动抖动应豁免，但真正指数爆炸（16x）仍必须拦截。"""
