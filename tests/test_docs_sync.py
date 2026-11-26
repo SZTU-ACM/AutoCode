@@ -91,20 +91,23 @@ def test_rules_agents_md_synced_with_latest_gates():
 
 
 def test_readme_interactor_uses_stdout_not_tout():
-    """README.md must instruct interactors to prompt contestants via std::cout, never tout."""
+    """Reference docs must instruct interactors to prompt contestants via std::cout, never tout."""
     readme_md = _read("README.md")
+    assert "docs/REFERENCE.md" in readme_md
 
-    assert "不要用 `std::cout`" not in readme_md
-    assert "用 `tout` 向选手输出" not in readme_md
-    assert "tout.flush()" not in readme_md
+    ref_md = _read("docs/REFERENCE.md")
 
-    assert "registerInteraction(argc, argv)" in readme_md
-    assert "std::cout" in readme_md
-    assert "std::cout.flush()" in readme_md
-    assert "`inf`" in readme_md
-    assert "`ouf`" in readme_md
-    assert "`tout`" in readme_md
-    assert "`argv[2]`" in readme_md
+    assert "不要用 `std::cout`" not in ref_md
+    assert "用 `tout` 向选手输出" not in ref_md
+    assert "tout.flush()" not in ref_md
+
+    assert "registerInteraction(argc, argv)" in ref_md
+    assert "std::cout" in ref_md
+    assert "std::cout.flush()" in ref_md
+    assert "`inf`" in ref_md
+    assert "`ouf`" in ref_md
+    assert "`tout`" in ref_md
+    assert "`argv[2]`" in ref_md
 
 
 def test_pr_ci_security_boundary_warnings_present():
