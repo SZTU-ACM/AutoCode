@@ -76,6 +76,7 @@ class PolygonProblemMeta:
     solutions: list[PolygonSolutionRef] = field(default_factory=list)
     checker_path: str | None = None
     validator_paths: list[str] = field(default_factory=list)
+    generator_paths: list[str] = field(default_factory=list)
     interactor_path: str | None = None
     communication_mode: str | None = None
     grader_path: str | None = None
@@ -245,6 +246,29 @@ def parse_polygon_problem_xml(problem_path: Path) -> PolygonProblemMeta | None:
         )
         if val_rel is not None and val_rel not in meta.validator_paths:
             meta.validator_paths.append(val_rel)
+
+    for gen_el in root.findall(".//assets/generators/generator"):
+        src_el = gen_el.find("source")
+        gen_rel = _contain_rel(
+            src_el.attrib.get("path") if src_el is not None else gen_el.attrib.get("path")
+        )
+        if gen_rel is not None and gen_rel not in meta.generator_paths:
+            meta.generator_paths.append(gen_rel)
+
+    for exe_el in root.findall(".//files/executables/executable"):
+        src_el = exe_el.find("source")
+        exe_rel = _contain_rel(
+            src_el.attrib.get("path") if src_el is not None else exe_el.attrib.get("path")
+        )
+        if exe_rel is None:
+            continue
+        stem_low = Path(exe_rel).stem.lower()
+        if (
+            stem_low.startswith("gen")
+            or stem_low.endswith(("_gen", "-gen"))
+            or "generator" in stem_low
+        ) and exe_rel not in meta.generator_paths:
+            meta.generator_paths.append(exe_rel)
 
     assets_int = root.find(".//assets/interactor")
     if assets_int is not None:

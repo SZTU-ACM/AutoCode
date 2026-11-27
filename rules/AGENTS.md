@@ -6,6 +6,7 @@ AutoCode is a deterministic competitive-programming verification engine (`autoco
 
 - AI proposes candidate artifacts; AutoCode MCP tools verify every stage deterministically (with optional `autocode-redteam-auditor` adversarial review before final sign-off).
 - Never skip prerequisite gates or assume readiness from file presence alone — rely on structured MCP tool outputs and `.autocode/runtime.json`.
+- **Anti-Semantic-Collapse & Action-Space Blind Check**: During statement review, strip Sample Explanations first and verify from the problem body alone whether moves on outside-candidate elements, repeated operations, no-op moves, and termination conditions ("ever reached" vs "simultaneously stopped at") are unambiguous and uncontradicted by the background section; before trimming any sample explanation, migrate any rule it carried into the main problem description and re-run a blind check.
 - At every workflow checkpoint, report `decision: go | no_go`, `blocking_issues`, and exact `next_actions`.
 - Stop immediately when a gate fails and fix the root cause before progressing.
 

@@ -14,6 +14,7 @@ from .hashes import (
     _invalidate_downstream,
     _saved_relative_path,
     _set_source_hash,
+    resolve_statement_rel,
 )
 from .manifest import (
     load_manifest,
@@ -348,7 +349,8 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
         state["packaged"] = False
         set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
         return
-    if relative == "statements/README.md":
+    stmt_rel = resolve_statement_rel(problem_dir)
+    if relative == "statements/README.md" or relative == stmt_rel:
         # 修改题面只需重新做题面/样例校验与审计/打包，不清空已通过的对拍结果，
         # 但标记 statement_dirty 以阻断未重新校验就打包。
         state.update(
@@ -356,6 +358,7 @@ def _invalidate_for_file_save(problem_dir: str, state: dict[str, Any], tool_inpu
                 "statement_validated": False,
                 "validation_passed": False,
                 "statement_dirty": True,
+                "statement_source_hash": None,
                 "packaged": False,
             }
         )

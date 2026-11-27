@@ -364,6 +364,186 @@ def _extract_manifest_std_timings(manifest: dict[str, Any]) -> dict[str, float]:
     return timings
 
 
+def _extract_header_int_row(data: str, manifest: AutoCodeManifest | None = None) -> list[int]:
+    """Extract up to 6 leading integer parameters from the effective header line of a test input."""
+    lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    line1 = [_parse_int_token(tok) for tok in lines[0].split()[:6]]
+    if any(v is None for v in line1):
+        line1_ints = [v for v in line1 if v is not None]
+        if not line1_ints:
+            return []
+    else:
+        line1_ints = [v for v in line1 if v is not None]
+    if len(line1_ints) == 1 and line1_ints[0] > 0 and len(lines) >= 2:
+        line2_toks = lines[1].split()[:6]
+        line2_ints = [v for v in (_parse_int_token(t) for t in line2_toks) if v is not None]
+        if line2_ints and len(line2_ints) == len(line2_toks):
+            if manifest is not None and manifest.multi_test:
+                return line2_ints
+            _, n_max = _extract_manifest_primary_bounds(manifest)
+            within_n = n_max is None or line2_ints[0] <= n_max
+            not_arr = not (len(lines) == 2 and line1_ints[0] > 1 and len(lines[1].split()) == line1_ints[0])
+            if within_n and line2_ints[0] > 0 and line1_ints[0] <= 100_000 and len(line2_toks) <= 4 and not_arr:
+                if len(lines) >= 3 and (
+                    line1_ints[0] == 1
+                    or (line1_ints[0] <= 20 and line2_ints[0] > line1_ints[0])
+                    or len(lines) >= 1 + 2 * line1_ints[0]
+                ):
+                    return line2_ints
+                if manifest is None and line1_ints[0] == 1 and len(line2_toks) <= 2 and line2_ints[0] >= 100:
+                    return line2_ints
+    return line1_ints
+
+
+def _check_log_decade_and_joint_regimes(
+    *,
+    parsed_effective_scales: list[int],
+    header_rows: list[list[int]],
+    expected_max: int | None,
+    total_files: int,
+    validator_bounds: list[dict[str, Any]] | None = None,
+    manifest: AutoCodeManifest | None = None,
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """Check log10-decade continuity and 2D joint parameter regimes across a test suite."""
+    decade_counts: dict[str, int] = {}
+    for val in parsed_effective_scales:
+        d = int(math.floor(math.log10(max(1, val))))
+        key = str(d)
+        decade_counts[key] = decade_counts.get(key, 0) + 1
+
+    gap_warnings: list[dict[str, Any]] = []
+    n_max_ref = max(expected_max or 0, max(parsed_effective_scales, default=0))
+    if n_max_ref >= 100_000 and total_files >= 10:
+        max_decade = int(math.floor(math.log10(n_max_ref)))
+        run_start: int | None = None
+        for d in range(1, max_decade + 1):
+            if decade_counts.get(str(d), 0) == 0:
+                if run_start is None:
+                    run_start = d
+            else:
+                if run_start is not None and (d - run_start) >= 2:
+                    lo_d, hi_d = run_start, d - 1
+                    gap_warnings.append(
+                        {
+                            "kind": "log_decade_gap",
+                            "empty_decades": [lo_d, hi_d],
+                            "range": f"[10^{lo_d}, 10^{hi_d + 1})",
+                            "reason": (
+                                f"log-decade scale vacuum: 0 tests in [10^{lo_d}, 10^{hi_d + 1}) "
+                                f"(n_max={n_max_ref})"
+                            ),
+                        }
+                    )
+                run_start = None
+        if run_start is not None and (max_decade + 1 - run_start) >= 2:
+            lo_d, hi_d = run_start, max_decade
+            gap_warnings.append(
+                {
+                    "kind": "log_decade_gap",
+                    "empty_decades": [lo_d, hi_d],
+                    "range": f"[10^{lo_d}, 10^{hi_d + 1})",
+                    "reason": (
+                        f"log-decade scale vacuum: 0 tests in [10^{lo_d}, 10^{hi_d + 1}) "
+                        f"(n_max={n_max_ref})"
+                    ),
+                }
+            )
+
+    # 2D Joint-Regime Check on leading header parameter columns
+    if len(header_rows) >= 10 and n_max_ref >= 5000:
+        scalar_bounds = [
+            b for b in (validator_bounds or []) if isinstance(b, dict) and b.get("source") == "read_scalar"
+        ]
+        max_cols = max((len(r) for r in header_rows), default=0)
+        if scalar_bounds and isinstance(scalar_bounds[0].get("var"), str):
+            first_v = str(scalar_bounds[0]["var"]).strip().lower()
+            is_mt = bool(manifest is not None and getattr(manifest, "multi_test", False))
+            if (is_mt and len(scalar_bounds) > max_cols) or (
+                first_v in {"t", "tc", "tt", "test", "tests", "cases", "q_cases", "test_cases"}
+                and (is_mt or len(scalar_bounds) > max_cols)
+            ):
+                scalar_bounds = scalar_bounds[1:]
+        primary_var_name = (
+            str(scalar_bounds[0].get("var")).strip()
+            if scalar_bounds and isinstance(scalar_bounds[0].get("var"), str)
+            else "n"
+        )
+        for col_idx in range(1, min(max_cols, 4)):
+            col_pairs = [(r[0], r[col_idx]) for r in header_rows if len(r) > col_idx]
+            if len(col_pairs) < 10:
+                continue
+            p2_vals = [p2 for _, p2 in col_pairs]
+            p2_max = max(p2_vals)
+            val_meta = scalar_bounds[col_idx] if col_idx < len(scalar_bounds) else None
+            val_max_expr = (
+                str(val_meta.get("max_expr")).strip()
+                if val_meta and isinstance(val_meta.get("max_expr"), str)
+                else ""
+            )
+            val_min = val_meta.get("min") if val_meta else None
+            explicit_pos = bool(
+                val_max_expr
+                and val_max_expr.lower() == primary_var_name.lower()
+                and (val_min is None or (isinstance(val_min, int) and val_min in (0, 1)))
+            )
+            inferred_pos = bool(
+                n_max_ref >= 100_000
+                and p2_max >= int(0.5 * n_max_ref)
+                and p2_max >= 1000
+                and all(1 <= p2 <= p1 for p1, p2 in col_pairs)
+                and any(p1 >= int(0.95 * n_max_ref) for p1, _ in col_pairs)
+                and all(
+                    p2 > 100 and (p1 - p2) > 100
+                    for p1, p2 in col_pairs
+                    if p1 >= int(0.95 * n_max_ref)
+                )
+            )
+            is_position_col = explicit_pos or inferred_pos
+            if is_position_col:
+                extreme_pairs = [(p1, p2) for p1, p2 in col_pairs if p1 >= int(0.95 * n_max_ref)]
+                if extreme_pairs and not any(
+                    p2 <= 100 or (p1 - p2) <= 100 for p1, p2 in extreme_pairs
+                ):
+                    gap_warnings.append(
+                        {
+                            "kind": "extreme_boundary_position_missing",
+                            "col_index": col_idx,
+                            "var": val_meta.get("var") if val_meta else f"col_{col_idx}",
+                            "reason": (
+                                f"at extreme n >= {int(0.95 * n_max_ref)}, position parameter "
+                                f"{(val_meta.get('var') if val_meta else None) or f'col_{col_idx}'} "
+                                "never approaches left/right boundary (<= 100 or >= n - 100)"
+                            ),
+                        }
+                    )
+                continue
+
+            if p2_max >= 1000:
+                mid_hi = min(n_max_ref, 50_000)
+                if mid_hi >= 2000:
+                    has_joint_mid = any(
+                        2000 <= p1 <= mid_hi and p2 >= 0.5 * p2_max
+                        for p1, p2 in col_pairs
+                    )
+                    if not has_joint_mid:
+                        gap_warnings.append(
+                            {
+                                "kind": "joint_regime_gap",
+                                "col_index": col_idx,
+                                "var": val_meta.get("var") if val_meta else f"col_{col_idx}",
+                                "p2_max": p2_max,
+                                "reason": (
+                                    f"2D joint-regime gap: no test covers n in [2000, {mid_hi}] "
+                                    f"with {(val_meta.get('var') if val_meta else None) or f'col_{col_idx}'} "
+                                    f">= {int(0.5 * p2_max)}"
+                                ),
+                            }
+                        )
+    return decade_counts, gap_warnings
+
+
 class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
     """File completeness, empty/duplicate checks, limit ratio, and boundary coverage."""
 
@@ -731,7 +911,11 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         }
 
     def _check_scale_distribution(
-        self, tests_dir: str, manifest: AutoCodeManifest | None = None
+        self,
+        tests_dir: str,
+        manifest: AutoCodeManifest | None = None,
+        *,
+        validator_bounds: list[dict[str, Any]] | None = None,
     ) -> dict:
         if manifest is None:
             manifest = self._load_optional_problem_manifest(tests_dir)
@@ -744,6 +928,7 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         byte_buckets = {"0-100B": 0, "101B-1KB": 0, "1KB-32KB": 0, "32KB+": 0}
         parsed_first_ints: list[int] = []
         parsed_effective_scales: list[int] = []
+        header_rows: list[list[int]] = []
         for path in in_files:
             resolved = safe_resolve_under_root(tests_dir, path.name)
             if resolved is None:
@@ -767,6 +952,9 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
                     bucket = _scale_bucket_for_int(effective_scale)
                 else:
                     bucket = "medium"
+                row = _extract_header_int_row(data, manifest)
+                if row:
+                    header_rows.append(row)
                 # Byte/token scale hints ensure large multi-test inputs (e.g. T=1, n=200000) never land in tiny.
                 if size > 32 * 1024 or len(tokens) > 1000:
                     min_bucket = "large"
@@ -801,16 +989,32 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         if passed and len(in_files) >= 3 and not narrow_constraint_exempt:
             passed = non_empty_scale_buckets >= 2
 
+        log_decade_counts, scale_gap_warnings = _check_log_decade_and_joint_regimes(
+            parsed_effective_scales=parsed_effective_scales,
+            header_rows=header_rows,
+            expected_max=expected_max,
+            total_files=len(in_files),
+            validator_bounds=validator_bounds,
+            manifest=manifest,
+        )
+        require_continuity = bool(
+            manifest is not None and manifest.audit_gates.require_scale_continuity
+        )
+        if passed and require_continuity and scale_gap_warnings:
+            passed = False
+
         hint = ""
         if not passed:
             if not in_files:
                 hint = "未找到测试输入文件"
             elif buckets["empty"] > 0:
                 hint = "存在空测试输入文件"
-            else:
+            elif non_empty_scale_buckets < 2 and len(in_files) >= 3 and not narrow_constraint_exempt:
                 hint = (
                     "测试规模退化为单一尺度桶（>= 3 组数据时需覆盖至少 2 个不同尺度桶）"
                 )
+            elif scale_gap_warnings:
+                hint = "; ".join(str(w["reason"]) for w in scale_gap_warnings[:3])
 
         effective_buckets = {k: v for k, v in buckets.items() if v > 0}
         return {
@@ -825,6 +1029,9 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
             "max_effective_scale": max(parsed_effective_scales) if parsed_effective_scales else None,
             "non_empty_scale_bucket_count": non_empty_scale_buckets,
             "narrow_constraint_exempt": narrow_constraint_exempt,
+            "log_decade_counts": log_decade_counts,
+            "scale_gap_warnings": scale_gap_warnings,
+            "scale_continuity_passed": not scale_gap_warnings,
             "hint": hint,
         }
 

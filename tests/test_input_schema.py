@@ -7,6 +7,8 @@ objects are inlined (no ``$ref``/``$defs``), and that migrated tools expose the
 derived schema as their single source of truth.
 """
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 from autocode_mcp.tools.audit import ProblemAuditTool
@@ -79,6 +81,7 @@ def test_audit_schema_from_model():
         "standalone",
         "layout",
         "enable_mutation_testing",
+        "strict",
     }
     assert props["problem_dir"]["type"] == "string"
     assert props["mode"]["enum"] == ["quick", "full"]
@@ -90,10 +93,41 @@ def test_audit_schema_from_model():
     assert props["layout"]["enum"] == ["auto", "autocode", "standard_cn", "polygon", "hydro"]
     assert props["layout"]["default"] == "auto"
     assert _non_null(props["enable_mutation_testing"])["type"] == "boolean"
+    assert props["strict"]["type"] == "boolean"
+    assert props["strict"]["default"] is False
     # report_path is optional (absent from required, nullable string)
     assert "report_path" not in schema["required"]
     assert _non_null(props["report_path"])["type"] == "string"
     assert schema["required"] == ["problem_dir"]
+
+
+def test_audit_and_verify_schema_parity_with_execute_and_skills():
+    import inspect
+
+    sig = inspect.signature(ProblemAuditTool.execute)
+    exec_params = {
+        name for name in sig.parameters if name != "self"
+    }
+    assert set(ProblemAuditInput.model_fields) == exec_params
+    assert "strict" in ProblemAuditInput.model_fields
+
+    # Every migrated Pydantic input model's fields must be accepted by its tool's execute()
+    for tool_cls, model in _MIGRATED:
+        t_sig = inspect.signature(tool_cls.execute)
+        t_params = {name for name in t_sig.parameters if name != "self"}
+        assert set(model.model_fields) <= t_params, f"{tool_cls.__name__} missing model fields from {model.__name__}"
+
+    # ProblemVerifyTestsInput must accept every verify_types value referenced in skills/ & agents/
+    repo_root = Path(__file__).resolve().parent.parent
+    referenced_verify_types: set[str] = {"coverage"}
+    for md_dir in ("skills", "agents"):
+        for md_file in (repo_root / md_dir).rglob("*.md"):
+            text = md_file.read_text(encoding="utf-8")
+            for m in re.finditer(r"verify_types\s*=\s*\[([^\]]+)\]", text):
+                for lit in re.findall(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']', m.group(1)):
+                    referenced_verify_types.add(lit)
+    parsed = ProblemVerifyTestsInput(problem_dir="/tmp/p", verify_types=sorted(referenced_verify_types))
+    assert set(parsed.verify_types) == referenced_verify_types
 
 
 def test_pack_polygon_schema_export_formats():

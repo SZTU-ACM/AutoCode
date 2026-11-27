@@ -502,3 +502,174 @@ def test_report_format_renders_consistency_on_passed_true_and_escapes_adversaria
     assert "\x1b" not in sum_adv
     assert "\n# Heading" not in sum_adv
     assert "STMT_CONSISTENCY: passed=False mismatches=1 vars=[n|evil # Heading] missing_terms=1" in sum_adv
+
+
+def test_e1_log_decade_gap_2d_regime_and_strict_gate(tmp_path: Path) -> None:
+    """Cover E1: log-decade vacuum warning (and strict blocking) + 2D joint-regime checks."""
+    import asyncio
+
+    from autocode_mcp.tools.audit import ProblemAuditTool
+    from autocode_mcp.tools.test_verify import ProblemVerifyTestsTool
+    from autocode_mcp.workflow.manifest import default_manifest, save_manifest
+    from autocode_mcp.workflow.models import SolutionEntry
+
+    prob = tmp_path / "e1_gap"
+    (prob / "statements").mkdir(parents=True)
+    (prob / "solutions").mkdir(parents=True)
+    (prob / "files").mkdir(parents=True)
+    (prob / "tests").mkdir(parents=True)
+
+    manifest = default_manifest(prob.name, str(prob))
+    manifest.constraints = {"n": {"min": 1, "max": 1000000000}, "s": {"min": 1, "max": "n"}}
+    manifest.solutions = [
+        SolutionEntry(name="sol", path="solutions/sol.cpp", role="main", expected="pass")
+    ]
+    manifest.oracle_mode = "interactor_only"
+    save_manifest(str(prob), manifest)
+
+    (prob / "statements" / "README.md").write_text(
+        "# Gap\n\n时间限制：1000 ms\n内存限制：256 MiB\n\n给定 $1 \\le n \\le 10^9, 1 \\le s \\le n$。\n",
+        encoding="utf-8",
+    )
+    (prob / "solutions" / "sol.cpp").write_text(
+        "// Time Complexity: O(1)\n#include <iostream>\nint main(){ long long n,s; if(std::cin>>n>>s) std::cout<<n<<'\\n'; return 0;}\n",
+        encoding="utf-8",
+    )
+    (prob / "files" / "val.cpp").write_text(
+        "#include <iostream>\n"
+        "int main(){ long long n,s; if(!(std::cin>>n>>s)) return 1; return (1<=n && n<=1000000000LL && 1<=s && s<=n)?0:1; }\n",
+        encoding="utf-8",
+    )
+    (prob / "files" / "gen.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+
+    # 10+ cases spanning {1..600} and {1e9}, leaving [10^3, 10^8] decades empty + missing extreme boundary s
+    scales = [
+        (1, 1),
+        (2, 1),
+        (5, 3),
+        (10, 5),
+        (50, 25),
+        (200, 100),
+        (600, 300),
+        (1000000000, 500000000),
+        (1000000000, 400000000),
+        (1000000000, 600000000),
+    ]
+    for idx, (n_val, s_val) in enumerate(scales, start=1):
+        (prob / "tests" / f"{idx:02d}.in").write_text(f"{n_val} {s_val}\n", encoding="utf-8")
+        (prob / "tests" / f"{idx:02d}.ans").write_text(f"{n_val}\n", encoding="utf-8")
+
+    sd = ProblemVerifyTestsTool()._check_scale_distribution(
+        str(prob / "tests"), manifest=manifest
+    )
+    assert sd["passed"] is True  # backward-compatible warning mode by default
+    assert sd["scale_continuity_passed"] is False
+    kinds = {w["kind"] for w in sd["scale_gap_warnings"]}
+    assert "log_decade_gap" in kinds
+    assert "extreme_boundary_position_missing" in kinds
+
+    manifest.audit_gates.require_scale_continuity = True
+    sd_strict = ProblemVerifyTestsTool()._check_scale_distribution(
+        str(prob / "tests"), manifest=manifest
+    )
+    assert sd_strict["passed"] is False
+
+    # Reset require_scale_continuity and verify problem_audit strict=True turns warning into blocking
+    manifest.audit_gates.require_scale_continuity = False
+    save_manifest(str(prob), manifest)
+    audit_default = asyncio.run(
+        ProblemAuditTool().execute(problem_dir=str(prob), mode="quick", strict=False)
+    )
+    assert any(
+        w.get("gate") == "scale_gap_warning"
+        for w in audit_default.data["risk_report"]["warnings"]
+    )
+    audit_strict = asyncio.run(
+        ProblemAuditTool().execute(problem_dir=str(prob), mode="quick", strict=True)
+    )
+    assert audit_strict.data["decision"] == "no_go"
+    assert any(
+        b.get("gate") == "scale_distribution"
+        for b in audit_strict.data["blocking_issues"]
+    )
+
+    # Multi-test 2D joint regime check: (n <= 10^9, T <= 10^5) must NOT misclassify T as position [1, n]
+    from autocode_mcp.tools.verify_static_checks import _check_log_decade_and_joint_regimes
+
+    mt_manifest = default_manifest("e1_mt", str(prob))
+    mt_manifest.multi_test = True
+    mt_rows = [
+        [2, 5],
+        [50, 10000],
+        [500, 1000],
+        [5000, 10],
+        [20000, 5],
+        [500000, 10],
+        [5000000, 10],
+        [50000000, 10],
+        [500000000, 10],
+        [1000000000, 10],
+    ]
+    mt_bounds = [
+        {"var": "group_t", "min": 1, "max": 10, "source": "read_scalar"},
+        {"var": "n", "min": 1, "max": 1000000000, "source": "read_scalar"},
+        {"var": "k", "min": 1, "max": 100000, "source": "read_scalar"},
+    ]
+    _, mt_gaps = _check_log_decade_and_joint_regimes(
+        parsed_effective_scales=[r[0] for r in mt_rows],
+        header_rows=mt_rows,
+        expected_max=1000000000,
+        total_files=len(mt_rows),
+        validator_bounds=mt_bounds,
+        manifest=mt_manifest,
+    )
+    assert all(g["kind"] != "extreme_boundary_position_missing" for g in mt_gaps), mt_gaps
+    assert any(g["kind"] == "joint_regime_gap" and g["var"] == "k" for g in mt_gaps), mt_gaps
+
+
+def test_e3_symbolic_validator_bounds_smt_and_coupled_witnesses(tmp_path: Path) -> None:
+    """Cover E3: extract symbolic max_expr (s <= n, m <= n*(n-1)) and synthesize coupled boundary witnesses."""
+    from autocode_mcp.tools.audit_constraints import _extract_validator_bounds
+    from autocode_mcp.utils.smt_constraints import audit_manifest_constraints
+    from autocode_mcp.workflow.manifest import default_manifest
+
+    val_cpp = tmp_path / "val.cpp"
+    val_cpp.write_text(
+        """
+#include "testlib.h"
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    int T = inf.readInt(1, 1000, "T");
+    inf.readEoln();
+    int n = inf.readInt(1, 100000, "n");
+    inf.readSpace();
+    int s = inf.readInt(1, n, "s");
+    inf.readSpace();
+    long long m = inf.readLong(0LL, 1LL * n * (n - 1), "m");
+    inf.readEoln();
+    inf.readEof();
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+    bounds = _extract_validator_bounds(val_cpp)
+    by_var = {b["var"]: b for b in bounds}
+    assert by_var["s"]["min"] == 1
+    assert by_var["s"]["max_expr"] == "n"
+    assert by_var["m"]["min"] == 0
+    assert by_var["m"]["max_expr"] is not None and "n" in by_var["m"]["max_expr"]
+
+    manifest = default_manifest("e3_smt", str(tmp_path))
+    manifest.constraints = {"n": {"min": 1, "max": 100000}, "s": {"min": 1, "max": 100000}}
+    res = audit_manifest_constraints(manifest, validator_bounds=bounds)
+    assert res.global_satisfiable is True
+    witness_names = res.boundary_witnesses
+    assert any(
+        name.startswith("coupled_n_max_s_max") and assign["s"] == assign["n"] == 100000
+        for name, assign in witness_names.items()
+    ), witness_names
+    assert any(
+        name.startswith("coupled_n_max_s_min") and assign["n"] == 100000 and assign["s"] == 1
+        for name, assign in witness_names.items()
+    ), witness_names

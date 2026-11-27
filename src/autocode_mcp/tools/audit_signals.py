@@ -34,9 +34,87 @@ from .complexity import (
 )
 from .test_verify import ProblemVerifyTestsTool
 
+_BITS_INCLUDE_RE = re.compile(r"^\s*#\s*include\s*<\s*bits/stdc\+\+\.h\s*>", re.MULTILINE)
+
 
 class _AuditSignalsMixin(_AuditDiscoveryMixin):
     """Structural/quality/difficulty signal assembly and host performance warnings."""
+
+    def _collect_portability_warnings(
+        self,
+        problem_path: Path,
+        manifest: AutoCodeManifest,
+        *,
+        standalone: bool = False,
+        layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
+    ) -> list[dict[str, str]]:
+        """Detect non-portable `#include <bits/stdc++.h>` across solution and auxiliary C++ files."""
+        cand_paths: list[Path] = []
+        seen_resolved: set[Path] = set()
+
+        def _add_path(p: Path | None) -> None:
+            if p is None or not p.is_file():
+                return
+            try:
+                rp = p.resolve()
+            except OSError:
+                return
+            if rp in seen_resolved:
+                return
+            seen_resolved.add(rp)
+            cand_paths.append(p)
+
+        _add_path(self._find_main_solution_source(problem_path, manifest, standalone=standalone, layout=layout))
+        _add_path(self._solution_source(problem_path, "brute"))
+        _add_path(self._find_validator_source(problem_path, standalone=standalone))
+        _add_path(self._find_generator_source(problem_path, standalone=standalone))
+        _add_path(self._find_checker_source(problem_path, standalone=standalone))
+        _add_path(self._find_interactor_source(problem_path, standalone=standalone))
+        for extra_rel in (
+            "files/communicator.cpp",
+            "files/grader.cpp",
+            *(
+                [manifest.protocol.communicator_file, manifest.protocol.grader_file]
+                if manifest.protocol is not None
+                else []
+            ),
+        ):
+            if extra_rel:
+                _add_path(self._safe_file(problem_path, extra_rel))
+        for sol_entry in manifest.solutions:
+            if sol_entry.path and sol_entry.language == "cpp":
+                _add_path(self._safe_file(problem_path, sol_entry.path))
+
+        root_resolved = problem_path.resolve()
+        flagged_rels: list[str] = []
+        for src in cand_paths:
+            if src.suffix.lower() not in {".cpp", ".cc", ".cxx", ".h", ".hpp"}:
+                continue
+            try:
+                if src.stat().st_size > 2 * 1024 * 1024:
+                    continue
+                text = src.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            cleaned = _strip_cpp_comments_and_strings(text)
+            if _BITS_INCLUDE_RE.search(cleaned):
+                try:
+                    rel = src.resolve().relative_to(root_resolved).as_posix()
+                except ValueError:
+                    rel = src.name
+                flagged_rels.append(rel)
+
+        if not flagged_rels:
+            return []
+        return [
+            {
+                "gate": "portability_warning",
+                "reason": (
+                    f"non-standard <bits/stdc++.h> used in {flagged_rels[:10]}; "
+                    "may fail to compile on macOS Apple Clang — prefer standard C++ headers"
+                ),
+            }
+        ]
 
     def _structural_signals(
         self,
@@ -260,6 +338,8 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
         has_tests_manifest: bool = True,
         layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
         max_near_duplicate_ratio: float = 0.2,
+        manifest: AutoCodeManifest | None = None,
+        validator_bounds: list[dict[str, Any]] | None = None,
     ) -> dict[str, dict]:
         tests_dir = self._resolve_tests_dir(problem_path, standalone=standalone, layout=layout)
         if tests_dir is None or self._find_escaped_entries(problem_path, tests_dir):
@@ -269,7 +349,11 @@ class _AuditSignalsMixin(_AuditDiscoveryMixin):
             "duplicate_inputs": verifier._check_duplicate_inputs(
                 str(tests_dir), max_near_ratio=max_near_duplicate_ratio
             ),
-            "scale_distribution": verifier._check_scale_distribution(str(tests_dir)),
+            "scale_distribution": verifier._check_scale_distribution(
+                str(tests_dir),
+                manifest=manifest,
+                validator_bounds=validator_bounds,
+            ),
         }
         out: dict[str, dict] = {
             name: {

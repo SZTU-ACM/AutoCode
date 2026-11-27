@@ -869,3 +869,93 @@ async def test_perf_stderr_signal_detection_and_bare_fallback(
     assert res["returncode"] == -6
     assert res["metric_backend"] == "cpu_time"
     assert res["instruction_count"] is None
+
+
+def test_b5_multitest_tree_dp_adj_and_bitmask_alias_complexity() -> None:
+    """Cover B5: multi-test + iterative tree DP + && constant loop -> O(n); 1<<n alias -> O(2^n)."""
+    from autocode_mcp.tools.complexity import (
+        analyze_cpp_interprocedural,
+        detect_algorithm_patterns,
+        estimate_static_complexity,
+    )
+
+    tree_dp_code = """
+#include <array>
+#include <iostream>
+#include <vector>
+using namespace std;
+
+void solve() {
+    int n;
+    cin >> n;
+    vector<vector<int>> g(n + 1);
+    for (int i = 0; i < n - 1; ++i) {
+        int u, v;
+        cin >> u >> v;
+        g[u].push_back(v);
+        g[v].push_back(u);
+    }
+    vector<int> parent(n + 1, 0), order;
+    order.reserve(n);
+    order.push_back(1);
+    for (int idx = 0; idx < (int)order.size(); ++idx) {
+        int u = order[idx];
+        for (int v : g[u]) {
+            if (v == parent[u]) continue;
+            parent[v] = u;
+            order.push_back(v);
+        }
+    }
+    vector<array<long long, 7>> dp(n + 1);
+    for (int i = n - 1; i >= 0; --i) {
+        int u = order[i];
+        bool found = false;
+        for (int c = 0; c < 2 && !found; ++c) {
+            dp[u][c] = dp[u][c] + 1;
+            if (dp[u][c] > 10) found = true;
+        }
+    }
+    cout << dp[1][0] << "\\n";
+}
+
+int main() {
+    int T;
+    cin >> T;
+    while (T--) solve();
+    return 0;
+}
+"""
+    est, signals = estimate_static_complexity(tree_dp_code)
+    assert est == "O(n)", f"expected O(n), got {est} ({signals})"
+    inter = analyze_cpp_interprocedural(tree_dp_code)
+    assert inter.max_depth == 1, inter
+    assert inter.has_nested_for is False, inter
+
+    bitmask_code = """
+#include <iostream>
+#include <queue>
+#include <vector>
+using namespace std;
+
+int main() {
+    int n;
+    cin >> n;
+    int N = 1 << n;
+    vector<long long> dp(N, 1e18);
+    priority_queue<pair<long long, int>> pq;
+    dp[0] = 0;
+    pq.push({0, 0});
+    for (int mask = 0; mask < N; ++mask) {
+        for (int i = 0; i < n; ++i) {
+            if (mask & (1 << i)) dp[mask] = min(dp[mask], dp[mask ^ (1 << i)] + 1);
+        }
+    }
+    cout << dp[N - 1] << "\\n";
+    return 0;
+}
+"""
+    bm_pat, bm_sigs = detect_algorithm_patterns(bitmask_code)
+    assert bm_pat is not None and "2^n" in bm_pat
+    assert "bitmask" in bm_sigs or "bitmask_dp" in bm_sigs
+    bm_est, _ = estimate_static_complexity(bitmask_code)
+    assert "2^n" in bm_est

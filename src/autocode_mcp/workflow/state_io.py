@@ -67,6 +67,7 @@ def _default_state(problem_dir: str) -> dict[str, Any]:
         "interaction_scenarios": {},
         "statement_validated": False,
         "statement_dirty": False,
+        "statement_source_hash": None,
         "sample_files_validated": False,
         "validation_passed": False,
         "tests_generated": False,

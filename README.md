@@ -134,7 +134,7 @@ cp -R ./autocode-marketplace/plugins/autocode-agy ~/.gemini/config/plugins/autoc
 除了在 AI 客户端中走完整出题与验题流程，也可以直接安装命令行工具 `autocode-audit`，在本地终端快速巡检已有题包，或接入命题仓库的 GitHub Actions PR 自动审题（模板见 [`examples/ci/autocode-problem-audit.yml`](examples/ci/autocode-problem-audit.yml)）：
 
 ```bash
-uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v4.0.0
+uv tool install git+https://github.com/SZTU-ACM/AutoCode.git@v4.1.0
 
 autocode-audit ./path/to/problem \
   --standalone \

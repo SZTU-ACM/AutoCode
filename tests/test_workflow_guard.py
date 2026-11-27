@@ -879,3 +879,144 @@ def test_post_tool_solution_audit_brute_writes_brute_complexity(tmp_path):
     state = module.load_state(str(problem_dir))
     assert state["brute_complexity"] == "O(2^n)"
     assert state["recommended_stress_params"] == {"n_max": 8, "trials": 600}
+
+
+def test_e4_direct_statement_edit_invalidates_validation_and_audit_but_keeps_stress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cover E4: direct disk edit to statements/README.md invalidates statement_validated & full_audit_passed while preserving stress_passed & tests_verified."""
+    import asyncio
+
+    from autocode_mcp.runtime_store import AUDIT, WORKFLOW, get_section, set_section
+    from autocode_mcp.tools.problem_pack import ProblemPackPolygonTool
+    from autocode_mcp.utils.platform import get_exe_extension
+    from autocode_mcp.workflow.enforcement import apply_result, preflight
+    from autocode_mcp.workflow.hashes import current_platform, current_statement_sha256
+    from autocode_mcp.workflow.reconcile import reconcile_workspace_state
+    from autocode_mcp.workflow.state_io import load_workflow_state
+
+    monkeypatch.setenv("AUTOCODE_ENFORCE_GATES", "1")
+    problem_dir = tmp_path / "e4_prob"
+    (problem_dir / "statements").mkdir(parents=True)
+    (problem_dir / "solutions").mkdir(parents=True)
+    (problem_dir / "files").mkdir(parents=True)
+    (problem_dir / "tests").mkdir(parents=True)
+    write_manifest(problem_dir)
+
+    stmt_path = problem_dir / "statements" / "README.md"
+    stmt_path.write_text("# 标题\n\n时间限制：1000 ms\n\n描述 v1\n", encoding="utf-8")
+    (problem_dir / "solutions" / "sol.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (problem_dir / "solutions" / "brute.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (problem_dir / "files" / "val.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (problem_dir / "files" / "gen.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    ext = get_exe_extension()
+    for rel_bin in (
+        f"solutions/sol{ext}",
+        f"solutions/brute{ext}",
+        f"files/val{ext}",
+        f"files/gen{ext}",
+    ):
+        (problem_dir / rel_bin).write_text("", encoding="utf-8")
+    (problem_dir / "tests" / "01.in").write_text("1\n", encoding="utf-8")
+    (problem_dir / "tests" / "01.ans").write_text("1\n", encoding="utf-8")
+
+    # Seed verified state with stress_passed & tests_verified = True
+    state = load_workflow_state(str(problem_dir))
+    state.update(
+        {
+            "created": True,
+            "build_platform": current_platform(),
+            "sol_built": True,
+            "brute_built": True,
+            "solution_analyzed": True,
+            "std_audited": True,
+            "brute_audited": True,
+            "validator_ready": True,
+            "validator_accuracy": 1.0,
+            "validator_has_positive_cases": True,
+            "validator_has_negative_cases": True,
+            "generator_built": True,
+            "stress_passed": True,
+            "stress_completed_rounds": 10,
+            "stress_total_rounds": 10,
+            "tests_generated": True,
+            "generated_test_count": 2,
+            "tests_verified": True,
+            "limit_case_ratio": 0.5,
+            "verify_signals": {
+                "limit_semantics": {"executed": True, "passed": True},
+                "validator_check": {"executed": True, "passed": True},
+            },
+        }
+    )
+    set_section(str(problem_dir), WORKFLOW, state)
+
+    # Simulate passing problem_validate and problem_audit(mode="full")
+    apply_result(
+        str(problem_dir),
+        "problem_validate",
+        {"problem_dir": str(problem_dir)},
+        success=True,
+        data={"statement_samples": {"validated": True}, "sample_files": {"validated": True}},
+    )
+    stmt_hash = current_statement_sha256(str(problem_dir))
+    assert isinstance(stmt_hash, str) and len(stmt_hash) == 64
+    set_section(
+        str(problem_dir),
+        AUDIT,
+        {
+            "full_audit_passed": True,
+            "full_audit": {
+                "mode": "full",
+                "decision": "go",
+                "blocking_issue_count": 0,
+                "statement_source_hash": stmt_hash,
+                "quality_signals": {
+                    "duplicate_inputs": {"executed": True, "passed": True},
+                    "scale_distribution": {"executed": True, "passed": True},
+                    "purpose_coverage": {"executed": True, "passed": True},
+                    "validator_self_test": {"executed": True, "passed": True},
+                },
+            },
+        },
+    )
+    apply_result(
+        str(problem_dir),
+        "problem_audit",
+        {"problem_dir": str(problem_dir), "mode": "full", "standalone": False},
+        success=True,
+        data={"decision": "go", "mode": "full", "blocking_issues": []},
+    )
+
+    # Now mutate statements/README.md directly on disk (without going through file_save)
+    stmt_path.write_text("# 标题\n\n时间限制：1000 ms\n\n描述 v2 修改了题面\n", encoding="utf-8")
+
+    # 1. load_workflow_state detects drift in-memory without wiping stress_passed / tests_verified
+    loaded = load_workflow_state(str(problem_dir))
+    assert loaded["statement_validated"] is False
+    assert loaded["validation_passed"] is False
+    assert loaded["statement_dirty"] is True
+    assert loaded["stress_passed"] is True
+    assert loaded["tests_verified"] is True
+
+    # 2. preflight and direct problem_pack_polygon execution both block on statement_fresh
+    violations = preflight("problem_pack_polygon", str(problem_dir), {"problem_dir": str(problem_dir)})
+    assert any(v.gate == "statement_fresh" for v in violations), violations
+    pack_res = asyncio.run(ProblemPackPolygonTool().execute(problem_dir=str(problem_dir)))
+    assert pack_res.success is False
+    assert pack_res.data.get("gate") == "statement_fresh"
+
+    # 3. reconcile_workspace_state persists invalidation cleanly & is idempotent on repeat call
+    rec1 = reconcile_workspace_state(str(problem_dir))
+    assert rec1["reconciled"] is True
+    assert any("statement hash drift" in act for act in rec1["actions"])
+    wf_after = get_section(str(problem_dir), WORKFLOW)
+    audit_after = get_section(str(problem_dir), AUDIT)
+    assert wf_after["statement_validated"] is False
+    assert wf_after["statement_dirty"] is True
+    assert wf_after["stress_passed"] is True
+    assert wf_after["tests_verified"] is True
+    assert audit_after["full_audit_passed"] is False
+
+    rec2 = reconcile_workspace_state(str(problem_dir))
+    assert not any("statement hash drift" in act for act in rec2["actions"])

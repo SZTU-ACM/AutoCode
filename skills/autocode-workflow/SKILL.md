@@ -50,7 +50,7 @@ problem_create(problem_type="interactive"|"communication", protocol_mode=..., or
 | Complexity audit | `solution_analyze`, `solution_audit_std` (and `solution_audit_brute`); re-running post-`generator_build` with unchanged SHA-256 runs dynamic probes non-destructively |
 | Validator | Non-protocol: `validator_build` passes both positive (`expected_valid=True`) and negative (`expected_valid=False`) cases with `accuracy >= 0.9` |
 | Interactor / Communicator | Interactive & non-`grader_linked` communication: `interactor_build` ready; `grader_linked`: `files/grader.cpp` + `files/problem.h` linked |
-| Generator & Stress | `generator_build` with distinct `type=1..4` strategies; `stress_test_run` completes all rounds (`enable_sanitizers=true` runs isolated ASan/UBSan in `.autocode/san_bin/`) |
+| Generator & Stress | `generator_build` with distinct `type=1..4` strategies (when any parameter span $\ge 10^5$, `type=2` MUST use log-uniform sampling by decade rather than bare `rnd.next(1, n_max)`, plus independent multi-parameter regime sampling); `stress_test_run` completes all rounds (`enable_sanitizers=true` runs isolated ASan/UBSan in `.autocode/san_bin/`) |
 | Validate & Generate | `problem_validate` passes samples/protocol; `problem_generate_tests` creates >=50% `type=3/4` limit cases |
 | Verify & Audit | `problem_verify_tests` passes `duplicate_inputs` (zero exact duplicates), `limit_semantics`, and `wrong_solution_kill`; `problem_audit(mode="full")` passes (`autocode-audit --standalone` for external packages) |
 | Packaging | `problem_pack_polygon` after verified tests (`export_formats`: `polygon`, `hydro`, `qoj`) |

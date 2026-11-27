@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..runtime_store import WORKFLOW, get_section, runtime_file
+from ..runtime_store import AUDIT, WORKFLOW, get_section, runtime_file, set_section
 from ..utils.communication_runner import safe_resolve_under_root
 from ..utils.platform import get_exe_extension
 from .gates import _sync_dynamic_probe_hashes, preflight
@@ -15,6 +15,7 @@ from .hashes import (
     _file_sha256,
     _invalidate_verify_only,
     current_platform,
+    is_statement_drifted_for_audit,
 )
 from .manifest import (
     load_manifest,
@@ -75,6 +76,13 @@ def inspect_workspace_state(problem_dir: str) -> dict[str, Any]:
     any_platform_mismatch = bool(build_plat and build_plat != cur_plat)
     if any_platform_mismatch:
         stale_reasons.append(f"build_platform mismatch: {build_plat} != {cur_plat}")
+    audit_raw = get_section(problem_dir, AUDIT)
+    if is_statement_drifted_for_audit(
+        problem_dir,
+        audit_raw if isinstance(audit_raw, dict) else None,
+        wf_raw if isinstance(wf_raw, dict) else None,
+    ):
+        stale_reasons.append("statement source changed since last validation/audit")
 
     for name, src_rel, bin_rel in targets:
         raw_src = root / src_rel
@@ -230,12 +238,49 @@ def reconcile_workspace_state(problem_dir: str) -> dict[str, Any]:
         }
 
     raw_before = get_section(problem_dir, WORKFLOW) or {}
+    audit_before = get_section(problem_dir, AUDIT) or {}
+    stmt_drifted = is_statement_drifted_for_audit(
+        problem_dir,
+        audit_before if isinstance(audit_before, dict) else None,
+        raw_before if isinstance(raw_before, dict) else None,
+    )
     state = load_workflow_state(problem_dir)
     if isinstance(raw_before, dict):
         if raw_before.get("sol_built") and not state.get("sol_built"):
             actions.append("invalidated sol_built/downstream due to sol.cpp source hash drift")
         if raw_before.get("brute_built") and not state.get("brute_built"):
             actions.append("invalidated brute_built/downstream due to brute.cpp source hash drift")
+    already_reset = (
+        not (isinstance(audit_before, dict) and bool(audit_before.get("full_audit_passed")))
+        and (
+            not isinstance(raw_before, dict)
+            or (
+                not bool(raw_before.get("statement_validated"))
+                and not bool(raw_before.get("statement_source_hash"))
+                and bool(raw_before.get("statement_dirty"))
+            )
+        )
+    )
+    if (
+        stmt_drifted
+        and (
+            (isinstance(audit_before, dict) and bool(audit_before.get("full_audit_passed")))
+            or (
+                isinstance(raw_before, dict)
+                and (
+                    bool(raw_before.get("statement_validated"))
+                    or bool(raw_before.get("statement_source_hash"))
+                    or not bool(raw_before.get("statement_dirty"))
+                )
+            )
+        )
+        and not already_reset
+    ):
+        set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+        actions.append(
+            "invalidated statement_validated/full_audit due to statement hash drift "
+            "(preserved stress_passed & tests_verified)"
+        )
 
     binary_status = inspection["binary_status"]
     flag_map = {

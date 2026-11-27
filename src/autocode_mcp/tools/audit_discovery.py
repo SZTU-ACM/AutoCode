@@ -273,9 +273,16 @@ class _AuditDiscoveryMixin:
         candidates = (
             (
                 "files/gen.cpp",
+                "files/generator.cpp",
+                "data/generator.cpp",
+                "data/gen.cpp",
+                "generator/generator.cpp",
                 "generator/gen.cpp",
+                "gen/generator.cpp",
                 "gen/gen.cpp",
+                "testdata/generator.cpp",
                 "testdata/gen.cpp",
+                "generator.cpp",
                 "gen.cpp",
             )
             if standalone
@@ -285,15 +292,117 @@ class _AuditDiscoveryMixin:
             found = self._safe_file(problem_path, rel)
             if found is not None:
                 return found
+        if standalone:
+            poly_meta = self._parse_polygon_xml_safe(problem_path)
+            if poly_meta is not None:
+                for gen_rel in poly_meta.generator_paths:
+                    found = self._safe_file(problem_path, gen_rel)
+                    if found is not None:
+                        return found
         return None
+
+    def _parse_statement_limits(
+        self,
+        problem_path: Path,
+        statement_path: str | None = None,
+        *,
+        layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
+    ) -> tuple[int | None, int | None]:
+        """Parse time (ms) and memory (MB) limits from the first 40 lines of statement Markdown."""
+        stmt_candidates = (
+            (
+                "statement/zh-cn.md",
+                "statement/zh.md",
+                "statement/README.md",
+                "statements/README.md",
+                "statements/zh-cn.md",
+                "problem_zh.md",
+                "statement.md",
+                "README.md",
+            )
+            if layout == "standard_cn"
+            else (
+                "statements/README.md",
+                "statement/zh-cn.md",
+                "statement/zh.md",
+                "statement/README.md",
+                "statements/zh-cn.md",
+                "problem_zh.md",
+                "statement.md",
+                "README.md",
+            )
+        )
+        ordered_candidates = (
+            (statement_path, *stmt_candidates) if statement_path else stmt_candidates
+        )
+        stmt_file: Path | None = None
+        for rel in ordered_candidates:
+            if not rel:
+                continue
+            cand = self._safe_file(problem_path, rel)
+            if cand is not None:
+                stmt_file = cand
+                break
+        if stmt_file is None:
+            return None, None
+        try:
+            if stmt_file.stat().st_size > 2 * 1024 * 1024:
+                return None, None
+            header = "\n".join(
+                stmt_file.read_text(encoding="utf-8", errors="replace").splitlines()[:40]
+            )
+        except OSError:
+            return None, None
+
+        tl_ms: int | None = None
+        ml_mb: int | None = None
+
+        time_patterns = (
+            r"时间限制[*`\s]*[：:]\s*[*`\s]*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|sec|seconds?|秒)",
+            r"time\s*limit[*`\s]*[：:]?\s*[*`\s]*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec|seconds?)\b",
+        )
+        for pat in time_patterns:
+            m_t = re.search(pat, header, re.IGNORECASE)
+            if not m_t:
+                continue
+            try:
+                val = float(m_t.group(1))
+            except ValueError:
+                continue
+            unit = m_t.group(2).lower()
+            parsed_ms = int(round(val * 1000.0)) if unit in {"s", "sec", "second", "seconds", "秒"} else int(round(val))
+            if 100 <= parsed_ms <= 60_000:
+                tl_ms = parsed_ms
+                break
+
+        mem_patterns = (
+            r"(?:内存|空间)限制[*`\s]*[：:]\s*[*`\s]*(\d+(?:\.\d+)?)\s*(mib|mb|兆字节|兆|gib|gb)",
+            r"memory\s*limit[*`\s]*[：:]?\s*[*`\s]*(\d+(?:\.\d+)?)\s*(mib|mb|gib|gb)\b",
+        )
+        for pat in mem_patterns:
+            m_m = re.search(pat, header, re.IGNORECASE)
+            if not m_m:
+                continue
+            try:
+                val_m = float(m_m.group(1))
+            except ValueError:
+                continue
+            unit_m = m_m.group(2).lower()
+            parsed_mb = int(round(val_m * 1024.0)) if unit_m in {"gib", "gb"} else int(round(val_m))
+            if 16 <= parsed_mb <= 16_384:
+                ml_mb = parsed_mb
+                break
+
+        return tl_ms, ml_mb
 
     def _infer_standalone_limits(
         self,
         problem_path: Path,
         *,
         layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto",
+        statement_path: str | None = None,
     ) -> tuple[int, int]:
-        """Infer (time_limit_ms, memory_limit_mb) from problem.xml / config.yaml / problem.conf if present."""
+        """Infer (time_limit_ms, memory_limit_mb) from config files, falling back to statement header."""
         import yaml
 
         from ..utils.exporters import _parse_hydro_mem_mb, _parse_hydro_time_ms
@@ -301,7 +410,7 @@ class _AuditDiscoveryMixin:
         tl_ms = 2000
         ml_mb = 256
 
-        def _try_polygon(rel: str = "problem.xml") -> tuple[int, int] | None:
+        def _try_polygon(rel: str = "problem.xml") -> tuple[int | None, int | None] | None:
             xml_f = self._safe_file(problem_path, rel)
             if xml_f is None:
                 return None
@@ -309,17 +418,15 @@ class _AuditDiscoveryMixin:
             poly = self._parse_polygon_xml_safe(poly_root)
             if poly is None:
                 return None
-            res_tl, res_ml = tl_ms, ml_mb
-            found_any = False
+            res_tl: int | None = None
+            res_ml: int | None = None
             if poly.time_limit_ms is not None and 100 <= poly.time_limit_ms <= 60_000:
                 res_tl = poly.time_limit_ms
-                found_any = True
             if poly.memory_limit_mb is not None and 16 <= poly.memory_limit_mb <= 16_384:
                 res_ml = poly.memory_limit_mb
-                found_any = True
-            return (res_tl, res_ml) if found_any else None
+            return (res_tl, res_ml) if (res_tl is not None or res_ml is not None) else None
 
-        def _try_hydro(rel: str = "testdata/config.yaml") -> tuple[int, int] | None:
+        def _try_hydro(rel: str = "testdata/config.yaml") -> tuple[int | None, int | None] | None:
             h_cfg = self._safe_file(problem_path, rel)
             if h_cfg is None:
                 return None
@@ -327,23 +434,21 @@ class _AuditDiscoveryMixin:
                 if h_cfg.stat().st_size <= 2 * 1024 * 1024:
                     parsed = yaml.safe_load(h_cfg.read_text(encoding="utf-8", errors="replace"))
                     if isinstance(parsed, dict):
-                        res_tl, res_ml = tl_ms, ml_mb
-                        found_any = False
+                        res_tl: int | None = None
+                        res_ml: int | None = None
                         ptl = _parse_hydro_time_ms(parsed.get("time"))
                         pml = _parse_hydro_mem_mb(parsed.get("memory"))
                         if ptl and 100 <= ptl <= 60_000:
                             res_tl = ptl
-                            found_any = True
                         if pml and 16 <= pml <= 16_384:
                             res_ml = pml
-                            found_any = True
-                        if found_any:
+                        if res_tl is not None or res_ml is not None:
                             return res_tl, res_ml
             except (yaml.YAMLError, OSError, ValueError):
                 pass
             return None
 
-        def _try_qoj(rel: str = "problem.conf") -> tuple[int, int] | None:
+        def _try_qoj(rel: str = "problem.conf") -> tuple[int | None, int | None] | None:
             q_cfg = self._safe_file(problem_path, rel)
             if q_cfg is None:
                 return None
@@ -354,27 +459,24 @@ class _AuditDiscoveryMixin:
                         parts = ln.strip().split(" ", 1)
                         if len(parts) == 2:
                             kv[parts[0]] = parts[1].strip()
-                    res_tl, res_ml = tl_ms, ml_mb
-                    found_any = False
+                    res_tl: int | None = None
+                    res_ml: int | None = None
                     if kv.get("time_limit_ms", "").isdigit() and len(kv["time_limit_ms"]) <= 9:
                         v = int(kv["time_limit_ms"])
                         if 100 <= v <= 60_000:
                             res_tl = v
-                            found_any = True
                     elif "time_limit" in kv and len(kv["time_limit"]) <= 12:
                         try:
                             fv = float(kv["time_limit"]) * 1000.0
                             if math.isfinite(fv) and 100 <= fv <= 60_000:
                                 res_tl = int(round(fv))
-                                found_any = True
                         except ValueError:
                             pass
                     if kv.get("memory_limit", "").isdigit() and len(kv["memory_limit"]) <= 6:
                         v = int(kv["memory_limit"])
                         if 16 <= v <= 16_384:
                             res_ml = v
-                            found_any = True
-                    if found_any:
+                    if res_tl is not None or res_ml is not None:
                         return res_tl, res_ml
             except OSError:
                 pass
@@ -387,19 +489,37 @@ class _AuditDiscoveryMixin:
             if layout == "standard_cn"
             else (_try_polygon, _try_hydro, _try_qoj)
         )
+        found_tl: int | None = None
+        found_ml: int | None = None
         for fn in order:
             got = fn()
             if got is not None:
-                return got
-        for rel_fn, export_rel in (
-            (_try_qoj, "exports/qoj/problem.conf"),
-            (_try_hydro, "exports/hydro/testdata/config.yaml"),
-            (_try_polygon, "exports/polygon/problem.xml"),
-        ):
-            got = rel_fn(export_rel)
-            if got is not None:
-                return got
-        return tl_ms, ml_mb
+                found_tl = got[0] if got[0] is not None else found_tl
+                found_ml = got[1] if got[1] is not None else found_ml
+                break
+        if found_tl is None and found_ml is None:
+            for rel_fn, export_rel in (
+                (_try_qoj, "exports/qoj/problem.conf"),
+                (_try_hydro, "exports/hydro/testdata/config.yaml"),
+                (_try_polygon, "exports/polygon/problem.xml"),
+            ):
+                got = rel_fn(export_rel)
+                if got is not None:
+                    found_tl = got[0] if got[0] is not None else found_tl
+                    found_ml = got[1] if got[1] is not None else found_ml
+                    break
+        if found_tl is None or found_ml is None:
+            stmt_tl, stmt_ml = self._parse_statement_limits(
+                problem_path, statement_path=statement_path, layout=layout
+            )
+            if found_tl is None:
+                found_tl = stmt_tl
+            if found_ml is None:
+                found_ml = stmt_ml
+        return (
+            found_tl if found_tl is not None else tl_ms,
+            found_ml if found_ml is not None else ml_mb,
+        )
 
     def _infer_standalone_manifest(
         self,
@@ -654,7 +774,9 @@ class _AuditDiscoveryMixin:
                 )
             )
 
-        tl_ms, ml_mb = self._infer_standalone_limits(problem_path, layout=layout)
+        tl_ms, ml_mb = self._infer_standalone_limits(
+            problem_path, layout=layout, statement_path=statement_path
+        )
         return AutoCodeManifest(
             problem_name=problem_name,
             problem_type=problem_type,

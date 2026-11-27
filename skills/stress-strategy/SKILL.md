@@ -14,6 +14,7 @@ Goal: build a reproducible and explainable multi-profile stress strategy from br
 - Keep semantic boundaries explicit:
   - `type=3`: boundary and extreme constraints coverage.
   - `type=4`: targeted worst-case/TLE-inducing patterns, not simple max-parameter scaling.
+- **Log-Uniform Sampling Rule**: Whenever any parameter range span is $\ge 10^5$ (e.g., $1 \le n \le 10^9$), `gen.cpp` `type=2` random tests MUST NOT rely solely on linear uniform `rnd.next(1, n_max)` (which starves medium/small scales); instead sample logarithmically across order-of-magnitude decades $e \in [0, \log_{10} n_{\max}]$ and $[10^e, \min(n_{\max}, 10^{e+1})]$, and sample multi-parameter scale regimes independently.
 - When brute complexity is higher than `O(n^2)`, automatically lower `n_max` and `trials`.
 - Every profile must be reproducible (fixed seed rules and replayable parameters).
 

@@ -366,6 +366,7 @@ class AuditGates(BaseModel):
     enable_mutation_testing: bool = False
     mutation_budget: int = Field(default=6, ge=1, le=12)
     fail_on_mutation_survival: bool = False
+    require_scale_continuity: bool = False
     min_branch_coverage: float | None = Field(
         default=None,
         ge=0.0,

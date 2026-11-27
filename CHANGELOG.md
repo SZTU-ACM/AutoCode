@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-27
+
+### Added
+
+- **MCP/CLI Schema 与严格审计扩展（B1–B4）**：
+  - `ProblemAuditInput` 补全 `strict` 参数，`ProblemVerifyTestsInput.verify_types` 补全 `"coverage"` 选项，并新增 `skills/` 与 `agents/` 文档引用的 Schema 自动一致性巡检回归测试。
+  - Standalone 发现引擎补全 `standard_cn` 多目录生成器候选路径（`data/generator.cpp` 等）与 Polygon `problem.xml` `<assets><generators><generator>` 解析；新增中英文题面头部时限与内存限制回退解析（含粗体冒号与秒/毫秒单位换算）。
+  - `--strict` 与 `require_wrong_solution_kill` 模式下，standalone 错解编译失败升级为 `blocking_issues`；新增 `<bits/stdc++.h>` 可移植性 `portability_warning` 告警。
+- **连续尺度断层与二维联合区间审计（E1）**：
+  - `verify_static_checks.py` 新增对数尺度断层检测（10 倍数量级真空警告 `log_decade_gap`）、多参数二维联合区间断层检测及 `n_max` 极限下位置参数边界覆盖检测（含多测 `validator_bounds` 对齐与非位置参数 `p2_max` 阈值保护）。
+  - `AuditGates` 新增 `require_scale_continuity` 字段，`problem_audit` 在 `quick` 与 `full` 模式下均支持默认 warning 报告并在 `strict=True` 或启用该门控时升级为阻断项；`problem_verify_tests` 同步传递 `validator_bounds`。
+- **分治阈值升级变异与等价过滤精化（E2）**：
+  - 新增 `hybrid_threshold_escalation` 多点变异算子（同步放大 `if (n <= THRESHOLD)` 分支阈值至 `min(n_max, THRESHOLD * 8)` 并退化大 `n` 快速分支），配合函数作用域返回推断与 `else if` 保护，以及将阈值塌缩至 `0` 的对照变异。
+  - 新增流式只读循环 `cin_read_loop_eof_ub` 过滤，避免单行 `for (int i = 0; i < n; ++i) cin >> a[i];` 误报 `< -> <=` 存活变异体，并细化 `% MOD` 与单次加减 `long long` 缩窄安全过滤与优先级排序。
+- **符号约束传播与耦合边界见证（E3） & 题面防漂移追踪（E4）**：
+  - `audit_constraints.py` 与 `smt_constraints.py` 支持提取并解析 validator 符号上下界（如 `1 <= s <= n`、`t_i <= T`、`m <= n * (n - 1)`），新增双向符号区间传播与耦合边界见证（`coupled_{driver}_max_{target}_min/max`）。
+  - 工作流状态机新增 `statement_source_hash` SHA-256 追踪（支持自定义 `manifest.statement_path`）：直接落盘修改题面会自动失效 `statement_validated`、`full_audit_passed` 与 `packaged`（同时保留已通过的 `stress_passed` 与 `tests_verified`），并阻断过期的打包调用。
+- **Agent / Skill 规范升级（S1–S3）**：
+  - 更新 `skills/redteam-hacking/SKILL.md` 与 `agents/autocode-redteam-auditor.md`，加入 Anti-Constant-Anchoring 禁令及 `Hybrid brute + degenerate fast branch`、`Randomized greedy rollout / SLF-SPFA` 错解族。
+  - 更新 `skills/autocode-workflow/SKILL.md` 与 `skills/stress-strategy/SKILL.md`（对数均匀随机采样硬规则）及 `skills/statement-audit/SKILL.md`、`rules/AGENTS.md`（遮挡样例解释完备性盲审与去剧透防回归守则）。
+
+### Fixed
+
+- **AST/调用图复杂度分析精度修复（B5）**：
+  - 引入上下文驱动的多测外层循环识别（区分 `cin >> n; for (i < n) cin >> a[i];` 与真实 `solve()`/新尺度多测框架）、放宽 `&&` 复合条件下的小常数循环判定、对直接邻接表遍历免除深度膨胀、支持二维小常数状态维 DP（`vector<array<..., K>>` 与 `K <= 16`），并增强 `int N = 1 << n;` 等递推别名的状压 `O(2^n)` 识别。
+
 ## [4.0.0] - 2026-11-25
 
 ### Added

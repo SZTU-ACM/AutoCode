@@ -35,11 +35,13 @@ from ..workflow import (
     check_gates,
     default_manifest,
     load_manifest,
+    load_workflow_state,
     manifest_is_communication,
     manifest_is_interactive,
     manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
 )
+from ..workflow.hashes import is_statement_drifted_for_audit, is_statement_hash_drifted
 from .base import Tool, ToolResult, input_schema_from_model
 from .problem_helpers import _LIMIT_STRATEGY_TYPES
 from .schemas import ProblemPackPolygonInput
@@ -519,11 +521,33 @@ class ProblemPackPolygonTool(Tool):
                 tests_verified=False,
             )
 
-        verify_signals = workflow_state.get("verify_signals", {}) if isinstance(workflow_state, dict) else {}
+        audit_state = get_section(problem_dir, AUDIT)
+        synced_workflow = (
+            load_workflow_state(problem_dir) if isinstance(get_section(problem_dir, WORKFLOW), dict) else workflow_state
+        )
+        stmt_drifted = is_statement_drifted_for_audit(
+            problem_dir,
+            audit_state if isinstance(audit_state, dict) else None,
+            synced_workflow if isinstance(synced_workflow, dict) else None,
+        )
+        stmt_hash_drifted = is_statement_hash_drifted(
+            problem_dir,
+            audit_state if isinstance(audit_state, dict) else None,
+            workflow_state if isinstance(workflow_state, dict) else None,
+        )
+        if quality_gates_cfg.require_validation_passed and stmt_hash_drifted:
+            return ToolResult.fail(
+                "statement has changed since last validation, run problem_validate first",
+                stage="problem_pack_polygon",
+                gate="statement_fresh",
+                required=True,
+                actual=False,
+            )
+
+        verify_signals = synced_workflow.get("verify_signals", {}) if isinstance(synced_workflow, dict) else {}
         if not isinstance(verify_signals, dict):
             verify_signals = {}
         if require_full_audit:
-            audit_state = get_section(problem_dir, AUDIT)
             full_audit = audit_state.get("full_audit", {}) if isinstance(audit_state, dict) else {}
             if not isinstance(full_audit, dict):
                 full_audit = {}
@@ -533,7 +557,8 @@ class ProblemPackPolygonTool(Tool):
             except (TypeError, ValueError):
                 full_audit_blocking_count = 1
             if (
-                full_audit.get("mode") != "full"
+                stmt_drifted
+                or full_audit.get("mode") != "full"
                 or full_audit.get("decision") != "go"
                 or not full_audit_passed
                 or full_audit_blocking_count != 0
