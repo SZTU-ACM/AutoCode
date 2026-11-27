@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-11-27
+
+### Fixed
+
+- **64 位整数尺度解析、列对齐与种子参数排除（`verify_static_checks.py`）**：
+  - 将 `_MAX_SCALE_INT_DIGITS` 从 `18` 提高至 `20`，完整覆盖 `10^18`（19 位）、`INT64_MAX`（19 位）与 `UINT64_MAX`（20 位），修复超大约束测试点首尺度与对数尺度统计丢失问题。
+  - 修复 `_extract_header_int_row` 因过滤 `None` 导致后续列下标左移错位的 Bug（保留原始 `None` 占位并在 2D 联合检查配对时按需跳过，防止将第 2/3 列错认成主规模参数 `n` 与下一参数）。
+  - 在 2D 联合区间与边界位置检查中跳过随机种子类参数（`seed`/`rng_seed`/`rand_seed`/`random_seed`/`salt`/`hash_seed` 或 `*_seed` 后缀），消除交互/随机题的 `seed` 列误报。
+
 ## [4.1.0] - 2026-11-27
 
 ### Added

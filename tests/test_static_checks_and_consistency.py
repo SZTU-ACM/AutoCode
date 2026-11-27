@@ -673,3 +673,63 @@ int main(int argc, char* argv[]) {
         name.startswith("coupled_n_max_s_min") and assign["n"] == 100000 and assign["s"] == 1
         for name, assign in witness_names.items()
     ), witness_names
+
+
+def test_v411_int64_uint64_scale_digits_column_alignment_and_seed_skip() -> None:
+    """Cover v4.1.1: 10^18/INT64_MAX/UINT64_MAX scale parsing, None column preservation, and seed skip."""
+    from autocode_mcp.tools.verify_static_checks import (
+        _check_log_decade_and_joint_regimes,
+        _extract_effective_scale,
+        _extract_header_int_row,
+        _parse_int_token,
+    )
+
+    assert _parse_int_token("1000000000000000000") == 10**18
+    assert _parse_int_token("9223372036854775807") == (1 << 63) - 1
+    assert _parse_int_token("18446744073709551615") == (1 << 64) - 1
+    assert _parse_int_token("100000000000000000000") is None  # 21 digits rejected safely
+
+    sample_1e18 = "1000000000000000000 48 853358974749688003\n"
+    assert _extract_effective_scale(sample_1e18) == 10**18
+    assert _extract_header_int_row(sample_1e18) == [10**18, 48, 853358974749688003]
+
+    # Non-integer or over-budget col_0 must keep None in col 0 instead of left-shifting col 1 -> col 0
+    assert _extract_header_int_row("ENCODE 48 853358974749688003\n") == [
+        None,
+        48,
+        853358974749688003,
+    ]
+    assert _extract_header_int_row("100000000000000000000 48 853358974749688003\n") == [
+        None,
+        48,
+        853358974749688003,
+    ]
+
+    # 10+ rows mimicking (n <= 10^18, k <= 50, seed <= 10^18) must produce 0 joint-regime warnings
+    rows = [
+        [1, 0, 453777164752109947],
+        [50, 12, 123456],
+        [500, 20, 999999],
+        [5000, 30, 123],
+        [50000, 45, 456],
+        [10**7, 50, 789],
+        [10**10, 40, 10000],
+        [10**12, 48, 20000],
+        [10**14, 49, 30000],
+        [10**16, 50, 40000],
+        [10**18, 48, 853358974749688003],
+    ]
+    bounds = [
+        {"var": "n", "min": 1, "max": 10**18, "source": "read_scalar"},
+        {"var": "k", "min": 0, "max": 50, "source": "read_scalar"},
+        {"var": "seed", "min": 0, "max": 10**18, "source": "read_scalar"},
+    ]
+    decades, gaps = _check_log_decade_and_joint_regimes(
+        parsed_effective_scales=[int(r[0]) for r in rows if r[0] is not None],
+        header_rows=rows,
+        expected_max=10**18,
+        total_files=len(rows),
+        validator_bounds=bounds,
+    )
+    assert "18" in decades and decades["18"] == 1
+    assert not any(g.get("var") in {"k", "seed"} for g in gaps), gaps

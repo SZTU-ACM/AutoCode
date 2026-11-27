@@ -15,7 +15,7 @@ permissions:
   contents: read  # SECURITY: keep least-privilege read-only token; NEVER inject secrets.
 
 env:
-  AUTOCODE_REF: v4.1.0
+  AUTOCODE_REF: v4.1.1
   PROBLEM_DIR: .
 
 jobs:
