@@ -31,7 +31,9 @@ Your mission is to break weak test suites, expose statement ambiguities, catch s
   - `std::unordered_map` / `std::unordered_set` prime-bucket hash collision (`TLE`);
   - single-mod polynomial rolling string hash collision (`WA`);
   - graph edge cases: self-loops, multi-edges, isolated vertices, disconnected components (`WA`/`RE`);
-  - suboptimal complexity ($O(n^2)$ / $O(n\sqrt{n})$) with full $n_{\max}$-sized arrays (`TLE` — never masked by accidental `RE`!).
+  - suboptimal complexity ($O(n^2)$ / $O(n\sqrt{n})$) with full $n_{\max}$-sized arrays (`TLE` — never masked by accidental `RE`!);
+  - **Hybrid brute + degenerate fast branch** (`WA`/`TLE`): push any divide-and-conquer cheat threshold to $B_{\text{cheat}}$ ($\approx 1.5\times 10^8$ ops in 1-2s, never copying `sol.cpp`'s threshold constant!) with exact brute below and a degenerate missing-boundary formula above;
+  - **Randomized greedy rollout / SLF-SPFA heuristic** (`WA`/`TLE`): for constructive or `YES-NO` reachability/game problems, build a hybrid "small exact DP + 30-50 random greedy rollouts" cheater and kill it with narrow-corridor unique-solution hacks in `tests/hack/`; for positive-weight shortest-path problems claiming to hack SPFA, test both queue SPFA and deque SLF-SPFA variants.
 
 ### 3. Hack Feedback Loop & Zero-AI CI Persistence
 - Run `problem_verify_tests(verify_types=["wrong_solution_kill", "coverage"])`.
@@ -54,4 +56,5 @@ Your mission is to break weak test suites, expose statement ambiguities, catch s
 - Do NOT read `solutions/sol.cpp` or `tests/` before completing the black-box blind oracle design.
 - Do NOT add unvalidated hack inputs to `tests/` or `tests/hack/` without `files/val` + `solutions/sol` verification.
 - Do NOT relax `expected_verdict` or ignore `expected_verdict_matched == false` (e.g., an intended `TLE` solution crashing with `RE`).
+- Do NOT copy divide-and-conquer / small-vs-large threshold constants from `solutions/sol.cpp` into wrong solutions (Anti-Constant-Anchoring Rule: always escalate the cheat threshold to $B_{\text{cheat}}$).
 - Do NOT issue `decision: go` while any `role == "wrong"` solution escapes or mismatches its `expected_verdict`.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -338,7 +340,17 @@ class ProblemVerifyTestsTool(Tool, _VerifyStaticChecksMixin, _VerifyLiveChecksMi
                 all_passed = False
 
         if "scale_distribution" in verify_types:
-            result = self._check_scale_distribution(tests_dir)
+            val_bounds: list[dict[str, Any]] | None = None
+            val_path = Path(problem_dir) / "files" / "val.cpp"
+            if val_path.is_file():
+                from .audit_constraints import _extract_validator_bounds
+
+                val_bounds = _extract_validator_bounds(val_path)
+            result = self._check_scale_distribution(
+                tests_dir,
+                manifest=manifest_model,
+                validator_bounds=val_bounds,
+            )
             results["scale_distribution"] = result
             if not result["passed"]:
                 all_passed = False

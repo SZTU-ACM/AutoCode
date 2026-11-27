@@ -69,6 +69,7 @@ class _AuditStandaloneMixin(_AuditSignalsMixin):
         blocking: list[dict[str, str]],
         warnings: list[dict[str, str]],
         run_mutation: bool = False,
+        strict: bool = False,
         staged_tests_dir: Path | None = None,
         staged_answer_ext: str | None = None,
     ) -> None:
@@ -510,13 +511,27 @@ class _AuditStandaloneMixin(_AuditSignalsMixin):
                     existing_w = self._safe_file(problem_path, f"solutions/{s.name}{exe_ext}")
                     if existing_w is not None:
                         compiled_wrongs.append(s.name)
+                block_on_wrong_compile_fail = bool(
+                    strict or manifest.quality_gates.require_wrong_solution_kill
+                )
                 if failed_wrong_compiles:
-                    warnings.append(
-                        {
-                            "gate": "wrong_solution_kill",
-                            "reason": f"failed to compile standalone wrong solution(s): {failed_wrong_compiles[:5]}",
-                        }
+                    compile_fail_reason = (
+                        f"failed to compile standalone wrong solution(s): {failed_wrong_compiles[:5]}"
                     )
+                    if block_on_wrong_compile_fail:
+                        blocking.append(
+                            {
+                                "gate": "wrong_solution_kill",
+                                "reason": compile_fail_reason,
+                            }
+                        )
+                    else:
+                        warnings.append(
+                            {
+                                "gate": "wrong_solution_kill",
+                                "reason": compile_fail_reason,
+                            }
+                        )
                 if judge_ready and (compiled_wrongs or manifest.quality_gates.require_wrong_solution_kill):
                     wrong_res = await verifier._check_wrong_solution_kill(
                         problem_dir=str(problem_path),
@@ -532,14 +547,32 @@ class _AuditStandaloneMixin(_AuditSignalsMixin):
                         interactor_exe_override=interactor_override,
                         wrong_exe_overrides=wrong_overrides or None,
                     )
+                    if failed_wrong_compiles and isinstance(wrong_res, dict):
+                        wrong_res["failed_compiles"] = list(failed_wrong_compiles)
+                        if block_on_wrong_compile_fail:
+                            wrong_res["passed"] = False
                     quality_signals["wrong_solution_kill"] = self._wrap_verify_signal(wrong_res)
                     if not wrong_res.get("passed"):
-                        blocking.append(
-                            {
-                                "gate": "wrong_solution_kill",
-                                "reason": str(wrong_res.get("message") or "wrong solution survived all tests"),
-                            }
-                        )
+                        has_survivors = bool(wrong_res.get("survivors"))
+                        if not (failed_wrong_compiles and block_on_wrong_compile_fail and not has_survivors):
+                            blocking.append(
+                                {
+                                    "gate": "wrong_solution_kill",
+                                    "reason": str(
+                                        wrong_res.get("message") or "wrong solution survived all tests"
+                                    ),
+                                }
+                            )
+                elif failed_wrong_compiles and block_on_wrong_compile_fail:
+                    quality_signals["wrong_solution_kill"] = {
+                        "executed": True,
+                        "passed": False,
+                        "evidence": {
+                            "passed": False,
+                            "failed_compiles": list(failed_wrong_compiles),
+                            "message": f"all standalone wrong solution(s) failed to compile: {failed_wrong_compiles[:5]}",
+                        },
+                    }
 
                 # 4. Optional single-point mutation testing inside the same isolated temp context (reuses live judges)
                 if (

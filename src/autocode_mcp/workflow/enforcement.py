@@ -68,6 +68,8 @@ from .hashes import _set_target_platform as _set_target_platform
 from .hashes import _sync_solution_hashes as _sync_solution_hashes
 from .hashes import _update_build_platform as _update_build_platform
 from .hashes import current_platform as current_platform
+from .hashes import current_statement_sha256 as current_statement_sha256
+from .hashes import resolve_statement_rel as resolve_statement_rel
 from .manifest import load_manifest, manifest_path
 from .reconcile import inspect_workspace_state as inspect_workspace_state
 from .reconcile import reconcile_workspace_state as reconcile_workspace_state
@@ -676,9 +678,29 @@ def apply_result(problem_dir: str, tool_name: str, tool_input: dict[str, Any], s
         state["validation_passed"] = bool(success)
         if success and state["statement_validated"]:
             state["statement_dirty"] = False
+            stmt_rel = resolve_statement_rel(problem_dir)
+            stmt_dig = current_statement_sha256(problem_dir)
+            state["statement_source_hash"] = stmt_dig
+            if stmt_dig is not None:
+                _set_source_hash(state, stmt_rel, stmt_dig)
         elif not success:
+            state["statement_source_hash"] = None
             state["packaged"] = False
             set_section(problem_dir, AUDIT, {"full_audit": {}, "full_audit_passed": False})
+    elif (
+        tool_name == "problem_audit"
+        and not bool(tool_input.get("standalone"))
+        and str(tool_input.get("mode", "full")) == "full"
+    ):
+        stmt_dig = current_statement_sha256(problem_dir)
+        if (
+            success
+            and data.get("decision") == "go"
+            and stmt_dig is not None
+            and not bool(state.get("statement_dirty", False))
+        ):
+            state["statement_source_hash"] = stmt_dig
+            _set_source_hash(state, resolve_statement_rel(problem_dir), stmt_dig)
     elif tool_name == "problem_build_all":
         _apply_problem_build_all(problem_dir, state, data)
     elif tool_name == "problem_verify_tests":

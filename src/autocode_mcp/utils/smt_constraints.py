@@ -924,6 +924,8 @@ def _extract_validator_predicates(
         src_tag = str(item.get("source") or "val")
         lo = item.get("min")
         hi = item.get("max")
+        lo_expr = item.get("min_expr")
+        hi_expr = item.get("max_expr")
         if isinstance(lo, int) and not isinstance(lo, bool):
             preds.append(
                 RelPred(
@@ -934,6 +936,18 @@ def _extract_validator_predicates(
                     direction="lower",
                 )
             )
+        elif isinstance(lo_expr, str) and lo_expr.strip():
+            parsed_lo = _parse_arith_expr(lo_expr.strip(), alias_map)
+            if parsed_lo is not None:
+                preds.append(
+                    RelPred(
+                        op=">=",
+                        left=VarExpr(var),
+                        right=parsed_lo,
+                        source=f"validator:{src_tag}:{var}[{idx}].min_expr",
+                        direction="rel",
+                    )
+                )
         if isinstance(hi, int) and not isinstance(hi, bool):
             preds.append(
                 RelPred(
@@ -944,6 +958,18 @@ def _extract_validator_predicates(
                     direction="upper",
                 )
             )
+        elif isinstance(hi_expr, str) and hi_expr.strip():
+            parsed_hi = _parse_arith_expr(hi_expr.strip(), alias_map)
+            if parsed_hi is not None:
+                preds.append(
+                    RelPred(
+                        op="<=",
+                        left=VarExpr(var),
+                        right=parsed_hi,
+                        source=f"validator:{src_tag}:{var}[{idx}].max_expr",
+                        direction="rel",
+                    )
+                )
     return preds
 
 
@@ -1054,6 +1080,37 @@ def _collect_all_vars(preds: Sequence[RelPred]) -> list[str]:
     return sorted(seen)
 
 
+def _eval_expr_interval(
+    expr: ArithExpr,
+    intervals: dict[str, tuple[int | None, int | None]],
+) -> tuple[int | None, int | None]:
+    """Evaluate conservative integer interval ``(lo, hi)`` of ``expr`` under current variable intervals."""
+    if isinstance(expr, ConstExpr):
+        return expr.value, expr.value
+    if isinstance(expr, VarExpr):
+        return intervals.get(expr.name, (None, None))
+    if isinstance(expr, UnaryNegExpr):
+        lo, hi = _eval_expr_interval(expr.operand, intervals)
+        return (-hi if hi is not None else None), (-lo if lo is not None else None)
+    if expr.op == "%":
+        return None, None
+    l_lo, l_hi = _eval_expr_interval(expr.left, intervals)
+    r_lo, r_hi = _eval_expr_interval(expr.right, intervals)
+    if expr.op == "+":
+        lo = (l_lo + r_lo) if (l_lo is not None and r_lo is not None) else None
+        hi = (l_hi + r_hi) if (l_hi is not None and r_hi is not None) else None
+        return lo, hi
+    if expr.op == "-":
+        lo = (l_lo - r_hi) if (l_lo is not None and r_hi is not None) else None
+        hi = (l_hi - r_lo) if (l_hi is not None and r_lo is not None) else None
+        return lo, hi
+    # Multiplication
+    if l_lo is not None and l_hi is not None and r_lo is not None and r_hi is not None:
+        prods = [l_lo * r_lo, l_lo * r_hi, l_hi * r_lo, l_hi * r_hi]
+        return min(prods), max(prods)
+    return None, None
+
+
 def _propagate_python_intervals(
     preds: Sequence[RelPred],
     initial_bounds: dict[str, tuple[int | None, int | None]] | None = None,
@@ -1072,6 +1129,8 @@ def _propagate_python_intervals(
     neqs: dict[str, set[int]] = {v: set() for v in all_vars}
     linear_ineqs: list[tuple[dict[str, int], int, str]] = []  # sum(coeff*x) + const <= 0
     product_ineqs: list[tuple[str, str, int, str]] = []  # x * y <= limit (when x, y >= 0)
+    symbolic_upper_exprs: list[tuple[str, ArithExpr, bool, str]] = []  # var <= / < expr
+    symbolic_lower_exprs: list[tuple[str, ArithExpr, bool, str]] = []  # var >= / > expr
 
     for pred in preds:
         # Handle modular constraints: (var % k) == r or r == (var % k)
@@ -1166,6 +1225,14 @@ def _propagate_python_intervals(
             ):
                 limit = pred.left.value if pred.op == ">=" else pred.left.value - 1
                 product_ineqs.append((pred.right.left.name, pred.right.right.name, limit, pred.source))
+            elif pred.op in ("<=", "<") and isinstance(pred.left, VarExpr) and _expr_vars(pred.right):
+                symbolic_upper_exprs.append((pred.left.name, pred.right, pred.op == "<", pred.source))
+            elif pred.op in (">=", ">") and isinstance(pred.right, VarExpr) and _expr_vars(pred.left):
+                symbolic_upper_exprs.append((pred.right.name, pred.left, pred.op == ">", pred.source))
+            elif pred.op in (">=", ">") and isinstance(pred.left, VarExpr) and _expr_vars(pred.right):
+                symbolic_lower_exprs.append((pred.left.name, pred.right, pred.op == ">", pred.source))
+            elif pred.op in ("<=", "<") and isinstance(pred.right, VarExpr) and _expr_vars(pred.left):
+                symbolic_lower_exprs.append((pred.right.name, pred.left, pred.op == "<", pred.source))
             continue
         if lin is not None:
             coeffs, const = lin
@@ -1280,6 +1347,22 @@ def _propagate_python_intervals(
                     if not ok:
                         return False, intervals, mods, neqs, f"empty domain for {y_var} triggered by {src}"
                     any_changed = any_changed or chg
+        for v_name, rhs_expr, is_strict, src in symbolic_upper_exprs:
+            _, rhs_hi = _eval_expr_interval(rhs_expr, intervals)
+            if rhs_hi is not None:
+                cand_hi = (rhs_hi - 1) if is_strict else rhs_hi
+                ok, chg = _tighten_var(v_name, None, cand_hi)
+                if not ok:
+                    return False, intervals, mods, neqs, f"empty domain for {v_name} triggered by {src}"
+                any_changed = any_changed or chg
+        for v_name, rhs_expr, is_strict, src in symbolic_lower_exprs:
+            rhs_lo, _ = _eval_expr_interval(rhs_expr, intervals)
+            if rhs_lo is not None:
+                cand_lo = (rhs_lo + 1) if is_strict else rhs_lo
+                ok, chg = _tighten_var(v_name, cand_lo, None)
+                if not ok:
+                    return False, intervals, mods, neqs, f"empty domain for {v_name} triggered by {src}"
+                any_changed = any_changed or chg
         if not any_changed:
             break
 
@@ -1588,12 +1671,17 @@ def _synthesize_witnesses_for_preds(
         return {}
     witnesses: dict[str, dict[str, int]] = {}
 
-    def _solve_opt(obj_var: str | None, prefer: Literal["min", "max"]) -> dict[str, int] | None:
+    def _solve_opt(
+        obj_var: str | None,
+        prefer: Literal["min", "max"],
+        extra_preds: Sequence[RelPred] = (),
+    ) -> dict[str, int] | None:
+        active_preds = list(preds) + list(extra_preds)
         if backend == "z3" and z3_mod is not None:
-            w = _optimize_z3_witness(z3_mod, preds, intervals, objective_var=obj_var, prefer=prefer)
+            w = _optimize_z3_witness(z3_mod, active_preds, intervals, objective_var=obj_var, prefer=prefer)
             if w is not None:
                 return w
-        py_res = _solve_python_witness(preds, objective_var=obj_var, prefer=prefer)
+        py_res = _solve_python_witness(active_preds, objective_var=obj_var, prefer=prefer)
         return py_res.witness if py_res.satisfiable else None
 
     w_min = _solve_opt(None, "min")
@@ -1613,6 +1701,42 @@ def _synthesize_witnesses_for_preds(
             wv_max = _solve_opt(var, "max")
             if wv_max is not None:
                 witnesses[f"{var}_max"] = wv_max
+
+    # Coupled boundary witnesses (e.g. s <= n or m <= n * (n - 1) pinned at n = n_max)
+    seen_coupled: set[tuple[str, str]] = set()
+    for p in preds:
+        target_v: str | None = None
+        rhs_e: ArithExpr | None = None
+        if p.op in ("<=", "<") and isinstance(p.left, VarExpr):
+            target_v = p.left.name
+            rhs_e = p.right
+        elif p.op in (">=", ">") and isinstance(p.right, VarExpr):
+            target_v = p.right.name
+            rhs_e = p.left
+        if target_v is None or rhs_e is None:
+            continue
+        rhs_vars = sorted(_expr_vars(rhs_e) - {target_v})
+        for driver_v in rhs_vars:
+            if (driver_v, target_v) in seen_coupled:
+                continue
+            _, drv_hi = intervals.get(driver_v, (None, None))
+            if drv_hi is None:
+                continue
+            seen_coupled.add((driver_v, target_v))
+            pin_pred = [
+                RelPred(
+                    op="==",
+                    left=VarExpr(driver_v),
+                    right=ConstExpr(drv_hi),
+                    source=f"coupled_pin:{driver_v}_max",
+                )
+            ]
+            w_cmin = _solve_opt(target_v, "min", pin_pred)
+            if w_cmin is not None:
+                witnesses[f"coupled_{driver_v}_max_{target_v}_min"] = w_cmin
+            w_cmax = _solve_opt(target_v, "max", pin_pred)
+            if w_cmax is not None:
+                witnesses[f"coupled_{driver_v}_max_{target_v}_max"] = w_cmax
 
     # Add an interior/extreme alternating witness if ranges allow room between min and max
     if "min" in witnesses and "max" in witnesses and witnesses["min"] != witnesses["max"]:

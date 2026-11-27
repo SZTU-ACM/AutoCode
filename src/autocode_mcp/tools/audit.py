@@ -34,11 +34,13 @@ from ..workflow import (
     current_platform,
     inspect_workspace_state,
     load_manifest,
+    load_workflow_state,
     manifest_is_communication,
     manifest_is_interactive,
     manifest_uses_protocol_judge,
     manifest_uses_testlib_checker,
 )
+from ..workflow.hashes import current_statement_sha256
 from ..workflow.models import AutoCodeManifest
 from .audit_constraints import (
     _MAX_EXPR_ABS as _MAX_EXPR_ABS,
@@ -166,7 +168,12 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             else:
                 return ToolResult.fail("manifest.json not found")
 
-        workflow_state = {} if (standalone or autocode_escaped) else (get_section(problem_path, WORKFLOW) or {})
+        raw_wf = None if (standalone or autocode_escaped) else get_section(problem_path, WORKFLOW)
+        workflow_state = (
+            load_workflow_state(str(problem_path))
+            if (not standalone and not autocode_escaped and isinstance(raw_wf, dict))
+            else {}
+        )
         tests_manifest = {} if autocode_escaped else (get_section(problem_path, TEST_MANIFEST) or {})
 
         raw_tests_dir = (
@@ -256,19 +263,29 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
                     source_tests_dir=raw_tests_dir,
                 )
 
+            val_path_static = self._find_validator_source(problem_path, standalone=True)
+            val_bounds_static = (
+                _extract_validator_bounds(val_path_static) if val_path_static is not None else None
+            )
             static_quality = self._static_quality_signals(
                 problem_path,
                 standalone=standalone,
                 has_tests_manifest=has_tests_manifest,
                 layout=detected_layout,
                 max_near_duplicate_ratio=max_duplicate_ratio,
+                manifest=manifest,
+                validator_bounds=val_bounds_static,
             )
             if staged_tests_dir is not None:
                 stage_verifier = ProblemVerifyTestsTool()
                 dup_res = stage_verifier._check_duplicate_inputs(
                     str(staged_tests_dir), max_near_ratio=max_duplicate_ratio
                 )
-                scale_res = stage_verifier._check_scale_distribution(str(staged_tests_dir))
+                scale_res = stage_verifier._check_scale_distribution(
+                    str(staged_tests_dir),
+                    manifest=manifest,
+                    validator_bounds=val_bounds_static,
+                )
                 static_quality["duplicate_inputs"] = {
                     "executed": True,
                     "passed": bool(dup_res.get("passed")),
@@ -310,6 +327,31 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
                                 "reason": f"quality signal `{signal_name}` not satisfied",
                             }
                         )
+            scale_sig = static_quality.get("scale_distribution", {})
+            scale_ev = scale_sig.get("evidence", {}) if isinstance(scale_sig, dict) else {}
+            scale_gaps = (
+                scale_ev.get("scale_gap_warnings", [])
+                if isinstance(scale_ev, dict)
+                else []
+            )
+            if isinstance(scale_gaps, list) and scale_gaps:
+                gap_summary = "; ".join(
+                    str(g.get("reason") or "")
+                    for g in scale_gaps
+                    if isinstance(g, dict) and g.get("reason")
+                )
+                if strict or manifest.audit_gates.require_scale_continuity:
+                    if isinstance(scale_sig, dict):
+                        scale_sig["passed"] = False
+                    if not any(b.get("gate") == "scale_distribution" for b in blocking):
+                        blocking.append(
+                            {
+                                "gate": "scale_distribution",
+                                "reason": gap_summary or "log-decade or 2D joint-regime scale gap detected",
+                            }
+                        )
+                elif gap_summary:
+                    warnings.append({"gate": "scale_gap_warning", "reason": gap_summary})
 
             run_mut = (
                 enable_mutation_testing
@@ -327,6 +369,7 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
                     blocking=blocking,
                     warnings=warnings,
                     run_mutation=bool(mode == "full" and run_mut),
+                    strict=strict,
                     staged_tests_dir=staged_tests_dir,
                     staged_answer_ext=staged_answer_ext,
                 )
@@ -446,6 +489,11 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             )
 
         warnings.extend(self._host_performance_bias_warnings(manifest, quality_signals))
+        warnings.extend(
+            self._collect_portability_warnings(
+                problem_path, manifest, standalone=standalone, layout=detected_layout
+            )
+        )
 
         if not standalone:
             ws_state = inspect_workspace_state(str(problem_path))
@@ -945,6 +993,7 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
         return path
 
     def _write_audit_state(self, problem_path: Path, report: dict) -> None:
+        stmt_hash = current_statement_sha256(str(problem_path))
         full_audit = {
             "decision": report["decision"],
             "mode": report["mode"],
@@ -952,9 +1001,22 @@ class ProblemAuditTool(Tool, _AuditStandaloneMixin, _AuditConstraintsMixin):
             "report_path": _rel_posix(problem_path, report.get("report_path")),
             "blocking_issue_count": len(report["blocking_issues"]),
             "quality_signals": report["quality_signals"],
+            "statement_source_hash": stmt_hash,
         }
         full_audit_passed = report["decision"] == "go" and report["mode"] == "full"
         set_section(str(problem_path), AUDIT, {"full_audit": full_audit, "full_audit_passed": full_audit_passed})
+        wf = get_section(str(problem_path), WORKFLOW)
+        if (
+            full_audit_passed
+            and stmt_hash is not None
+            and isinstance(wf, dict)
+            and not bool(wf.get("statement_dirty", False))
+        ):
+            update_section(
+                str(problem_path),
+                WORKFLOW,
+                {"statement_source_hash": stmt_hash},
+            )
 
 
 

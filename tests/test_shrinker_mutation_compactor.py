@@ -686,6 +686,130 @@ def test_compact_test_suite_additional_greedy_optimality() -> None:
     assert empty_res["total_targets"] == 0
 
 
+def test_e2_hybrid_threshold_cin_eof_and_mod_ll_mutations(tmp_path: Path) -> None:
+    """Cover E2: hybrid_threshold_escalation compiles, cin loop < filtered, MOD ll ranked below arith ll."""
+    import asyncio
+    import shutil
+
+    from autocode_mcp.utils.compiler import compile_cpp
+    from autocode_mcp.utils.mutation import generate_cpp_mutants_report
+
+    hybrid_early_return = """
+#include <iostream>
+#include <vector>
+using namespace std;
+
+static const long long MOD = 1000000007LL;
+
+int main() {
+    int n;
+    cin >> n;
+    vector<int> a(n);
+    for (int i = 0; i < n; ++i) cin >> a[i];
+
+    if (n <= 600) {
+        long long brute_ans = 0;
+        for (int i = 0; i < n; ++i) {
+            brute_ans = (brute_ans + a[i]) % MOD;
+        }
+        cout << brute_ans << "\\n";
+        return 0;
+    }
+
+    long long fast_ans = 1;
+    for (int i = 0; i < n; ++i) {
+        fast_ans = fast_ans * a[i] % MOD;
+    }
+    cout << fast_ans << "\\n";
+    return 0;
+}
+"""
+    rep = generate_cpp_mutants_report(hybrid_early_return, budget=24)
+    hybrid_muts = [m for m in rep["mutants"] if m["mutation_type"] == "hybrid_threshold_escalation"]
+    assert hybrid_muts, f"expected hybrid_threshold_escalation mutants in {rep['mutants']}"
+    assert any("* 8LL" in m["code"] or "4800" in m["code"] for m in hybrid_muts)
+    assert any("return 0;" in m["code"] for m in hybrid_muts)
+
+    # Ensure cin read loop `< -> <=` was filtered as equivalent EOF UB
+    eq_reasons = [f["reason"] for f in rep["equivalent_mutants"]]
+    assert "cin_read_loop_eof_ub" in eq_reasons
+    assert not any(
+        m["mutation_type"] in ("relational_lt_to_le", "relational_le_to_lt")
+        and "cin >> a[i]" in m["original"]
+        for m in rep["mutants"]
+    )
+
+    # Ensure compiled hybrid mutant is valid C++
+    if shutil.which("g++") or shutil.which("clang++"):
+        m_src = tmp_path / "hybrid_mut.cpp"
+        m_bin = tmp_path / "hybrid_mut"
+        m_src.write_text(hybrid_muts[0]["code"], encoding="utf-8")
+        res = asyncio.run(compile_cpp(str(m_src), str(m_bin), use_cache=False))
+        assert res.success, res.stderr
+
+    # Hybrid else form check + while(T--) void solve + else-if safety
+    hybrid_else = """
+#include <iostream>
+void solve() {
+    int n;
+    if (!(std::cin >> n)) return;
+    if (n <= 600) {
+        std::cout << 1 << "\\n";
+    } else {
+        std::cout << n * 2 << "\\n";
+    }
+}
+int main() {
+    int T = 1;
+    while (T--) {
+        solve();
+    }
+    int k = 100;
+    if (k <= 600) {
+        return 0;
+    } else if (k == 700) {
+        int y = 1;
+        return y;
+    }
+    return 0;
+}
+"""
+    rep_else = generate_cpp_mutants_report(hybrid_else, budget=20)
+    hyb_else = [m for m in rep_else["mutants"] if m["mutation_type"] == "hybrid_threshold_escalation"]
+    assert hyb_else
+    # Enclosing function is `void solve()`, NOT `int main()` -> must emit `return;`
+    assert any("return;" in m["code"] for m in hyb_else)
+    if shutil.which("g++") or shutil.which("clang++"):
+        for idx, m in enumerate(hyb_else):
+            m_src = tmp_path / f"hybrid_else_{idx}.cpp"
+            m_bin = tmp_path / f"hybrid_else_{idx}"
+            m_src.write_text(m["code"], encoding="utf-8")
+            res = asyncio.run(compile_cpp(str(m_src), str(m_bin), use_cache=False))
+            assert res.success, res.stderr
+
+    # MOD-bounded non-multiplying long long filtered while mul_val stays mutated
+    mod_code = """
+#include <iostream>
+using namespace std;
+const long long MOD = 998244353LL;
+int main() {
+    long long n, x;
+    cin >> n >> x;
+    long long mod_sum = (n % MOD + x % MOD) % MOD;
+    long long mul_val = (n * x) % MOD;
+    cout << mod_sum << " " << mul_val << "\\n";
+    return 0;
+}
+"""
+    rep_mod = generate_cpp_mutants_report(mod_code, budget=24)
+    active_ll_lines = {m["line"] for m in rep_mod["mutants"] if m["mutation_type"] == "type_narrowing_ll_to_int"}
+    mul_line = next(idx + 1 for idx, ln in enumerate(mod_code.splitlines()) if "long long mul_val" in ln)
+    mod_line = next(idx + 1 for idx, ln in enumerate(mod_code.splitlines()) if "long long mod_sum" in ln)
+    assert mul_line in active_ll_lines
+    assert mod_line not in active_ll_lines
+    assert "safe_range_mod_bounded" in [f["reason"] for f in rep_mod["equivalent_mutants"]]
+
+
 def test_type_hacks_absent_in_t2b_sources() -> None:
     """Ensure zero `# type: ignore` or `cast(` hacks were added to T2B src modules."""
     repo_root = Path(__file__).resolve().parent.parent

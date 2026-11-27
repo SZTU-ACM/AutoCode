@@ -683,3 +683,104 @@ def test_statement_consistency_forwards_review_reason(
         if w.get("gate") == "statement_consistency"
     ]
     assert custom_reason in stmt_warnings
+
+
+def test_standard_cn_limits_generator_portability_and_strict_wrong_compile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cover B2/B3/B4: standard_cn header limit & generator discovery, <bits/stdc++.h> warning, and strict wrong compile fail."""
+    from autocode_mcp.utils.problem_layout import parse_polygon_problem_xml
+
+    pkg = tmp_path / "cn_pkg"
+    (pkg / "statement").mkdir(parents=True)
+    (pkg / "data" / "test").mkdir(parents=True)
+    (pkg / "solution" / "wrong").mkdir(parents=True)
+
+    (pkg / "statement" / "zh-cn.md").write_text(
+        "# 示例题\n\n时间限制：1000 ms；内存限制：512 MiB\n\n## 题目描述\n给定 $n$。\n",
+        encoding="utf-8",
+    )
+    (pkg / "data" / "generator.cpp").write_text(
+        "#include <iostream>\nint main(int argc, char** argv) { std::cout << 5 << '\\n'; return 0; }\n",
+        encoding="utf-8",
+    )
+    (pkg / "data" / "validator.cpp").write_text(
+        "#include <iostream>\nint main() { long long n; return (std::cin >> n) && n >= 1 ? 0 : 1; }\n",
+        encoding="utf-8",
+    )
+    (pkg / "solution" / "std.cpp").write_text(
+        "// Time Complexity: O(1)\n"
+        "#include <bits/stdc++.h>\n"
+        "int main() { long long n; if (std::cin >> n) std::cout << n << '\\n'; return 0; }\n",
+        encoding="utf-8",
+    )
+    (pkg / "solution" / "wrong" / "wrong_bad.cpp").write_text(
+        "int main( { broken_syntax_here; }\n",
+        encoding="utf-8",
+    )
+    (pkg / "data" / "test" / "test1.in").write_text("5\n", encoding="utf-8")
+    (pkg / "data" / "test" / "test1.out").write_text("5\n", encoding="utf-8")
+
+    tool = ProblemAuditTool()
+    tl, ml = tool._infer_standalone_limits(pkg, layout="standard_cn")
+    assert (tl, ml) == (1000, 512)
+    gen_path = tool._find_generator_source(pkg, standalone=True)
+    assert gen_path is not None
+    assert gen_path.resolve() == (pkg / "data" / "generator.cpp").resolve()
+
+    # Polygon problem.xml generator discovery check
+    poly = tmp_path / "poly_gen"
+    (poly / "files").mkdir(parents=True)
+    (poly / "files" / "gen_custom.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (poly / "problem.xml").write_text(
+        """<problem short-name="poly-gen">
+  <assets>
+    <generators>
+      <generator><source path="files/gen_custom.cpp" type="cpp.g++20"/></generator>
+    </generators>
+  </assets>
+</problem>
+""",
+        encoding="utf-8",
+    )
+    meta = parse_polygon_problem_xml(poly)
+    assert meta is not None
+    assert "files/gen_custom.cpp" in meta.generator_paths
+    poly_gen = tool._find_generator_source(poly, standalone=True)
+    assert poly_gen is not None and poly_gen.name == "gen_custom.cpp"
+
+    # Bold-colon Markdown limit format check
+    bold_pkg = tmp_path / "bold_colon_pkg"
+    (bold_pkg / "statement").mkdir(parents=True)
+    (bold_pkg / "statement" / "zh-cn.md").write_text(
+        "# Test\n\n**时间限制**: 1.5 s | **内存限制**: 512 MiB\n",
+        encoding="utf-8",
+    )
+    assert tool._infer_standalone_limits(bold_pkg, layout="standard_cn") == (1500, 512)
+
+    # Strict audit with broken wrong_bad.cpp and <bits/stdc++.h> in std.cpp
+    rep_path = tmp_path / "cn_strict.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autocode-audit",
+            str(pkg),
+            "--standalone",
+            "--strict",
+            "--report",
+            str(rep_path),
+        ],
+    )
+    exit_code = cli_audit_main()
+    assert exit_code != 0
+    rep = json.loads(rep_path.read_text(encoding="utf-8"))
+    assert rep["decision"] == "no_go"
+    assert any(b.get("gate") == "wrong_solution_kill" for b in rep["blocking_issues"])
+    wsk = rep["quality_signals"]["wrong_solution_kill"]
+    assert wsk["executed"] is True
+    assert wsk["passed"] is False
+    assert any(
+        w.get("gate") == "portability_warning" and "bits/stdc++.h" in w.get("reason", "")
+        for w in rep["risk_report"]["warnings"]
+    )

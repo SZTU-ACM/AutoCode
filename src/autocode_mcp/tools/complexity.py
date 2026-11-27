@@ -415,10 +415,26 @@ class _InterproceduralSummary:
 
 _MULTITEST_HEADER_RE = re.compile(
     r"^(?:"
-    r"(?:(?:--|\+\+)?\s*(?:T|t|tc|tt|tests?|cases?|q_cases?)\s*(?:--|\+\+)?)"
-    r"|(?:(?:int|long|ll|size_t)\s+(?:tc|tt|cas|case_id|_)\s*=\s*[01]\s*;\s*(?:tc|tt|cas|case_id|_)\s*<=?\s*(?:T|t|tc|tests?|cases?)\s*;.*)"
+    r"(?:(?:--|\+\+)?\s*(?:T|t|tc|tt|tests?|cases?|q_cases?|t_cases?|test_cases?)\s*(?:--|\+\+)?(?:\s*(?:>|!=|>=)\s*0)?)"
+    r"|(?:(?:int|long(?:\s+long)?|ll|size_t)\s+(?:tc|tt|cas|case_id|_)\s*=\s*[01]\s*;\s*(?:tc|tt|cas|case_id|_)\s*<=?\s*[A-Za-z_]\w*\s*;.*)"
+    r"|(?:(?:int|long(?:\s+long)?|ll|size_t)\s+[A-Za-z_]\w*\s*=\s*[01]\s*;\s*[A-Za-z_]\w*\s*<=?\s*(?:T|tc|tt|tests?|cases?|q_cases?|t_cases?|test_cases?)\s*;.*)"
     r"|(?:(?:std::)?cin\s*>>.*)"
     r")$"
+)
+
+_ADJ_LIST_FOR_HEADER_RE = re.compile(
+    r"^(?:"
+    r"[^:;]+:\s*(?:g|adj|graph|tree|edges?|children|ch|son|nei|nbrs?)\s*\[\s*[A-Za-z_]\w*\s*\]"
+    r"|[^;]*;\s*[A-Za-z_]\w*\s*<\s*(?:\(\s*int\s*\)\s*)?(?:g|adj|graph|tree|edges?|children|ch|son|nei|nbrs?)\s*\[\s*[A-Za-z_]\w*\s*\]\s*\.size\s*\(\s*\)\s*;[^;]*"
+    r"|[^;]*=\s*head\s*\[\s*[A-Za-z_]\w*\s*\]\s*;[^;]*;\s*[A-Za-z_]\w*\s*=\s*nxt\s*\[\s*[A-Za-z_]\w*\s*\]"
+    r")$"
+)
+
+_BITMASK_ASSIGN_RE = re.compile(
+    r"(?:^|[;{}])\s*(?:(?:static|const|constexpr)\s+)*(?:(?:unsigned|signed)\s+)?"
+    r"(?:(?:int|long\s+long|long|size_t|ll|auto|uint32_t|uint64_t|int32_t|int64_t)\s+)?"
+    r"([A-Za-z_]\w*)\s*=\s*\(?\s*1(?:[uUlL]{0,3})\s*<<\s*\(?\s*([A-Za-z_]\w*|\d+)\s*\)?"
+    r"(?:\s*[+-]\s*1)?\s*\)?\s*;"
 )
 
 
@@ -456,9 +472,52 @@ def _extract_brace_expr(code: str, open_idx: int) -> tuple[str, int]:
     return code[open_idx + 1 :], n
 
 
-def _is_multitest_driver_header(header: str) -> bool:
+def _is_multitest_driver_header(
+    header: str,
+    *,
+    preceding_text: str = "",
+    body_preview: str = "",
+) -> bool:
     s = " ".join(header.strip().split())
-    return bool(s and _MULTITEST_HEADER_RE.match(s))
+    if not s:
+        return False
+    if _MULTITEST_HEADER_RE.match(s):
+        return True
+    # Contextual detection for lowercase/custom test-count variable read right before top-level loop
+    if preceding_text and body_preview:
+        _scale_names = {"n", "N", "m", "M", "k", "K", "q", "Q", "len", "sz", "size", "cnt", "num"}
+        loop_var: str | None = None
+        is_while_dec = False
+        m_while = re.match(r"^(?:--|\+\+)?\s*([A-Za-z_]\w*)\s*(?:--|\+\+)?(?:\s*(?:>|!=|>=)\s*0)?$", s)
+        if m_while:
+            loop_var = m_while.group(1)
+            is_while_dec = "--" in s
+        else:
+            m_for = re.match(
+                r"^(?:int|long(?:\s+long)?|ll|size_t)\s+[A-Za-z_]\w*\s*=\s*[01]\s*;\s*[A-Za-z_]\w*\s*<=?\s*([A-Za-z_]\w*)\s*;",
+                s,
+            )
+            if m_for:
+                loop_var = m_for.group(1)
+        if loop_var and loop_var not in _scale_names:
+            esc = re.escape(loop_var)
+            tail = preceding_text[-180:]
+            was_read = bool(
+                re.search(rf"\b(?:std::)?cin\s*(?:>>\s*[A-Za-z_]\w*\s*)*>>\s*{esc}\b", tail)
+                or re.search(rf"\bscanf\s*\([^)]*&\s*{esc}\b", tail)
+            )
+            body_invokes_case = bool(re.search(r"\b(?:solve|work|run|process)\s*\(", body_preview))
+            body_reads_new_scale = bool(
+                re.search(r"\b(?:int|long(?:\s+long)?|ll)\s+[A-Za-z_]\w*\s*;[^;]*(?:cin\s*>>|scanf\s*\()", body_preview)
+            )
+            if was_read and (body_invokes_case or body_reads_new_scale or is_while_dec):
+                return True
+    return False
+
+
+def _is_adj_list_for_header(header: str) -> bool:
+    s = " ".join(header.strip().split())
+    return bool(s and _ADJ_LIST_FOR_HEADER_RE.match(s))
 
 
 def _is_small_constant_for_header(header: str) -> bool:
@@ -466,15 +525,20 @@ def _is_small_constant_for_header(header: str) -> bool:
     parts = [p.strip() for p in header.split(";")]
     if len(parts) != 3:
         return False
-    m_asc = re.match(r"^[A-Za-z_]\w*\s*(<=?)\s*(\d+)$", parts[1])
-    if m_asc:
-        bound = int(m_asc.group(2))
-        return 0 < bound <= 32
+    cond_clauses = [c.strip() for c in parts[1].split("&&") if c.strip()]
+    for clause in cond_clauses:
+        m_asc = re.match(r"^[A-Za-z_]\w*\s*(<=?)\s*(\d+)$", clause)
+        if m_asc:
+            bound = int(m_asc.group(2))
+            if 0 < bound <= 32:
+                return True
     m_desc_init = re.search(r"=\s*(\d+)\s*$", parts[0])
-    m_desc_cond = re.match(r"^[A-Za-z_]\w*\s*(>=?)\s*0$", parts[1])
-    if m_desc_init and m_desc_cond:
+    if m_desc_init:
         bound = int(m_desc_init.group(1))
-        return 0 < bound <= 32
+        if 0 < bound <= 32 and any(
+            re.match(r"^[A-Za-z_]\w*\s*(>=?)\s*0$", clause) for clause in cond_clauses
+        ):
+            return True
     return False
 
 
@@ -738,10 +802,26 @@ def _analyze_body_into_function(
                 is_for = tok == "for"
                 header_str, after_hdr_char = _extract_paren_expr(body, tok_iter[i + 1].start())
                 body_preview = _extract_loop_body_preview(body, after_hdr_char)
+                preceding = body[max(0, tok_iter[i].start() - 180) : tok_iter[i].start()]
                 counts = True
-                if ignore_multitest and _active_any_depth() == 0 and _is_multitest_driver_header(header_str):
+                if (
+                    ignore_multitest
+                    and _active_any_depth() == 0
+                    and _is_multitest_driver_header(
+                        header_str,
+                        preceding_text=preceding if name in ("main", "<toplevel>") else "",
+                        body_preview=body_preview,
+                    )
+                ):
                     counts = False
                 elif ignore_small_const and is_for and _is_small_constant_for_header(header_str):
+                    counts = False
+                elif (
+                    ignore_small_const
+                    and is_for
+                    and _active_nonlog_depth() == 1
+                    and _is_adj_list_for_header(header_str)
+                ):
                     counts = False
                 is_log = bool(counts and ignore_small_const and _is_logarithmic_loop(tok, header_str, body_preview))
                 if counts:
@@ -1061,17 +1141,49 @@ def _analyze_functions_tree_sitter(
                 open_p = raw_hdr.find("(")
                 close_p = raw_hdr.rfind(")")
                 hdr_str = raw_hdr[open_p + 1 : close_p] if open_p != -1 and close_p > open_p else ""
-                if ignore_multitest and any_depth == 0 and _is_multitest_driver_header(hdr_str):
+                prec_text = code_bytes[max(0, node.start_byte - 180) : node.start_byte].decode(
+                    "utf-8", errors="replace"
+                )
+                if (
+                    ignore_multitest
+                    and any_depth == 0
+                    and _is_multitest_driver_header(
+                        hdr_str,
+                        preceding_text=prec_text if info.name == "main" else "",
+                        body_preview=body_text[:400],
+                    )
+                ):
                     counts = False
                 elif ignore_small_const and _is_small_constant_for_header(hdr_str):
                     counts = False
+                elif ignore_small_const and nonlog_depth == 1 and _is_adj_list_for_header(hdr_str):
+                    counts = False
                 is_log = bool(counts and ignore_small_const and _is_logarithmic_loop("for", hdr_str, body_text))
+            elif ntype == "for_range_loop":
+                hdr_end = body_node.start_byte if body_node is not None else node.end_byte
+                raw_hdr = code_bytes[node.start_byte : hdr_end].decode("utf-8", errors="replace")
+                open_p = raw_hdr.find("(")
+                close_p = raw_hdr.rfind(")")
+                hdr_str = raw_hdr[open_p + 1 : close_p] if open_p != -1 and close_p > open_p else ""
+                if ignore_small_const and nonlog_depth == 1 and _is_adj_list_for_header(hdr_str):
+                    counts = False
             elif ntype == "while_statement":
                 cond_node = node.child_by_field_name("condition")
                 cond_str = _cst_node_text(cond_node, code_bytes).strip()
                 if cond_str.startswith("(") and cond_str.endswith(")"):
                     cond_str = cond_str[1:-1].strip()
-                if ignore_multitest and any_depth == 0 and _is_multitest_driver_header(cond_str):
+                prec_text = code_bytes[max(0, node.start_byte - 180) : node.start_byte].decode(
+                    "utf-8", errors="replace"
+                )
+                if (
+                    ignore_multitest
+                    and any_depth == 0
+                    and _is_multitest_driver_header(
+                        cond_str,
+                        preceding_text=prec_text if info.name == "main" else "",
+                        body_preview=body_text[:400],
+                    )
+                ):
                     counts = False
                 is_log = bool(counts and ignore_small_const and _is_logarithmic_loop("while", cond_str, body_text))
 
@@ -1720,8 +1832,31 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         m.group(1) != m.group(2)
         for m in re.finditer(r"\(\s*([a-zA-Z_]\w*)\s*-\s*1\s*\)\s*&\s*([a-zA-Z_]\w*)", cleaned)
     )
+    bitmask_bound_vars: set[str] = set()
+    for m_bm in _BITMASK_ASSIGN_RE.finditer(cleaned):
+        var_name = m_bm.group(1)
+        exp_tok = m_bm.group(2)
+        if exp_tok.isdigit() and int(exp_tok) < 12:
+            continue
+        bitmask_bound_vars.add(var_name)
+    if bitmask_bound_vars:
+        for m_alias in re.finditer(
+            r"(?:^|[;{}])\s*(?:(?:static|const|constexpr)\s+)*(?:(?:unsigned|signed)\s+)?"
+            r"(?:(?:int|long\s+long|long|size_t|ll|auto)\s+)?([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*(?:[+-]\s*1)?\s*;",
+            cleaned,
+        ):
+            if m_alias.group(2) in bitmask_bound_vars:
+                bitmask_bound_vars.add(m_alias.group(1))
+    has_bitmask_var_usage = any(
+        re.search(
+            rf"(?:(?:<|<=)\s*{re.escape(v)}\b|\(\s*{re.escape(v)}\b|\[\s*{re.escape(v)}\b)",
+            cleaned,
+        )
+        for v in bitmask_bound_vars
+    )
     has_bitmask_loop_bound = bool(
         re.search(r"(?:<|<=)\s*\(?\s*1(?:[uUlL]{0,3})\s*<<\s*(?:\(\s*)?[a-zA-Z_]\w*", cleaned)
+        or has_bitmask_var_usage
     )
     has_bitmask_dp_array = bool(
         re.search(r"\b(?:dp|f|memo|mask|state|sub|bit|subset)\w*\s*\[\s*1\s*<<\s*(?:1[2-9]|2\d)\s*\]", cleaned)
@@ -1733,7 +1868,11 @@ def detect_algorithm_patterns(code: str) -> tuple[str | None, list[str]]:
         or re.search(r"\bbitmask\b", cleaned)
     ):
         patterns.append("bitmask")
-        if re.search(r"\b(?:dp|f|memo)\s*\[", cleaned) or has_bitmask_dp_array:
+        if (
+            re.search(r"\b(?:dp|f|memo|dist)\s*\[", cleaned)
+            or has_bitmask_dp_array
+            or has_bitmask_var_usage
+        ):
             patterns.append("bitmask_dp")
         complexity = _higher_complexity(complexity, ComplexityLevel.EXPONENTIAL)
 
@@ -1756,10 +1895,34 @@ def _has_nested_for_loops(cleaned: str) -> bool:
 
 def _has_2d_dp_table(cleaned: str) -> bool:
     """Check whether DP indexing/declaration genuinely uses two non-trivial dimensions."""
-    for m in re.finditer(r"\b(?:dp|memo)\s*\[([^\]]+)\]\s*\[([^\]]+)\]", cleaned):
-        dim1 = m.group(1).strip()
-        dim2 = m.group(2).strip()
-        if (dim1.isdigit() and int(dim1) <= 4) or (dim2.isdigit() and int(dim2) <= 4):
+    small_2nd_dim_vars: set[str] = set()
+    # e.g. `vector<array<long long, 7>> dp(n + 1);` or `long long dp[MAXN][7];`
+    for m_arr in re.finditer(
+        r"\b(?:std::)?array\s*<[^;{}<>]+,\s*(\d+)\s*>\s*>+\s*([A-Za-z_]\w*)\b",
+        cleaned,
+    ):
+        if int(m_arr.group(1)) <= 16:
+            small_2nd_dim_vars.add(m_arr.group(2))
+    for m_carr in re.finditer(
+        r"\b([A-Za-z_]\w*)\s*\[[^\]]+\]\s*\[\s*(\d+)\s*\]\s*(?:;|=|,)",
+        cleaned,
+    ):
+        if int(m_carr.group(2)) <= 16:
+            small_2nd_dim_vars.add(m_carr.group(1))
+    for m_vec in re.finditer(
+        r"\b([A-Za-z_]\w*)\s*\([^;{}]+,\s*(?:std::)?vector\s*<[^>]+>\s*\(\s*(\d+)\s*(?:,|\))",
+        cleaned,
+    ):
+        if int(m_vec.group(2)) <= 16:
+            small_2nd_dim_vars.add(m_vec.group(1))
+
+    for m in re.finditer(r"\b(dp|memo)\s*\[([^\]]+)\]\s*\[([^\]]+)\]", cleaned):
+        name = m.group(1)
+        dim1 = m.group(2).strip()
+        dim2 = m.group(3).strip()
+        if name in small_2nd_dim_vars:
+            continue
+        if (dim1.isdigit() and int(dim1) <= 16) or (dim2.isdigit() and int(dim2) <= 16):
             continue
         return True
     return False

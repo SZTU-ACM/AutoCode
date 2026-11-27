@@ -35,9 +35,12 @@ Register each wrong solution in `.autocode/manifest.json` under `solutions[]` wi
 | **Single-mod string hash** | Rolling polynomial hash with single 30-bit mod (`1e9+7` / `998244353`) or `ull` overflow | `WA` | `jngen::thue_morse_collision_pair(11)` (`ull`) or `jngen::anti_single_mod_hash_pair(mod, base)` |
 | **Graph edge-case omissions** | Assumes simple connected graph; misses self-loops, multi-edges, isolated nodes, disconnected components | `WA` / `RE` | `jngen::edge_case_graph(...)` matching validator constraints |
 | **Suboptimal complexity** | $O(n^2)$ / $O(n\sqrt{n})$ with full $n_{\max}$ buffers (must NOT crash via small arrays!) | `TLE` | Anti-sort / star / broom / worst-case DAG at full $n_{\max}$ |
+| **Hybrid brute + degenerate fast branch** | Exact brute/DP below an inflated cheat threshold $B_{\text{cheat}}$ ($\approx 1.5\times 10^8$ ops in 1-2s), degenerate missing-edge-fix formula above it | `WA` / `TLE` | `type=3/4` cases strictly $> B_{\text{cheat}}$ exercising every fast-branch boundary (e.g., multi-reflection, boundary starts) |
+| **Randomized greedy rollout / SLF-SPFA heuristic** | Constructive/`YES-NO` guesser running exact DP on small $n$ and 30-50 random rollouts on large $n$; or `deque` SLF-SPFA on weighted graphs | `WA` / `TLE` | Narrow-corridor unique-solution hacks in `tests/hack/`; SPFA-killer + SLF-killer grid/chain graphs |
 
-### Exact Verdict Hygiene
+### Exact Verdict Hygiene & Anti-Constant-Anchoring Rule
 
+- **Anti-Constant-Anchoring Rule**: When writing ANY `role="wrong"` solution for a divide-and-conquer / hybrid-threshold problem, **NEVER copy the threshold constant from `solutions/sol.cpp`** (e.g., `THRESHOLD = 600`). Estimate the largest brute-forceable limit $B_{\text{cheat}}$ within 1-2s ($\approx 1.5 \times 10^8$ basic ops) and push the cheat threshold up to $B_{\text{cheat}}$ so the wrong solution verifies test coverage strictly in the $n > B_{\text{cheat}}$ region.
 - Never leave `expected_verdict` ambiguous when constructing a targeted failure mode:
   - A `wrong_tle_*.cpp` solution MUST allocate buffers large enough for $n_{\max}$ so it fails by `TLE`, never `RE` (`SIGSEGV`) or `MLE`.
   - `verify_wrong_kill` verifies `killing_verdict == expected_verdict` and marks `expected_verdict_matched: false` (failing `wrong_solution_kill`) whenever an unintended verdict occurs (e.g., `expected_verdict="TLE"` killed by `"RE"`).

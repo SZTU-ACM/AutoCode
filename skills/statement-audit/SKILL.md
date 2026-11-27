@@ -33,6 +33,8 @@ Audit every statement systematically across all four Orchid ambiguity dimensions
 - Underspecification does not equal incoherence: a statement can look internally coherent and match all samples while admitting multiple valid readings.
 - Before returning `go`, explicitly **enumerate a second plausible interpretation** of the problem statement (covering graph/sequence assumptions, edge inputs, or output acceptance criteria).
 - Test whether both interpretations satisfy the provided samples yet diverge on legal boundary inputs. If they diverge, return `decision: no_go` and list the exact ambiguity in `doc_issues` and `rewrite_targets`.
+- **Sample-Stripped Action-Space Check**: Blind-read ONLY Problem Description, Input Format, and Output Format while **completely hiding Explanation/Notes**, verifying 100% completeness of the legal move set: (1) operating on elements outside the current candidate set just to pass/spend turns, (2) operating repeatedly on the same target, (3) idle / no-op moves, and (4) win/end condition ("ever visited/achieved" vs "simultaneously ending on"). Also verify Problem Background storytelling never narrows or contradicts the main body's legal action space (reject as `no_go` on conflict).
+- **De-Spoiler Regression Guard**: Before trimming or removing any reasoning from Sample Explanations/Notes, verify line-by-line that the removed text does not carry any unstated rule or edge convention; if it does, copy that rule into Problem Description FIRST, simplify the explanation, and re-run the blind black-box check.
 
 ## Formal Constraints & Single-Source `constraints.h` Verification
 

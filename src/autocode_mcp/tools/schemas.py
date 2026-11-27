@@ -35,6 +35,7 @@ class ProblemAuditInput(BaseModel):
     standalone: bool = False
     layout: Literal["auto", "autocode", "standard_cn", "polygon", "hydro"] = "auto"
     enable_mutation_testing: bool | None = None
+    strict: bool = False
 
 
 class FileReadInput(BaseModel):
@@ -286,6 +287,7 @@ class ProblemVerifyTestsInput(BaseModel):
             "validator_self_test",
             "checker_self_test",
             "interactor_self_test",
+            "coverage",
         ]
     ] | None = None
     sol_name: str | None = None

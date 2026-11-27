@@ -56,6 +56,7 @@ _MUTATION_RULES: list[tuple[str, re.Pattern[str], str]] = [
 _CATEGORY_PRIORITY: list[str] = [
     "relational_le_to_lt",
     "relational_ge_to_gt",
+    "hybrid_threshold_escalation",
     "type_narrowing_ll_to_int",
     "mod_removal",
     "loop_bound_off_by_one",
@@ -72,6 +73,7 @@ _CATEGORY_PRIORITY: list[str] = [
 
 _SEMANTIC_KINDS = frozenset(
     {
+        "hybrid_threshold_escalation",
         "type_narrowing_ll_to_int",
         "mod_removal",
         "loop_bound_off_by_one",
@@ -139,6 +141,7 @@ class _CandidateEdit:
     category: str
     ast_backend: str
     equivalent_reason: str | None = None
+    extra_edits: tuple[tuple[int, int, str], ...] = ()
 
 
 def _natural_sort_key(path: Path) -> list[int | str]:
@@ -451,15 +454,22 @@ def _extract_stmt_at(masked: str, start_idx: int) -> tuple[str, int] | None:
         if close_b is None:
             return None
         return masked[i + 1 : close_b], close_b + 1
-    # Single statement up to terminating ';' (respecting parentheses)
+    # Single statement up to terminating ';' or balanced '{...}' block
     paren = 0
+    brace = 0
     for j in range(i, n):
         ch = masked[j]
         if ch == "(":
             paren += 1
         elif ch == ")" and paren > 0:
             paren -= 1
-        elif ch == ";" and paren == 0:
+        elif ch == "{":
+            brace += 1
+        elif ch == "}" and brace > 0:
+            brace -= 1
+            if paren == 0 and brace == 0:
+                return masked[i : j + 1], j + 1
+        elif ch == ";" and paren == 0 and brace == 0:
             return masked[i : j + 1], j + 1
     return None
 
@@ -768,6 +778,337 @@ def _split_for_clauses(masked: str, open_p: int, close_p: int) -> list[tuple[int
     return clauses
 
 
+def _is_cin_read_only_for_loop(
+    masked: str,
+    op_start: int,
+    op_end: int,
+    for_spans: list[tuple[int, int, int, int]],
+) -> bool:
+    """Return True when ``<`` lies inside ``for (...; i < n; ...) cin >> a[i];`` stream-only loop."""
+    for open_p, close_p, _, _ in for_spans:
+        if not (open_p < op_start < op_end < close_p):
+            continue
+        clauses = _split_for_clauses(masked, open_p, close_p)
+        if len(clauses) != 3:
+            continue
+        cond_s, cond_e = clauses[1]
+        if not (cond_s <= op_start < op_end <= cond_e):
+            continue
+        cond_text = masked[cond_s:cond_e].strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*\s*<\s*[^;&|?]+", cond_text):
+            continue
+        body_parsed = _extract_stmt_at(masked, close_p + 1)
+        if body_parsed is None:
+            continue
+        body_text = body_parsed[0].strip()
+        stmts = [s.strip() for s in body_text.split(";") if s.strip()]
+        if not stmts:
+            return False
+        if all(
+            re.fullmatch(
+                r"(?:std\s*::\s*)?cin(?:\s*>>\s*[A-Za-z_][A-Za-z0-9_.\[\]]*)+",
+                _norm_ws(st),
+            )
+            for st in stmts
+        ):
+            return True
+    return False
+
+
+def _enclosing_brace_span(masked: str, pos: int) -> tuple[int, int]:
+    """Return ``(start, end)`` of the enclosing ``{ ... }`` block containing ``pos``, else ``(0, len)``."""
+    depth = 0
+    block_start = 0
+    for i in range(pos - 1, -1, -1):
+        ch = masked[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                block_start = i + 1
+                break
+            depth -= 1
+    close_b = _find_matching_delim(masked, block_start - 1, "{", "}") if block_start > 0 else None
+    block_end = close_b if close_b is not None else len(masked)
+    return block_start, block_end
+
+
+def _extract_int_constants(masked: str) -> dict[str, int]:
+    """Extract simple compile-time integer constants from ``const``/``constexpr`` and ``#define``."""
+    constants: dict[str, int] = {}
+    for m in re.finditer(
+        r"(?:static\s+)?(?:const|constexpr)\s+(?:unsigned\s+|signed\s+)?(?:long\s+long|long|int|int64_t|int32_t|ll)\s+([A-Za-z_]\w*)\s*=\s*(\d+(?:'\d+)*)[uUlL]*\s*;",
+        masked,
+    ):
+        try:
+            constants[m.group(1)] = int(m.group(2).replace("'", ""))
+        except ValueError:
+            pass
+    for m in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+(\d+(?:'\d+)*)[uUlL]*\b", masked, re.MULTILINE):
+        try:
+            constants[m.group(1)] = int(m.group(2).replace("'", ""))
+        except ValueError:
+            pass
+    return constants
+
+
+def _classify_ll_narrowing_safety(
+    masked: str,
+    decl_start: int,
+    decl_end: int,
+    constants: dict[str, int],
+) -> tuple[str | None, int]:
+    """Classify whether ``long long`` -> ``int`` is range-equivalent and return ``(equiv_reason, priority)``."""
+    tail = masked[decl_end : min(len(masked), decl_end + 240)]
+    semi = tail.find(";")
+    if semi == -1:
+        return None, 1
+    decl_stmt = tail[:semi].strip()
+    m_single = re.match(r"^([A-Za-z_]\w*)\s*=\s*(.+)$", decl_stmt)
+    if not m_single:
+        # Multi-declarator or uninitialized `long long x;` — prioritize if `*` or accumulator in block
+        return None, 1
+    var_name = m_single.group(1)
+    rhs = _norm_ws(m_single.group(2))
+    block_s, block_e = _enclosing_brace_span(masked, decl_start)
+    after_decl = masked[decl_end + semi + 1 : block_e]
+    esc = re.escape(var_name)
+
+    has_mul_in_init = "*" in rhs
+    has_mul_usage = bool(re.search(rf"\b{esc}\s*\*|\*\s*{esc}\b", after_decl))
+    has_acc_usage = bool(
+        re.search(rf"\b{esc}\s*(?:\+=|-=|\*=|<<=)|\+\+\s*{esc}\b|{esc}\s*\+\+", after_decl)
+    )
+
+    # 1. MOD-bounded state variable without un-casted multiplication (fits in signed 32-bit int)
+    mod_32bit_names = {
+        name for name, val in constants.items() if 2 <= val < (1 << 31) and "mod" in name.lower()
+    }
+    mod_pat = "|".join(re.escape(n) for n in sorted(mod_32bit_names)) if mod_32bit_names else ""
+    if not has_mul_in_init and not has_mul_usage and "<<" not in rhs:
+        has_mod_init = bool(
+            (mod_pat and re.search(rf"%\s*(?:{mod_pat})\b", rhs))
+            or re.search(r"%\s*(?:998244353|1000000007|1000000009)\b", rhs)
+        )
+        small_literal_init = False
+        if re.fullmatch(r"-?\d+(?:'\d+)*(?:LL|ll)?", rhs):
+            try:
+                small_literal_init = abs(int(rhs.rstrip("Ll").replace("'", ""))) < (1 << 30)
+            except ValueError:
+                small_literal_init = False
+        mut_lines = [
+            ln.strip()
+            for ln in after_decl.splitlines()
+            if re.search(rf"\b{esc}\b\s*(?:=|\+=|-=)", ln)
+            and not re.search(rf"\b{esc}\s*(?:==|!=|<=|>=)", ln)
+        ]
+        # Proven overflow-free MOD update: single binary add/sub only (no `*`, `<<`, or 3+ chained `+`/`-`) with 30-bit MOD
+        small_mod_names = {
+            name for name, val in constants.items() if 2 <= val < (1 << 30) and "mod" in name.lower()
+        }
+        small_mod_pat = "|".join(re.escape(n) for n in sorted(small_mod_names)) if small_mod_names else ""
+        def _single_add_sub_mod_safe(line: str) -> bool:
+            if "*" in line or "<<" in line:
+                return False
+            has_mod_op = bool(
+                (small_mod_pat and re.search(rf"(?:%=\s*(?:{small_mod_pat})|%\s*(?:{small_mod_pat})\b)", line))
+                or re.search(r"%\s*(?:998244353|1000000007|1000000009)\b", line)
+            )
+            if not has_mod_op:
+                return False
+            # Allow at most one arithmetic `+` or `-` (ignoring compound `+=`/`-=`) so sum stays < 2*MOD < 2^31
+            body_no_compound = re.sub(r"[+-]=", "=", line)
+            return len(re.findall(r"(?<!\+)\+(?!\+)|(?<!-)-(?!-)", body_no_compound)) <= 1
+
+        any_mod_line = any(
+            (mod_pat and bool(re.search(rf"(?:%=\s*(?:{mod_pat})|%\s*(?:{mod_pat})\b)", ln)))
+            or bool(re.search(r"%\s*(?:998244353|1000000007|1000000009)\b", ln))
+            for ln in mut_lines
+        )
+        if small_literal_init and mut_lines and all(_single_add_sub_mod_safe(ln) for ln in mut_lines):
+            return "safe_range_mod_bounded", 2
+        if (
+            has_mod_init
+            and not mut_lines
+            and not has_acc_usage
+            and not re.search(rf"\b{esc}\b\s*(?:=|\+=|-=|\*=|<<=)", after_decl)
+            # Every summed term inside `(a % MOD + b % MOD) % MOD` is itself modulo-bounded
+            and rhs.count("%") >= 2
+            and len(re.findall(r"[+-]", rhs)) <= 1
+        ):
+            return "safe_range_mod_bounded", 2
+        if small_literal_init and mut_lines and any_mod_line:
+            return None, 2
+
+    # 2. Single non-accumulating addition/subtraction of non-64-bit operands (never reassigned or multiplied)
+    if (
+        not has_mul_in_init
+        and not has_mul_usage
+        and not has_acc_usage
+        and not re.search(rf"\b{esc}\s*=(?!=)", after_decl)
+    ):
+        m_add = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_.\[\]]*)\s*([+-])\s*([A-Za-z_][A-Za-z0-9_.\[\]]*)",
+            rhs,
+        )
+        if m_add:
+            op_a = m_add.group(1).split("[", 1)[0].split(".", 1)[0]
+            op_b = m_add.group(3).split("[", 1)[0].split(".", 1)[0]
+            prefix_scope = masked[block_s:decl_start]
+            a_is_ll = bool(
+                re.search(rf"\b(?:long\s+long|int64_t)\b[^;]*\b{re.escape(op_a)}\b", prefix_scope)
+            )
+            b_is_ll = bool(
+                re.search(rf"\b(?:long\s+long|int64_t)\b[^;]*\b{re.escape(op_b)}\b", prefix_scope)
+            )
+            if not a_is_ll and not b_is_ll:
+                return "safe_range_single_add_sub", 2
+
+    priority = 0 if (has_mul_in_init or has_mul_usage or has_acc_usage) else 1
+    return None, priority
+
+
+def _infer_degenerate_return_snippet(code: str, masked: str, if_pos: int) -> str:
+    """Choose a compilable degenerate fast-branch exit snippet matching the enclosing function."""
+    prefix = masked[:if_pos]
+    brace_depth = 0
+    fn_open = -1
+    outer_open = -1
+    ctrl_tail_re = re.compile(
+        r"(?:^|[;{}])\s*(?:if|else(?:\s+if)?|for|while|switch|do|try|catch)\b[^;{}]*$"
+    )
+    for i in range(len(prefix) - 1, -1, -1):
+        ch = prefix[i]
+        if ch == "}":
+            brace_depth += 1
+        elif ch == "{":
+            if brace_depth == 0:
+                outer_open = i
+                cand_hdr = " ".join(prefix[max(0, i - 140) : i].split())
+                if cand_hdr and not ctrl_tail_re.search(cand_hdr) and re.search(
+                    r"\)\s*(?:const|noexcept|override|final|\s)*$", cand_hdr
+                ):
+                    fn_open = i
+                    break
+            else:
+                brace_depth -= 1
+    target_open = fn_open if fn_open != -1 else outer_open
+    header = " ".join(prefix[max(0, target_open - 140) : target_open].split()) if target_open != -1 else ""
+    in_main = bool(re.search(r"\bint\s+main\s*\(", header))
+    is_void = bool(re.search(r"\bvoid\s+[A-Za-z_]\w*\s*\(", header))
+    if is_void:
+        return "return;"
+    if in_main:
+        if re.search(r"\b(?:std::)?cout\b", masked):
+            return "std::cout << 0 << '\\n'; return 0;"
+        if re.search(r"\bprintf\s*\(", masked):
+            return 'printf("0\\n"); return 0;'
+        return "return 0;"
+    if re.search(r"\b(?:vector|pair|string|array|tuple)\b", header):
+        return "return {};"
+    return "return 0;"
+
+
+def _collect_hybrid_threshold_candidates(
+    code: str,
+    masked: str,
+    constants: dict[str, int],
+    *,
+    ast_backend: str,
+    dead_or_ident_fn: Any,
+    n_max: int | None = None,
+) -> list[_CandidateEdit]:
+    """Generate ``hybrid_threshold_escalation`` mutants for ``if (n <= THRESHOLD)`` divide-and-conquer branches."""
+    out: list[_CandidateEdit] = []
+    seen_lines: set[int] = set()
+    for m in re.finditer(r"\bif\s*\(\s*([A-Za-z_]\w*)\s*(<=|<)\s*([A-Za-z_]\w*|\d+(?:'\d+)*)\s*\)", masked):
+        if_pos = m.start()
+        if dead_or_ident_fn(if_pos) is not None:
+            continue
+        rhs_tok = m.group(3)
+        if rhs_tok in constants:
+            thresh_val = constants[rhs_tok]
+        elif rhs_tok.replace("'", "").isdigit():
+            thresh_val = int(rhs_tok.replace("'", ""))
+        else:
+            continue
+        if not (50 <= thresh_val <= 50_000):
+            continue
+        ln = code.count("\n", 0, if_pos)
+        if ln in seen_lines:
+            continue
+        close_p = m.end() - 1
+        then_parsed = _extract_stmt_at(masked, close_p + 1)
+        if then_parsed is None:
+            continue
+        then_body, after_then = then_parsed
+        rest = masked[after_then:]
+        if re.match(r"^\s*else\s+if\b", rest):
+            continue
+        else_m = re.match(r"^\s*else\b", rest)
+        degen_stmt = _infer_degenerate_return_snippet(code, masked, if_pos)
+        extra_edits: tuple[tuple[int, int, str], ...] = ()
+        if else_m:
+            else_kw_end = after_then + else_m.end()
+            else_parsed = _extract_stmt_at(masked, else_kw_end)
+            if else_parsed is None:
+                continue
+            else_body, after_else = else_parsed
+            if not (
+                re.search(r"\b(?:return|cout|printf)\b", then_body)
+                or re.search(r"\b(?:return|cout|printf)\b", else_body)
+            ):
+                continue
+            # Locate '{' of else block if braced, else wrap single statement
+            j = else_kw_end
+            while j < len(masked) and masked[j].isspace():
+                j += 1
+            if j < len(masked) and masked[j] == "{":
+                extra_edits = ((j + 1, j + 1, f" {degen_stmt} "),)
+            else:
+                extra_edits = ((j, after_else, f"{{ {degen_stmt} }}"),)
+        else:
+            if not re.search(r"\breturn\b", then_body):
+                continue
+            # Ensure non-empty fast-branch code follows inside the same block
+            _, block_end = _enclosing_brace_span(masked, if_pos)
+            if not masked[after_then:block_end].strip():
+                continue
+            extra_edits = ((after_then, after_then, f" {degen_stmt} "),)
+
+        seen_lines.add(ln)
+        rhs_s, rhs_e = m.start(3), m.end(3)
+        escalated_expr = (
+            f"{min(n_max, thresh_val * 8)}LL"
+            if (n_max is not None and n_max > thresh_val)
+            else f"(({rhs_tok}) * 8LL)"
+        )
+        # 1. Escalate threshold to min(n_max, THRESHOLD * 8) and degenerate the fast large-n branch
+        out.append(
+            _CandidateEdit(
+                start=rhs_s,
+                end=rhs_e,
+                replacement=escalated_expr,
+                mutation_type="hybrid_threshold_escalation",
+                category="semantic",
+                ast_backend=ast_backend,
+                extra_edits=extra_edits,
+            )
+        )
+        # 2. Collapse threshold to 0 so small inputs exercise the fast large-n branch
+        out.append(
+            _CandidateEdit(
+                start=rhs_s,
+                end=rhs_e,
+                replacement="0",
+                mutation_type="hybrid_threshold_escalation",
+                category="semantic",
+                ast_backend=ast_backend,
+            )
+        )
+    return out
+
+
 def _collect_identical_arm_if_cond_spans(masked: str) -> list[tuple[int, int]]:
     """Find condition spans ``(cond)`` for ``if (cond) A else A`` or ``if (cond) return X; return X;``."""
     spans: list[tuple[int, int]] = []
@@ -813,6 +1154,8 @@ def _build_byte_to_char_map(code: str) -> list[int]:
 
 def _extract_candidates(
     code: str,
+    *,
+    n_max: int | None = None,
 ) -> tuple[list[_CandidateEdit], str]:
     """Extract raw candidate mutations using ``tree-sitter-cpp`` when installed or Python fallback."""
     masked, active = _compute_masked_code_and_if0(code)
@@ -856,6 +1199,11 @@ def _extract_candidates(
             return "identical_branch_arms"
         return None
 
+    for_spans = _collect_for_header_spans(
+        code, masked, cst_root=cst_root, byte_to_char=byte_to_char
+    )
+    int_constants = _extract_int_constants(masked)
+
     # 1. Existing boundary/operator rules (keeping original per-(line, kind) cap and IO/template guards)
     seen_line_kind: set[tuple[int, str]] = set()
     for line_idx, raw_line in enumerate(lines):
@@ -870,6 +1218,22 @@ def _extract_candidates(
 
         for kind, pat, repl in _MUTATION_RULES:
             if is_io_line and kind in ("relational_lt_to_le", "relational_gt_to_ge"):
+                if kind == "relational_lt_to_le":
+                    for m in pat.finditer(masked_line):
+                        abs_s = l_start + m.start()
+                        abs_e = l_start + m.end()
+                        if active[abs_s] and _is_cin_read_only_for_loop(masked, abs_s, abs_e, for_spans):
+                            candidates.append(
+                                _CandidateEdit(
+                                    start=abs_s,
+                                    end=abs_e,
+                                    replacement=repl,
+                                    mutation_type=kind,
+                                    category="boundary",
+                                    ast_backend=ast_backend,
+                                    equivalent_reason="cin_read_loop_eof_ub",
+                                )
+                            )
                 continue
             for m in pat.finditer(masked_line):
                 abs_s = l_start + m.start()
@@ -881,6 +1245,9 @@ def _extract_candidates(
                     if _TEMPLATE_PREFIX_RE.search(prefix):
                         continue
                 eq_reason = _dead_or_ident_reason(abs_s)
+                if eq_reason is None and kind == "relational_lt_to_le":
+                    if _is_cin_read_only_for_loop(masked, abs_s, abs_e, for_spans):
+                        eq_reason = "cin_read_loop_eof_ub"
                 if eq_reason is None and kind in _RELATIONAL_KINDS:
                     eq_reason = _check_relational_equivalence(masked, abs_s, abs_e, kind)
                 if (line_idx, kind) in seen_line_kind and eq_reason is None:
@@ -899,8 +1266,9 @@ def _extract_candidates(
                     )
                 )
 
-    # 2. Semantic operator: long long -> int narrowing
+    # 2. Semantic operator: long long -> int narrowing (prioritized + value-range safe filtering)
     seen_ll_lines: set[int] = set()
+    ll_candidates: list[tuple[int, _CandidateEdit]] = []
     if cst_root is not None and byte_to_char is not None:
         stack = [cst_root]
         while stack:
@@ -915,15 +1283,24 @@ def _extract_candidates(
                     ln = code.count("\n", 0, s_c)
                     if ln not in seen_ll_lines and not re.search(r"\bmain\s*\(", masked[e_c : e_c + 20]):
                         seen_ll_lines.add(ln)
-                        candidates.append(
-                            _CandidateEdit(
-                                start=s_c,
-                                end=e_c,
-                                replacement=repl,
-                                mutation_type="type_narrowing_ll_to_int",
-                                category="semantic",
-                                ast_backend=ast_backend,
-                                equivalent_reason=_dead_or_ident_reason(s_c),
+                        eq_reason = _dead_or_ident_reason(s_c)
+                        prio = 1
+                        if eq_reason is None:
+                            eq_reason, prio = _classify_ll_narrowing_safety(
+                                masked, s_c, e_c, int_constants
+                            )
+                        ll_candidates.append(
+                            (
+                                prio,
+                                _CandidateEdit(
+                                    start=s_c,
+                                    end=e_c,
+                                    replacement=repl,
+                                    mutation_type="type_narrowing_ll_to_int",
+                                    category="semantic",
+                                    ast_backend=ast_backend,
+                                    equivalent_reason=eq_reason,
+                                ),
                             )
                         )
             for ch in getattr(node, "children", ()):
@@ -938,17 +1315,28 @@ def _extract_candidates(
                 if re.search(r"\bmain\s*\(", masked[e_c : e_c + 20]):
                     continue
                 seen_ll_lines.add(ln)
-                candidates.append(
-                    _CandidateEdit(
-                        start=s_c,
-                        end=e_c,
-                        replacement=repl_ll,
-                        mutation_type="type_narrowing_ll_to_int",
-                        category="semantic",
-                        ast_backend=ast_backend,
-                        equivalent_reason=_dead_or_ident_reason(s_c),
+                eq_reason = _dead_or_ident_reason(s_c)
+                prio = 1
+                if eq_reason is None:
+                    eq_reason, prio = _classify_ll_narrowing_safety(
+                        masked, s_c, e_c, int_constants
+                    )
+                ll_candidates.append(
+                    (
+                        prio,
+                        _CandidateEdit(
+                            start=s_c,
+                            end=e_c,
+                            replacement=repl_ll,
+                            mutation_type="type_narrowing_ll_to_int",
+                            category="semantic",
+                            ast_backend=ast_backend,
+                            equivalent_reason=eq_reason,
+                        ),
                     )
                 )
+    ll_candidates.sort(key=lambda pair: (pair[0], pair[1].start))
+    candidates.extend(edit for _, edit in ll_candidates)
 
     # 3. Semantic operator: % MOD removal (both compound `%= MOD` and binary `% MOD`)
     seen_mod_lines: set[int] = set()
@@ -1224,11 +1612,30 @@ def _extract_candidates(
             )
         )
 
+    # 8. Semantic operator: hybrid threshold escalation + fast-branch collapse
+    candidates.extend(
+        _collect_hybrid_threshold_candidates(
+            code,
+            masked,
+            int_constants,
+            ast_backend=ast_backend,
+            dead_or_ident_fn=_dead_or_ident_reason,
+            n_max=n_max,
+        )
+    )
+
     return candidates, ast_backend
 
 
 def _materialise_candidate(code: str, cand: _CandidateEdit) -> dict[str, Any]:
-    mut_code = code[: cand.start] + cand.replacement + code[cand.end :]
+    edits = sorted(
+        [(cand.start, cand.end, cand.replacement), *cand.extra_edits],
+        key=lambda e: (e[0], e[1]),
+        reverse=True,
+    )
+    mut_code = code
+    for ed_s, ed_e, ed_repl in edits:
+        mut_code = mut_code[:ed_s] + ed_repl + mut_code[ed_e:]
     line_no = code.count("\n", 0, cand.start) + 1
     orig_line_s = code.rfind("\n", 0, cand.start)
     orig_line_s = 0 if orig_line_s == -1 else orig_line_s + 1
@@ -1315,10 +1722,11 @@ def generate_cpp_mutants_report(
     *,
     budget: int = 6,
     filter_equivalent: bool = True,
+    n_max: int | None = None,
 ) -> dict[str, Any]:
     """Generate bounded C++ mutants plus equivalent-mutant filtering telemetry."""
     safe_budget = max(1, min(int(budget), _MAX_MUTATION_BUDGET))
-    raw_edits, ast_backend = _extract_candidates(code)
+    raw_edits, ast_backend = _extract_candidates(code, n_max=n_max)
 
     materialized = [_materialise_candidate(code, edit) for edit in raw_edits]
     if filter_equivalent:
@@ -1641,7 +2049,14 @@ async def run_mutation_testing(
             )
     active_backend = "source"
 
-    mut_report = generate_cpp_mutants_report(code, budget=budget, filter_equivalent=True)
+    from ..tools.complexity import extract_n_max_from_constraints
+
+    mut_report = generate_cpp_mutants_report(
+        code,
+        budget=budget,
+        filter_equivalent=True,
+        n_max=extract_n_max_from_constraints(manifest.constraints),
+    )
     mutants: list[dict[str, Any]] = mut_report["mutants"]
     equivalent_filtered = int(mut_report["equivalent_filtered"])
     equivalent_mutants: list[dict[str, Any]] = mut_report["equivalent_mutants"]

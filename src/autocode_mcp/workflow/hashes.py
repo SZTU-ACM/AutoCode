@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..runtime_store import AUDIT, set_section
+from ..runtime_store import AUDIT, get_section, set_section
 from ..utils.communication_runner import safe_resolve_under_root
 from .manifest import CANONICAL_PROBLEM_FILES, load_manifest
 
@@ -330,4 +330,109 @@ def _sync_solution_hashes(problem_dir: str, state: dict[str, Any]) -> None:
 
     if sol_drifted or brute_drifted:
         _invalidate_downstream_in_memory(state)
+
+    _sync_statement_hash(problem_dir, state)
+
+
+def resolve_statement_rel(problem_dir: str) -> str:
+    """Return the canonical relative path of the problem statement Markdown file."""
+    try:
+        manifest = load_manifest(problem_dir)
+    except (OSError, ValueError):
+        manifest = None
+    if manifest is not None and isinstance(manifest.statement_path, str) and manifest.statement_path.strip():
+        norm_stmt = manifest.statement_path.strip().replace("\\", "/")
+        safe_manifest_stmt = safe_resolve_under_root(problem_dir, norm_stmt)
+        if safe_manifest_stmt is not None and Path(safe_manifest_stmt).is_file():
+            return norm_stmt
+    for candidate in ("statements/README.md", "statement.md"):
+        safe = safe_resolve_under_root(problem_dir, candidate)
+        if safe is not None and Path(safe).is_file():
+            return candidate
+    stmt_dir = safe_resolve_under_root(problem_dir, "statements")
+    if stmt_dir is not None and Path(stmt_dir).is_dir():
+        for p in sorted(Path(stmt_dir).glob("*.md")):
+            safe = safe_resolve_under_root(problem_dir, f"statements/{p.name}")
+            if safe is not None and Path(safe).is_file():
+                return f"statements/{p.name}"
+    return "statements/README.md"
+
+
+def current_statement_sha256(problem_dir: str) -> str | None:
+    """Return the current SHA-256 of the problem statement file, or None if missing."""
+    return _file_sha256(problem_dir, resolve_statement_rel(problem_dir))
+
+
+def is_statement_hash_drifted(
+    problem_dir: str,
+    audit_state: dict[str, Any] | None = None,
+    workflow_state: dict[str, Any] | None = None,
+) -> bool:
+    """Return True only when a previously recorded statement_source_hash differs from disk."""
+    cur_stmt = current_statement_sha256(problem_dir)
+    if isinstance(workflow_state, dict):
+        wf_hash = workflow_state.get("statement_source_hash")
+        if isinstance(wf_hash, str) and wf_hash and cur_stmt != wf_hash:
+            return True
+    if isinstance(audit_state, dict):
+        full_audit = audit_state.get("full_audit")
+        if isinstance(full_audit, dict):
+            audit_hash = full_audit.get("statement_source_hash")
+            if isinstance(audit_hash, str) and audit_hash and cur_stmt != audit_hash:
+                return True
+    return False
+
+
+def is_statement_drifted_for_audit(
+    problem_dir: str,
+    audit_state: dict[str, Any] | None = None,
+    workflow_state: dict[str, Any] | None = None,
+) -> bool:
+    """Return True if the statement is marked dirty or its source hash drifted since validation/audit."""
+    if isinstance(workflow_state, dict) and bool(workflow_state.get("statement_dirty", False)):
+        return True
+    return is_statement_hash_drifted(problem_dir, audit_state, workflow_state)
+
+
+def _invalidate_statement_only_in_memory(state: dict[str, Any]) -> None:
+    """Invalidate statement/audit/packaging gates while preserving stress_passed & tests_verified."""
+    state.update(
+        {
+            "statement_validated": False,
+            "validation_passed": False,
+            "statement_dirty": True,
+            "statement_source_hash": None,
+            "packaged": False,
+        }
+    )
+
+
+def _sync_statement_hash(problem_dir: str, state: dict[str, Any]) -> bool:
+    """Detect direct disk edits to the statement file and invalidate statement/audit gates only."""
+    stmt_rel = resolve_statement_rel(problem_dir)
+    cur_stmt = _file_sha256(problem_dir, stmt_rel)
+    prev_hash = state.get("statement_source_hash")
+    if not (isinstance(prev_hash, str) and prev_hash):
+        hashes = state.get("source_hashes")
+        if isinstance(hashes, dict):
+            prev_cand = hashes.get(stmt_rel)
+            if isinstance(prev_cand, str) and prev_cand:
+                prev_hash = prev_cand
+    audit_hash: str | None = None
+    audit_state = get_section(problem_dir, AUDIT)
+    if isinstance(audit_state, dict):
+        full_audit = audit_state.get("full_audit")
+        if isinstance(full_audit, dict):
+            raw_ah = full_audit.get("statement_source_hash")
+            if isinstance(raw_ah, str) and raw_ah:
+                audit_hash = raw_ah
+
+    drifted = False
+    if isinstance(prev_hash, str) and prev_hash and cur_stmt != prev_hash:
+        drifted = True
+    if isinstance(audit_hash, str) and audit_hash and cur_stmt != audit_hash:
+        drifted = True
+    if drifted:
+        _invalidate_statement_only_in_memory(state)
+    return drifted
 

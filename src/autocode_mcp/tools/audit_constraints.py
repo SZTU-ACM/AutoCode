@@ -175,8 +175,36 @@ def _split_call_args(text: str, open_paren_idx: int) -> list[str] | None:
     return None
 
 
+def _clean_symbolic_cpp_bound(raw: str, constants: dict[str, int]) -> str | None:
+    """Normalize a non-constant C++ bound expression into an arithmetic string for SMT parsing."""
+    s = strip_outer_parens(raw)
+    if not s or len(s) > 128:
+        return None
+    # Reject function calls (except simple type casts), array indexing, division, ternary, bitwise
+    s = re.sub(r"\(\s*(?:long\s+long|long|int|int64_t|int32_t|uint64_t|uint32_t|size_t|ll)\s*\)", " ", s)
+    s = s.replace("'", "")
+    s = re.sub(r"\b(\d+)[uUlL]+\b", r"\1", s)
+    if any(ch in s for ch in ("[", "]", "{", "}", "/", "?", ":", "<", ">", "&", "|", "^", "~")):
+        return None
+    if re.search(r"[A-Za-z_]\w*\s*\(", s):
+        return None
+    # Substitute known C++ constants cleanly
+    if constants:
+        def _sub_const(m: re.Match[str]) -> str:
+            ident = m.group(0)
+            return str(constants[ident]) if ident in constants else ident
+
+        s = re.sub(r"\b[A-Za-z_]\w*\b", _sub_const, s)
+    s = " ".join(s.split())
+    if not re.fullmatch(r"[A-Za-z0-9_+\-*() ]+", s):
+        return None
+    if not re.search(r"\b[A-Za-z_]\w*\b", s):
+        return None
+    return s
+
+
 def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
-    """Extract constant upper/lower bounds from testlib inf.readInt/readLong calls in val.cpp."""
+    """Extract constant and symbolic upper/lower bounds from testlib inf.readInt/readLong calls in val.cpp."""
     if not val_path.is_file():
         return []
     try:
@@ -217,13 +245,20 @@ def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
             continue
         lo = _parse_cpp_int_expr(args[0], constants)
         hi = _parse_cpp_int_expr(args[1], constants)
+        lo_expr = _clean_symbolic_cpp_bound(args[0], constants) if lo is None else None
+        hi_expr = _clean_symbolic_cpp_bound(args[1], constants) if hi is None else None
         var: str | None = None
         if len(args) >= 3:
             m_var = re.fullmatch(r'"([^"]*)"', args[2].strip())
             if m_var:
                 var = m_var.group(1).strip() or None
-        if lo is not None or hi is not None:
-            extracted.append({"var": var, "min": lo, "max": hi, "source": "read_scalar"})
+        if lo is not None or hi is not None or lo_expr is not None or hi_expr is not None:
+            entry: dict[str, Any] = {"var": var, "min": lo, "max": hi, "source": "read_scalar"}
+            if lo_expr is not None:
+                entry["min_expr"] = lo_expr
+            if hi_expr is not None:
+                entry["max_expr"] = hi_expr
+            extracted.append(entry)
 
     # 2. Array readers: inf.readInts(n, lo, hi, "a"), inf.readLongs(n, lo, hi, "a")
     for m in re.finditer(r"\binf\.read(?:Ints|Longs|UnsignedLongs)\s*\(", no_comments):
@@ -232,13 +267,20 @@ def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
             continue
         lo = _parse_cpp_int_expr(args[1], constants)
         hi = _parse_cpp_int_expr(args[2], constants)
+        lo_expr = _clean_symbolic_cpp_bound(args[1], constants) if lo is None else None
+        hi_expr = _clean_symbolic_cpp_bound(args[2], constants) if hi is None else None
         var = None
         if len(args) >= 4:
             m_var = re.fullmatch(r'"([^"]*)"', args[3].strip())
             if m_var:
                 var = m_var.group(1).strip() or None
-        if lo is not None or hi is not None:
-            extracted.append({"var": var, "min": lo, "max": hi, "source": "read_array"})
+        if lo is not None or hi is not None or lo_expr is not None or hi_expr is not None:
+            entry_arr: dict[str, Any] = {"var": var, "min": lo, "max": hi, "source": "read_array"}
+            if lo_expr is not None:
+                entry_arr["min_expr"] = lo_expr
+            if hi_expr is not None:
+                entry_arr["max_expr"] = hi_expr
+            extracted.append(entry_arr)
 
     # 3. ensuref / ensure range & sum invariants (e.g. ensuref(1 <= sum_n && sum_n <= 200000, ...))
     for m in re.finditer(r"\bensuref?\s*\(", no_comments):
@@ -255,12 +297,22 @@ def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
                     hi_val = bound if m_le.group(2) == "<=" else bound - 1
                     extracted.append({"var": m_le.group(1), "min": None, "max": hi_val, "source": "ensure"})
                     continue
+                sym = _clean_symbolic_cpp_bound(m_le.group(3), constants)
+                if sym is not None:
+                    sym_hi = sym if m_le.group(2) == "<=" else f"({sym}) - 1"
+                    extracted.append({"var": m_le.group(1), "min": None, "max": None, "max_expr": sym_hi, "source": "ensure"})
+                    continue
             m_ge = re.fullmatch(r"([A-Za-z_]\w*)\s*(>=|>)\s*(.+)", clause)
             if m_ge:
                 bound = _parse_cpp_int_expr(m_ge.group(3), constants)
                 if bound is not None:
                     lo_val = bound if m_ge.group(2) == ">=" else bound + 1
                     extracted.append({"var": m_ge.group(1), "min": lo_val, "max": None, "source": "ensure"})
+                    continue
+                sym = _clean_symbolic_cpp_bound(m_ge.group(3), constants)
+                if sym is not None:
+                    sym_lo = sym if m_ge.group(2) == ">=" else f"({sym}) + 1"
+                    extracted.append({"var": m_ge.group(1), "min": None, "max": None, "min_expr": sym_lo, "source": "ensure"})
                     continue
             m_rev_le = re.fullmatch(r"(.+?)\s*(<=|<)\s*([A-Za-z_]\w*)", clause)
             if m_rev_le:
@@ -269,12 +321,22 @@ def _extract_validator_bounds(val_path: Path) -> list[dict[str, Any]]:
                     lo_val = bound if m_rev_le.group(2) == "<=" else bound + 1
                     extracted.append({"var": m_rev_le.group(3), "min": lo_val, "max": None, "source": "ensure"})
                     continue
+                sym = _clean_symbolic_cpp_bound(m_rev_le.group(1), constants)
+                if sym is not None:
+                    sym_lo = sym if m_rev_le.group(2) == "<=" else f"({sym}) + 1"
+                    extracted.append({"var": m_rev_le.group(3), "min": None, "max": None, "min_expr": sym_lo, "source": "ensure"})
+                    continue
             m_rev_ge = re.fullmatch(r"(.+?)\s*(>=|>)\s*([A-Za-z_]\w*)", clause)
             if m_rev_ge:
                 bound = _parse_cpp_int_expr(m_rev_ge.group(1), constants)
                 if bound is not None:
                     hi_val = bound if m_rev_ge.group(2) == ">=" else bound - 1
                     extracted.append({"var": m_rev_ge.group(3), "min": None, "max": hi_val, "source": "ensure"})
+                    continue
+                sym = _clean_symbolic_cpp_bound(m_rev_ge.group(1), constants)
+                if sym is not None:
+                    sym_hi = sym if m_rev_ge.group(2) == ">=" else f"({sym}) - 1"
+                    extracted.append({"var": m_rev_ge.group(3), "min": None, "max": None, "max_expr": sym_hi, "source": "ensure"})
     return extracted
 
 
