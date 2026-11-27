@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,10 @@ from .verify_fingerprint import _LIMIT_GROUPS, _LIMIT_STRATEGY_TYPES, _VerifyHel
 
 _MIN_STRUCTURAL_DIVERGENCE = 0.15
 _MAX_PARSE_INT_DIGITS = 300
-_MAX_SCALE_INT_DIGITS = 18
+_MAX_SCALE_INT_DIGITS = 20
+_NON_SCALE_PARAM_NAMES = frozenset(
+    {"seed", "rng_seed", "rand_seed", "random_seed", "salt", "hash_seed"}
+)
 _NUMERIC_TOKEN_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _INT_TOKEN_RE = re.compile(r"^[+-]?\d+$")
 
@@ -364,43 +368,43 @@ def _extract_manifest_std_timings(manifest: dict[str, Any]) -> dict[str, float]:
     return timings
 
 
-def _extract_header_int_row(data: str, manifest: AutoCodeManifest | None = None) -> list[int]:
-    """Extract up to 6 leading integer parameters from the effective header line of a test input."""
+def _extract_header_int_row(data: str, manifest: AutoCodeManifest | None = None) -> list[int | None]:
+    """Extract up to 6 leading integer parameters while preserving exact column indices."""
     lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
     if not lines:
         return []
-    line1 = [_parse_int_token(tok) for tok in lines[0].split()[:6]]
-    if any(v is None for v in line1):
-        line1_ints = [v for v in line1 if v is not None]
-        if not line1_ints:
-            return []
-    else:
-        line1_ints = [v for v in line1 if v is not None]
-    if len(line1_ints) == 1 and line1_ints[0] > 0 and len(lines) >= 2:
+    line1_tokens = lines[0].split()
+    line1: list[int | None] = [_parse_int_token(tok) for tok in line1_tokens[:6]]
+    if not any(v is not None for v in line1):
+        return []
+    if len(line1_tokens) == 1 and line1[0] is not None and line1[0] > 0 and len(lines) >= 2:
+        t_val = line1[0]
         line2_toks = lines[1].split()[:6]
-        line2_ints = [v for v in (_parse_int_token(t) for t in line2_toks) if v is not None]
-        if line2_ints and len(line2_ints) == len(line2_toks):
+        line2_raw: list[int | None] = [_parse_int_token(t) for t in line2_toks]
+        if line2_raw and all(v is not None for v in line2_raw):
+            line2_lead = line2_raw[0]
+            assert line2_lead is not None
             if manifest is not None and manifest.multi_test:
-                return line2_ints
+                return line2_raw
             _, n_max = _extract_manifest_primary_bounds(manifest)
-            within_n = n_max is None or line2_ints[0] <= n_max
-            not_arr = not (len(lines) == 2 and line1_ints[0] > 1 and len(lines[1].split()) == line1_ints[0])
-            if within_n and line2_ints[0] > 0 and line1_ints[0] <= 100_000 and len(line2_toks) <= 4 and not_arr:
+            within_n = n_max is None or line2_lead <= n_max
+            not_arr = not (len(lines) == 2 and t_val > 1 and len(lines[1].split()) == t_val)
+            if within_n and line2_lead > 0 and t_val <= 100_000 and len(line2_toks) <= 4 and not_arr:
                 if len(lines) >= 3 and (
-                    line1_ints[0] == 1
-                    or (line1_ints[0] <= 20 and line2_ints[0] > line1_ints[0])
-                    or len(lines) >= 1 + 2 * line1_ints[0]
+                    t_val == 1
+                    or (t_val <= 20 and line2_lead > t_val)
+                    or len(lines) >= 1 + 2 * t_val
                 ):
-                    return line2_ints
-                if manifest is None and line1_ints[0] == 1 and len(line2_toks) <= 2 and line2_ints[0] >= 100:
-                    return line2_ints
-    return line1_ints
+                    return line2_raw
+                if manifest is None and t_val == 1 and len(line2_toks) <= 2 and line2_lead >= 100:
+                    return line2_raw
+    return line1
 
 
 def _check_log_decade_and_joint_regimes(
     *,
     parsed_effective_scales: list[int],
-    header_rows: list[list[int]],
+    header_rows: Sequence[Sequence[int | None]],
     expected_max: int | None,
     total_files: int,
     validator_bounds: list[dict[str, Any]] | None = None,
@@ -471,12 +475,25 @@ def _check_log_decade_and_joint_regimes(
             else "n"
         )
         for col_idx in range(1, min(max_cols, 4)):
-            col_pairs = [(r[0], r[col_idx]) for r in header_rows if len(r) > col_idx]
+            col_pairs: list[tuple[int, int]] = []
+            for r in header_rows:
+                if len(r) > col_idx:
+                    p1_val = r[0]
+                    p2_val = r[col_idx]
+                    if p1_val is not None and p2_val is not None:
+                        col_pairs.append((p1_val, p2_val))
             if len(col_pairs) < 10:
                 continue
             p2_vals = [p2 for _, p2 in col_pairs]
             p2_max = max(p2_vals)
             val_meta = scalar_bounds[col_idx] if col_idx < len(scalar_bounds) else None
+            bound_var_name = (
+                str(val_meta.get("var")).strip().lower()
+                if val_meta and isinstance(val_meta.get("var"), str)
+                else ""
+            )
+            if bound_var_name in _NON_SCALE_PARAM_NAMES or bound_var_name.endswith("_seed"):
+                continue
             val_max_expr = (
                 str(val_meta.get("max_expr")).strip()
                 if val_meta and isinstance(val_meta.get("max_expr"), str)
@@ -928,7 +945,7 @@ class _VerifyStaticChecksMixin(_VerifyHelpersMixin):
         byte_buckets = {"0-100B": 0, "101B-1KB": 0, "1KB-32KB": 0, "32KB+": 0}
         parsed_first_ints: list[int] = []
         parsed_effective_scales: list[int] = []
-        header_rows: list[list[int]] = []
+        header_rows: list[list[int | None]] = []
         for path in in_files:
             resolved = safe_resolve_under_root(tests_dir, path.name)
             if resolved is None:

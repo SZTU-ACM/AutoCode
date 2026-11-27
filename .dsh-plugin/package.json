@@ -1,6 +1,6 @@
 {
   "name": "@autocode/dsh-plugin",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "AutoCode plugin for DeepSeek Harness (dsh) providing competitive programming authoring tools and workflow rules.",
   "type": "module",
   "main": "index.js",
